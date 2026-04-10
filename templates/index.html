@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Affiliate Offer Filte1r</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div>
+        <h1>Affiliate Offer Filte1r</h1>
+        <p>Modern dashboard for Uppromote + Similarweb filtering1</p>
+      </div>
+      <div class="status-chip" id="statusChip">Idle</div>
+    </header>
+
+    <nav class="tabs">
+      <button class="tab-btn active" data-tab="settingsTab">Settings</button>
+      <button class="tab-btn" data-tab="runTab">Run</button>
+      <button class="tab-btn" data-tab="resultsTab">Results</button>
+    </nav>
+
+    <section id="settingsTab" class="tab-panel active">
+      <div class="card">
+        <h2>Environment Settings</h2>
+        <div class="form-grid">
+          <label>APIFY_TOKEN<input id="APIFY_TOKEN" type="password" /></label>
+          <label>UPPROMOTE_API_URL<input id="UPPROMOTE_API_URL" type="text" /></label>
+          <label>UPPROMOTE_BEARER_TOKEN<input id="UPPROMOTE_BEARER_TOKEN" type="password" /></label>
+          <label>UPPROMOTE_MAX_PAGES<input id="UPPROMOTE_MAX_PAGES" type="text" /></label>
+          <label>UPPROMOTE_PAGE_DELAY_MS<input id="UPPROMOTE_PAGE_DELAY_MS" type="text" /></label>
+          <label>UPPROMOTE_PER_PAGE<input id="UPPROMOTE_PER_PAGE" type="text" /></label>
+          <label>APIFY_MAX_DOMAINS_PER_RUN<input id="APIFY_MAX_DOMAINS_PER_RUN" type="text" /></label>
+        </div>
+        <div class="actions">
+          <button class="btn primary" id="saveSettingsBtn">Save Settings</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="runTab" class="tab-panel">
+      <div class="card">
+        <h2>Run Filters</h2>
+        <div class="form-grid compact">
+          <label>Min Traffic<input id="minTraffic" type="number" value="9000" /></label>
+          <label>Start Page<input id="startPage" type="number" min="1" value="1" /></label>
+          <label>End Page<input id="endPage" type="number" min="1" placeholder="Use max pages" /></label>
+          <label>Min Commission %<input id="minCommission" type="number" step="0.01" /></label>
+          <label>Min Cookie Days<input id="minCookie" type="number" step="1" /></label>
+          <label>Currency<input id="currency" type="text" placeholder="USD" /></label>
+          <label>Application Review
+            <select id="applicationReview">
+              <option value="">(All)</option>
+              <option value="auto">auto</option>
+              <option value="manual">manual</option>
+            </select>
+          </label>
+          <label>Min Payout Rate %<input id="minPayoutRate" type="number" step="0.01" /></label>
+          <label>Min Approval Rate %<input id="minApprovalRate" type="number" step="0.01" /></label>
+        </div>
+
+        <div class="actions">
+          <button class="btn primary" id="runBtn">Filter</button>
+          <button class="btn" id="pauseBtn" disabled>Pause</button>
+          <button class="btn danger" id="stopBtn" disabled>Stop</button>
+        </div>
+
+        <div class="progress-wrap">
+          <div class="progress-bar"><div id="progressInner"></div></div>
+          <span id="progressText">0%</span>
+        </div>
+
+        <div class="log-box" id="logBox"></div>
+      </div>
+    </section>
+
+    <section id="resultsTab" class="tab-panel">
+      <div class="card">
+        <div class="results-head">
+          <h2>Result Files</h2>
+          <button class="btn" id="refreshResultsBtn">Refresh</button>
+        </div>
+        <p class="muted">Each run creates a new CSV file. Download from the list below.</p>
+        <div class="file-list" id="resultFileList">
+          <!-- file rows -->
+        </div>
+      </div>
+    </section>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,62 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+.env
+.venv/
+venv/
+env/
+
+# Environment variables
+.env.*
+!.env.python.example
+
+# Build / distribution
+build/
+dist/
+*.spec
+
+# Logs & temp files
+*.log
+*.tmp
+
+# CSV output (file kết quả)
+result*.csv
+
+# JSON output cache
+*offers-last.json
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Static compiled files (nếu build lại được)
+static/
+
+# Node (nếu có dùng frontend)
+node_modules/
+
+# Flask / Web cache
+instance/
+.webassets-cache
+
+# Testing
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Packaging
+*.egg-info/
+.eggs/
+
+# Misc
+*.bak
+*.old

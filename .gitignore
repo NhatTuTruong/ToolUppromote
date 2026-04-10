@@ -38,8 +38,7 @@ Thumbs.db
 *.swp
 *.swo
 
-# Static compiled files (nếu build lại được)
-static/
+
 
 # Node (nếu có dùng frontend)
 node_modules/

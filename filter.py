@@ -51,6 +51,82 @@ def host_key(raw: str) -> str:
     return value
 
 
+def parse_visits_value(raw) -> float:
+    """Chuyển Visits từ Apify (số, chuỗi có dấu phẩy, đôi khi dạng 1.2M) sang float."""
+    if raw is None:
+        return 0.0
+    if isinstance(raw, bool):
+        return 0.0
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    if isinstance(raw, str):
+        s = raw.replace(",", "").replace("\u00a0", " ").strip()
+        if not s:
+            return 0.0
+        s_lower = s.lower().strip()
+        for suf, mul in (("k", 1e3), ("m", 1e6), ("b", 1e9)):
+            if s_lower.endswith(suf) and len(s_lower) > 1:
+                try:
+                    return float(s_lower[:-1].strip()) * mul
+                except ValueError:
+                    break
+        try:
+            return float(s)
+        except ValueError:
+            return 0.0
+    return 0.0
+
+
+def apify_site_field(item: dict) -> str:
+    """Tên site/domain trong item Apify (nhiều actor đặt tên khác nhau)."""
+    if not item:
+        return ""
+    return (
+        item.get("SiteName")
+        or item.get("siteName")
+        or item.get("Domain")
+        or item.get("domain")
+        or ""
+    )
+
+
+def engagement_from_item(item: dict) -> dict:
+    """Khối engagement / hoặc Visits nằm ngang item."""
+    if not item:
+        return {}
+    eng = item.get("Engagments") or item.get("Engagements") or item.get("engagement")
+    if isinstance(eng, dict) and eng:
+        return eng
+    if item.get("Visits") is not None or item.get("VisitsFormatted") is not None:
+        return item
+    return {}
+
+
+def parse_visits_from_engagement(eng: dict) -> float:
+    if not eng:
+        return 0.0
+    raw = eng.get("Visits")
+    if raw is None:
+        raw = eng.get("EstimatedVisits") or eng.get("Traffic") or eng.get("MonthlyVisits")
+    return parse_visits_value(raw)
+
+
+def lookup_apify_item(url: str, by_host: dict) -> dict:
+    """Ghép offer URL với bản ghi Apify (khớp host + quét fallback)."""
+    if not by_host:
+        return {}
+    k = host_key(url)
+    if not k:
+        return {}
+    if k in by_host:
+        return by_host[k]
+    for item in by_host.values():
+        sk = host_key(apify_site_field(item))
+        if sk and sk == k:
+            return item
+    return {}
+
+
 def normalize_bearer(raw: str) -> str:
     if raw is None:
         return ""
@@ -70,6 +146,21 @@ def build_uppromote_headers() -> dict:
         "authorization": f"Bearer {token}",
         "user-agent": os.getenv(
             "UPPROMOTE_USER_AGENT",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+        ),
+    }
+
+
+def build_goaffpro_headers() -> dict:
+    token = normalize_bearer(os.getenv("GOAFFPRO_BEARER_TOKEN", ""))
+    if not token:
+        raise RuntimeError("Thiếu GOAFFPRO_BEARER_TOKEN trong .env")
+    return {
+        "accept": "application/json",
+        "authorization": f"Bearer {token}",
+        "user-agent": os.getenv(
+            "GOAFFPRO_USER_AGENT",
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
         ),
@@ -113,6 +204,416 @@ def fetch_uppromote_offer_detail(shop_id) -> dict:
     if body.get("status") not in (200, "200"):
         raise RuntimeError(f"Uppromote detail API lỗi: {text[:300]}")
     return body.get("data") or {}
+
+
+def with_goaffpro_paging(url: str, offset: int, limit: int) -> str:
+    parsed = urlparse(url)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    query["limit"] = str(limit)
+    query["offset"] = str(offset)
+    new_query = urlencode(query, doseq=True)
+    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
+
+
+def _portal_string(store: dict) -> str:
+    raw = (
+        store.get("affiliatePortal")
+        or store.get("affiliate_portal")
+        or store.get("AffiliatePortal")
+        or ""
+    )
+    if raw is None:
+        return ""
+    if not isinstance(raw, str):
+        raw = str(raw)
+    return raw.strip()
+
+
+def goaffpro_apply_url(store: dict) -> str:
+    """Base URL https://{token}.goaffpro.com từ chuỗi affiliatePortal (mọi biến thể API)."""
+    portal = _portal_string(store)
+    if not portal:
+        return ""
+    # Đã là URL đầy đủ
+    m = re.search(r"https?://([a-z0-9_-]+)\.goaffpro\.com/?", portal, re.I)
+    if m:
+        return f"https://{m.group(1).lower()}.goaffpro.com"
+    # {goaffpro_public_token:xxx,...}.goaffpro.com
+    m = re.search(r"goaffpro_public_token:\s*([^,}\s]+)", portal, re.I)
+    if m:
+        token = m.group(1).strip()
+        if token:
+            return f"https://{token}.goaffpro.com"
+    # Token chỉ có chữ/số trước .goaffpro.com (một số response rút gọn)
+    m = re.search(r"\b([a-z0-9_-]{2,64})\.goaffpro\.com\b", portal, re.I)
+    if m:
+        return f"https://{m.group(1).lower()}.goaffpro.com"
+    return ""
+
+
+def affiliate_portal_raw_from_offer(offer: dict) -> str:
+    return (
+        (offer.get("goaff_affiliate_portal") or "").strip()
+        or (offer.get("affiliatePortal") or "").strip()
+        or (offer.get("affiliate_portal") or "").strip()
+    )
+
+
+def goaff_create_account_url(offer: dict) -> str:
+    """Chỉ từ affiliatePortal (API): https://sub.goaffpro.com/create-account — không dùng website."""
+    portal_raw = affiliate_portal_raw_from_offer(offer)
+    if not portal_raw:
+        return ""
+    base = goaffpro_apply_url({"affiliatePortal": portal_raw}).strip().rstrip("/")
+    if not base:
+        return ""
+    if base.endswith("/create-account"):
+        return base
+    return f"{base}/create-account"
+
+
+def format_goaff_commission_amount_display(offer: dict) -> str:
+    """Số tiền HH kèm đơn vị: % hoặc tiền tệ ($, …) theo loại hoa hồng."""
+    raw = offer.get("goaff_commission_amount")
+    if raw is None or raw == "":
+        return ""
+    typ = (offer.get("goaff_commission_type") or "").strip().lower()
+    cur = (offer.get("currency") or "").strip().upper()
+    try:
+        num = float(raw)
+    except (TypeError, ValueError):
+        return str(raw)
+    if typ == "percentage" or "percent" in typ:
+        return f"{num:g}%"
+    if typ in ("fixed", "flat", "amount") or "fixed" in typ:
+        if cur == "USD":
+            return f"${num:g}"
+        if cur == "EUR":
+            return f"€{num:g}"
+        if cur == "GBP":
+            return f"£{num:g}"
+        if cur == "VND":
+            return f"{num:,.0f} ₫"
+        if cur:
+            return f"{num:g} {cur}"
+        return f"${num:g}"
+    if cur == "USD":
+        return f"${num:g}"
+    if cur:
+        return f"{num:g} {cur}"
+    return f"{num:g}"
+
+
+def fmt_yes_no_01(val) -> str:
+    if val in (1, "1", True):
+        return "Có"
+    if val in (0, "0", False):
+        return "Không"
+    return ""
+
+
+def cookie_days_from_goaffpro(raw) -> str | int | float:
+    if raw is None:
+        return ""
+    try:
+        v = float(raw)
+    except Exception:
+        return ""
+    if v > 86400 * 2:
+        days = v / 86400.0
+        return int(days) if days == int(days) else round(days, 2)
+    return int(v) if v == int(v) else v
+
+
+def commission_str_goaffpro(comm: dict | None) -> str:
+    if not isinstance(comm, dict):
+        return ""
+    typ = (comm.get("type") or "").lower()
+    amount = comm.get("amount")
+    on = (comm.get("on") or "").strip()
+    if typ == "percentage" and amount is not None:
+        base = f"{amount}%"
+        return f"{base} ({on})" if on else base
+    if amount is not None:
+        extra = f" {typ}" if typ else ""
+        on_part = f" on {on}" if on else ""
+        return f"{amount}{extra}{on_part}".strip()
+    return ""
+
+
+def commission_type_goaffpro(comm: dict | None) -> str:
+    if not isinstance(comm, dict):
+        return ""
+    parts = [str(comm.get("type") or "").strip(), str(comm.get("on") or "").strip()]
+    return " ".join(p for p in parts if p)
+
+
+def map_goaffpro_store(store: dict) -> dict:
+    website = store.get("website")
+    url = website.strip() if isinstance(website, str) and website.strip() else ""
+    name_raw = store.get("name")
+    brand = ""
+    if isinstance(name_raw, str) and name_raw.strip() and not name_raw.strip().lower().startswith("http"):
+        brand = name_raw.strip()
+    elif url:
+        hk = host_key(url)
+        brand = hk.replace(".", " ").title() if hk else url
+    comm = store.get("commission") if isinstance(store.get("commission"), dict) else {}
+    app_auto = store.get("isApprovedAutomatically")
+    if app_auto == 1:
+        application_review = "auto"
+    elif app_auto == 0:
+        application_review = "manual"
+    else:
+        application_review = ""
+    return {
+        "brand": brand,
+        "url": url,
+        "offer": commission_str_goaffpro(comm),
+        "cookieDays": cookie_days_from_goaffpro(store.get("cookieDuration")),
+        "client_url": goaffpro_apply_url(store) or "",
+        "offer_id": store.get("id") or "",
+        "shop_id": store.get("id") or "",
+        "program_id": "",
+        "mkp_listing_id": store.get("id") or "",
+        "commission_type": commission_type_goaffpro(comm),
+        "category": "",
+        "epc": "",
+        "payments": "",
+        "currency": store.get("currency") or "",
+        "payout_rate": "",
+        "approval_rate": "",
+        "offer_score": "",
+        "recommend_score": "",
+        "application_review": application_review,
+        "promotion_details": [],
+        "target_audience_customer_channels": [],
+        "target_audience_locations": [],
+        "target_audience_ages": [],
+        "target_audience_genders": [],
+        "can_apply_offer": None,
+        "is_applied_offer": None,
+        # Raw Goaff API fields (CSV / snapshot)
+        "goaff_id": store.get("id", ""),
+        "goaff_name": (name_raw.strip() if isinstance(name_raw, str) else "") or "",
+        "goaff_logo": store.get("logo") or "",
+        "goaff_affiliate_portal": _portal_string(store),
+        "goaff_cookie_duration_sec": store.get("cookieDuration", ""),
+        "goaff_are_registrations_open": store.get("areRegistrationsOpen", ""),
+        "goaff_is_approved_automatically": store.get("isApprovedAutomatically", ""),
+        "goaff_commission_type": comm.get("type", "") if comm else "",
+        "goaff_commission_amount": comm.get("amount", "") if comm else "",
+        "goaff_commission_on": comm.get("on", "") if comm else "",
+    }
+
+
+# Trạng thái traffic so với ngưỡng (CSV + log)
+STATUS_TRAFFIC_OK = "ĐẠT"
+STATUS_TRAFFIC_FAIL = "CHƯA ĐẠT"
+
+# CSV Uppromote (tiếng Việt)
+UPPROMOTE_CSV_HEADER_VI = [
+    "Trạng thái",
+    "Thương hiệu",
+    "Website",
+    "URL apply",
+    "Hoa hồng",
+    "Ngày cookie",
+    "Danh mục",
+    "Traffic (hiển thị)",
+    "Traffic (số)",
+    "Trang/lượt xem",
+    "Tỷ lệ thoát",
+    "Top quốc gia",
+    "Top từ khóa",
+    "Tiền tệ",
+    "Tỷ lệ thanh toán",
+    "Tỷ lệ duyệt",
+    "Điểm offer",
+    "Điểm gợi ý",
+    "Duyệt đơn",
+    "Chu kỳ thanh toán",
+    "Chi tiết khuyến mãi",
+    "Kênh được phép",
+    "Đối tượng vị trí",
+    "Đối tượng độ tuổi",
+    "Đối tượng giới",
+    "Có thể apply",
+    "Đã apply",
+    "Offer ID",
+    "Shop ID",
+    "Program ID",
+    "Marketplace Listing ID",
+    "EPC (TB/đơn)",
+]
+
+# CSV Goaff: chỉ cột Similarweb (Apify) + trường có trong API Goaff (không cột Uppromote rỗng)
+GOAFF_CSV_HEADER = [
+    "Trạng thái",
+    "Thương hiệu",
+    "Website",
+    "Số tiền HH",
+    "Ngày cookie",
+    "Traffic (hiển thị)",
+    "Link đăng ký",
+    "Trang/lượt xem",
+    "Tỷ lệ thoát",
+    "Top quốc gia",
+    "Top từ khóa",
+    "Tiền tệ",
+    "ID cửa hàng",
+    "Tên (API)",
+    "Đăng ký mở",
+    "Duyệt tự động",
+    "Loại hoa hồng",
+    "Hoa hồng trên",
+]
+
+
+def build_uppromote_csv_row_vi(offer: dict, item: dict, status: str) -> list:
+    eng = engagement_from_item(item)
+    visits = parse_visits_from_engagement(eng)
+    visits_raw = int(visits) if visits.is_integer() else visits
+    return [
+        status,
+        offer.get("brand", ""),
+        offer.get("url", ""),
+        offer.get("client_url", ""),
+        offer.get("offer", ""),
+        offer.get("cookieDays", ""),
+        offer.get("category", ""),
+        eng.get("VisitsFormatted", ""),
+        visits_raw,
+        eng.get("PagePerVisit", ""),
+        eng.get("BounceRate", ""),
+        top_countries_csv(item.get("TopCountryShares") or []),
+        top_keywords_csv(keyword_shares_from_item(item)),
+        offer.get("currency", ""),
+        offer.get("payout_rate", ""),
+        offer.get("approval_rate", ""),
+        offer.get("offer_score", ""),
+        offer.get("recommend_score", ""),
+        offer.get("application_review", ""),
+        offer.get("payments", ""),
+        join_list(offer.get("promotion_details")),
+        join_list(offer.get("target_audience_customer_channels")),
+        join_list(offer.get("target_audience_locations")),
+        join_list(offer.get("target_audience_ages")),
+        join_list(offer.get("target_audience_genders")),
+        offer.get("can_apply_offer", ""),
+        offer.get("is_applied_offer", ""),
+        offer.get("offer_id", ""),
+        offer.get("shop_id", ""),
+        offer.get("program_id", ""),
+        offer.get("mkp_listing_id", ""),
+        offer.get("epc", ""),
+    ]
+
+
+def build_goaff_csv_row(offer: dict, item: dict, status: str) -> list:
+    url = offer.get("url", "")
+    eng = engagement_from_item(item)
+    return [
+        status,
+        offer.get("brand", ""),
+        url,
+        format_goaff_commission_amount_display(offer),
+        offer.get("cookieDays", ""),
+        eng.get("VisitsFormatted", ""),
+        goaff_create_account_url(offer),
+        eng.get("PagePerVisit", ""),
+        eng.get("BounceRate", ""),
+        top_countries_csv(item.get("TopCountryShares") or []),
+        top_keywords_csv(keyword_shares_from_item(item)),
+        offer.get("currency", ""),
+        offer.get("goaff_id", ""),
+        offer.get("goaff_name", ""),
+        fmt_yes_no_01(offer.get("goaff_are_registrations_open")),
+        fmt_yes_no_01(offer.get("goaff_is_approved_automatically")),
+        offer.get("goaff_commission_type", ""),
+        offer.get("goaff_commission_on", ""),
+    ]
+
+
+def write_xlsx_highlight_status(path: Path, header: list, rows: list, status_col: int = 0) -> None:
+    """Ghi file Excel: dòng có trạng thái ĐẠT (hoặc GET) được tô nền xanh lá nhạt."""
+    from openpyxl import Workbook
+    from openpyxl.styles import PatternFill
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(list(header))
+    green = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+    ok_values = {STATUS_TRAFFIC_OK, "GET", "ĐẠT"}
+    for row in rows:
+        cells = list(row)
+        ws.append(cells)
+        r = ws.max_row
+        if len(cells) > status_col and str(cells[status_col]).strip() in ok_values:
+            for c in range(1, len(cells) + 1):
+                ws.cell(row=r, column=c).fill = green
+    wb.save(path)
+
+
+def fetch_goaffpro_page(base_url: str, offset: int, limit: int) -> dict:
+    request_url = with_goaffpro_paging(base_url, offset, limit)
+    res = requests.get(request_url, headers=build_goaffpro_headers(), timeout=60)
+    text = res.text
+    try:
+        body = res.json()
+    except Exception as exc:
+        raise RuntimeError(f"Goaffpro parse JSON lỗi (HTTP {res.status_code}): {text[:180]}") from exc
+    if not res.ok:
+        raise RuntimeError(f"Goaffpro HTTP {res.status_code}: {text[:300]}")
+    return body if isinstance(body, dict) else {}
+
+
+def fetch_all_goaffpro_offers() -> list:
+    base_url = (os.getenv("GOAFFPRO_API_URL") or "").strip()
+    if not base_url:
+        raise RuntimeError("Thiếu GOAFFPRO_API_URL trong .env")
+
+    limit = int(os.getenv("GOAFFPRO_LIMIT", "50") or "50")
+    max_pages = int(os.getenv("GOAFFPRO_MAX_PAGES", "100") or "100")
+    delay_ms = int(os.getenv("GOAFFPRO_PAGE_DELAY_MS", "250") or "250")
+
+    all_stores = []
+    page = 1
+    while True:
+        offset = (page - 1) * limit
+        print(f"Goaffpro: tải offset={offset} (trang {page})...")
+        body = fetch_goaffpro_page(base_url, offset, limit)
+        page_items = body.get("stores") or []
+        if not isinstance(page_items, list):
+            page_items = []
+
+        if not page_items:
+            print(f"Goaffpro: không còn store — kết thúc phân trang.")
+            break
+
+        all_stores.extend(page_items)
+        print(f"Goaffpro: +{len(page_items)} store (lũy kế {len(all_stores)})")
+
+        if page >= max_pages:
+            print(f"Goaffpro: dừng vì GOAFFPRO_MAX_PAGES={max_pages}")
+            break
+
+        total_count = body.get("count")
+        try:
+            total_n = int(total_count) if total_count is not None else None
+        except Exception:
+            total_n = None
+        if total_n is not None and offset + len(page_items) >= total_n:
+            break
+
+        if len(page_items) < limit:
+            break
+
+        page += 1
+        if delay_ms > 0:
+            time.sleep(delay_ms / 1000)
+
+    return [map_goaffpro_store(s) for s in all_stores]
 
 
 def map_uppromote_offer(offer: dict, detail: dict | None = None) -> dict:
@@ -432,7 +933,7 @@ def main():
 
     by_host = {}
     for item in items:
-        site = item.get("SiteName") or item.get("siteName")
+        site = apify_site_field(item)
         key = host_key(site)
         if key:
             by_host[key] = item
@@ -477,7 +978,7 @@ def main():
     try:
         csv_handle = out_path.open("w", encoding="utf-8", newline="")
     except PermissionError:
-        fallback = BASE_DIR / f"result-{int(time.time())}.csv"
+        fallback = BASE_DIR / f"uppromote_{int(time.time())}.csv"
         print(f"Cảnh báo: {out_path.name} đang bị khóa, ghi sang {fallback.name}")
         out_path = fallback
         csv_handle = out_path.open("w", encoding="utf-8", newline="")
@@ -491,15 +992,10 @@ def main():
             brand = offer.get("brand", "")
             url = offer.get("url", "")
             key = host_key(url)
-            item = by_host.get(key, {})
-            eng = item.get("Engagments") or item.get("Engagements") or {}
-
-            visits_raw = eng.get("Visits", 0)
-            try:
-                visits = float(visits_raw)
-            except Exception:
-                visits = 0
-            status = "GET" if visits > MIN_VISITS else "NO"
+            item = lookup_apify_item(url, by_host)
+            eng = engagement_from_item(item)
+            visits = parse_visits_from_engagement(eng)
+            status = "GET" if visits >= float(MIN_VISITS) else "NO"
 
             commission_str = str(offer.get("offer", "") or "")
 

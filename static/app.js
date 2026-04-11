@@ -5,19 +5,57 @@ const state = {
 
 const settingKeys = [
   "APIFY_TOKEN",
+  "APIFY_MAX_DOMAINS_PER_RUN",
   "UPPROMOTE_API_URL",
   "UPPROMOTE_BEARER_TOKEN",
   "UPPROMOTE_MAX_PAGES",
   "UPPROMOTE_PAGE_DELAY_MS",
   "UPPROMOTE_PER_PAGE",
-  "APIFY_MAX_DOMAINS_PER_RUN",
+  "GOAFFPRO_API_URL",
+  "GOAFFPRO_BEARER_TOKEN",
+  "GOAFFPRO_LIMIT",
+  "GOAFFPRO_MAX_PAGES",
+  "GOAFFPRO_PAGE_DELAY_MS",
+];
+
+/** Đồng bộ khi đổi tab — không gồm minTraffic (để hai tab không ghi đè ngưỡng traffic). */
+const FILTER_SYNC_PAIRS = [
+  ["startPage", "startPageGp"],
+  ["endPage", "endPageGp"],
+  ["minCommission", "minCommissionGp"],
+  ["minCookie", "minCookieGp"],
+  ["currency", "currencyGp"],
+  ["applicationReview", "applicationReviewGp"],
 ];
 
 function $(id) {
   return document.getElementById(id);
 }
 
-function switchTab(tabId) {
+function syncFiltersToGoaffpro() {
+  FILTER_SYNC_PAIRS.forEach(([a, b]) => {
+    const ela = $(a);
+    const elb = $(b);
+    if (ela && elb) elb.value = ela.value;
+  });
+}
+
+function syncFiltersToUppromote() {
+  FILTER_SYNC_PAIRS.forEach(([a, b]) => {
+    const ela = $(a);
+    const elb = $(b);
+    if (ela && elb) ela.value = elb.value;
+  });
+}
+
+function switchTab(tabId, fromUser = false) {
+  if (fromUser) {
+    if (tabId === "runGoaffproTab") {
+      syncFiltersToGoaffpro();
+    } else if (tabId === "runUppromoteTab") {
+      syncFiltersToUppromote();
+    }
+  }
   document.querySelectorAll(".tab-btn").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.tab === tabId);
   });
@@ -45,18 +83,40 @@ async function saveSettings() {
     body: JSON.stringify(payload),
   });
   if (!res.ok) {
-    alert("Failed to save settings");
+    alert("Không lưu được cài đặt.");
     return;
   }
-  alert("Settings saved");
+  alert("Đã lưu cài đặt.");
 }
 
 function appendLogs(lines) {
-  const box = $("logBox");
-  lines.forEach((line) => {
-    box.textContent += line + "\n";
+  const boxes = [logBox(), logBoxGp()].filter(Boolean);
+  boxes.forEach((box) => {
+    lines.forEach((line) => {
+      box.textContent += line + "\n";
+    });
+    box.scrollTop = box.scrollHeight;
   });
-  box.scrollTop = box.scrollHeight;
+}
+
+function logBox() {
+  return $("logBox");
+}
+
+function logBoxGp() {
+  return $("logBoxGp");
+}
+
+function setProgress(pct) {
+  const v = Math.max(0, Math.min(100, pct || 0));
+  const inner = $("progressInner");
+  const innerGp = $("progressInnerGp");
+  const tx = $("progressText");
+  const txGp = $("progressTextGp");
+  if (inner) inner.style.width = `${v}%`;
+  if (innerGp) innerGp.style.width = `${v}%`;
+  if (tx) tx.textContent = `${Math.round(v)}%`;
+  if (txGp) txGp.textContent = `${Math.round(v)}%`;
 }
 
 async function pollStatus() {
@@ -67,13 +127,24 @@ async function pollStatus() {
   const st = await stRes.json();
   const lg = await lgRes.json();
 
-  $("statusChip").textContent = st.status || "Idle";
-  $("progressInner").style.width = `${Math.max(0, Math.min(100, st.progress || 0))}%`;
-  $("progressText").textContent = `${Math.round(st.progress || 0)}%`;
-  $("pauseBtn").disabled = !st.running;
-  $("stopBtn").disabled = !st.running;
-  $("runBtn").disabled = st.running;
-  $("pauseBtn").textContent = st.paused ? "Resume" : "Pause";
+  $("statusChip").textContent = st.status || "Rảnh";
+  setProgress(st.progress || 0);
+
+  const pauseBtns = [$("pauseBtn"), $("pauseBtnGp")].filter(Boolean);
+  const stopBtns = [$("stopBtn"), $("stopBtnGp")].filter(Boolean);
+  const runUp = $("runBtnUppromote");
+  const runGp = $("runBtnGoaffpro");
+  pauseBtns.forEach((b) => {
+    b.disabled = !st.running;
+  });
+  stopBtns.forEach((b) => {
+    b.disabled = !st.running;
+  });
+  pauseBtns.forEach((b) => {
+    b.textContent = st.paused ? "Tiếp tục" : "Tạm dừng";
+  });
+  if (runUp) runUp.disabled = st.running;
+  if (runGp) runGp.disabled = st.running;
 
   if (lg.logs && lg.logs.length) appendLogs(lg.logs);
   state.logCursor = lg.total || state.logCursor;
@@ -85,12 +156,18 @@ async function pollStatus() {
   }
 }
 
-async function runFilter() {
-  const settings = {};
-  settingKeys.forEach((k) => {
-    settings[k] = ($(k)?.value || "").trim();
-  });
-  const filters = {
+function collectFilters(source) {
+  if (source === "goaffpro") {
+    return {
+      start_page: $("startPageGp").value.trim(),
+      end_page: $("endPageGp").value.trim(),
+      min_commission: $("minCommissionGp").value.trim(),
+      min_cookie: $("minCookieGp").value.trim(),
+      currency: $("currencyGp").value.trim(),
+      application_review: $("applicationReviewGp").value.trim(),
+    };
+  }
+  return {
     start_page: $("startPage").value.trim(),
     end_page: $("endPage").value.trim(),
     min_commission: $("minCommission").value.trim(),
@@ -100,25 +177,41 @@ async function runFilter() {
     min_payout_rate: $("minPayoutRate").value.trim(),
     min_approval_rate: $("minApprovalRate").value.trim(),
   };
-  const minTraffic = Number($("minTraffic").value || "9000");
+}
 
-  $("logBox").textContent = "";
+function minTrafficFor(source) {
+  const v = source === "goaffpro" ? $("minTrafficGp")?.value : $("minTraffic")?.value;
+  return Number(v || "9000");
+}
+
+async function runFilter(source) {
+  const settings = {};
+  settingKeys.forEach((k) => {
+    settings[k] = ($(k)?.value || "").trim();
+  });
+  const filters = collectFilters(source);
+  const minTraffic = minTrafficFor(source);
+
+  const boxes = [logBox(), logBoxGp()].filter(Boolean);
+  boxes.forEach((box) => {
+    box.textContent = "";
+  });
   state.logCursor = 0;
   const res = await fetch("/api/run", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ settings, filters, min_traffic: minTraffic }),
+    body: JSON.stringify({ settings, filters, min_traffic: minTraffic, source }),
   });
   if (!res.ok) {
     const er = await res.json().catch(() => ({}));
-    alert(er.error || "Failed to start");
+    alert(er.error || "Không thể bắt đầu chạy.");
     return;
   }
   if (!state.pollTimer) {
     state.pollTimer = setInterval(pollStatus, 500);
   }
   await pollStatus();
-  switchTab("runTab");
+  switchTab(source === "goaffpro" ? "runGoaffproTab" : "runUppromoteTab");
 }
 
 async function togglePause() {
@@ -141,10 +234,10 @@ async function loadResults() {
     row.className = "file-row";
     const dt = new Date((f.modified || 0) * 1000);
     row.innerHTML = `
-      <a class="btn sm primary" href="/api/download/${encodeURIComponent(f.name)}">Download</a>
+      <a class="btn sm primary" href="/api/download/${encodeURIComponent(f.name)}">Tải xuống</a>
       <div>${f.name}</div>
-      <div class="file-meta">${(f.size || 0).toLocaleString()} bytes</div>
-      <div class="file-meta">${isNaN(dt.getTime()) ? "" : dt.toLocaleString()}</div>
+      <div class="file-meta">${(f.size || 0).toLocaleString("vi-VN")} byte</div>
+      <div class="file-meta">${isNaN(dt.getTime()) ? "" : dt.toLocaleString("vi-VN")}</div>
     `;
     list.appendChild(row);
   });
@@ -152,12 +245,19 @@ async function loadResults() {
 
 function bindEvents() {
   document.querySelectorAll(".tab-btn").forEach((btn) => {
-    btn.addEventListener("click", () => switchTab(btn.dataset.tab));
+    btn.addEventListener("click", () => switchTab(btn.dataset.tab, true));
   });
   $("saveSettingsBtn").addEventListener("click", saveSettings);
-  $("runBtn").addEventListener("click", runFilter);
-  $("pauseBtn").addEventListener("click", togglePause);
-  $("stopBtn").addEventListener("click", stopRun);
+  $("runBtnUppromote").addEventListener("click", () => runFilter("uppromote"));
+  $("runBtnGoaffpro").addEventListener("click", () => runFilter("goaffpro"));
+  ["pauseBtn", "pauseBtnGp"].forEach((id) => {
+    const el = $(id);
+    if (el) el.addEventListener("click", togglePause);
+  });
+  ["stopBtn", "stopBtnGp"].forEach((id) => {
+    const el = $(id);
+    if (el) el.addEventListener("click", stopRun);
+  });
   $("refreshResultsBtn").addEventListener("click", loadResults);
 }
 

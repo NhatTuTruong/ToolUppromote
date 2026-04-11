@@ -37,9 +37,78 @@ class RunControl:
         return self.stop_event.is_set()
 
 
+ENV_SAVE_KEY_ORDER = [
+    "APIFY_TOKEN",
+    "APIFY_MAX_DOMAINS_PER_RUN",
+    "UPPROMOTE_API_URL",
+    "UPPROMOTE_BEARER_TOKEN",
+    "UPPROMOTE_MAX_PAGES",
+    "UPPROMOTE_PAGE_DELAY_MS",
+    "UPPROMOTE_PER_PAGE",
+    "GOAFFPRO_API_URL",
+    "GOAFFPRO_BEARER_TOKEN",
+    "GOAFFPRO_LIMIT",
+    "GOAFFPRO_MAX_PAGES",
+    "GOAFFPRO_PAGE_DELAY_MS",
+    "MIN_VISITS",
+]
+
+SECRET_ENV_KEYS = frozenset({"APIFY_TOKEN", "UPPROMOTE_BEARER_TOKEN", "GOAFFPRO_BEARER_TOKEN"})
+
+
+def _parse_env_file_to_dict(path: Path) -> dict:
+    out = {}
+    if not path.exists():
+        return out
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, val = line.split("=", 1)
+        k = key.strip()
+        v = val.strip()
+        if (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
+            v = v[1:-1]
+        out[k] = v
+    return out
+
+
 def save_env(values: dict):
-    lines = [f"{k}={v}" for k, v in values.items()]
-    ENV_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    """Ghi .env: merge với file cũ; không ghi đè token/secret bằng chuỗi rỗng."""
+    merged = _parse_env_file_to_dict(ENV_PATH)
+    for k, v in values.items():
+        vs = str(v).strip() if v is not None else ""
+        if k in SECRET_ENV_KEYS and not vs:
+            continue
+        merged[k] = vs
+    keys_out = [k for k in ENV_SAVE_KEY_ORDER if k in merged]
+    for k in sorted(merged.keys()):
+        if k not in keys_out:
+            keys_out.append(k)
+    ENV_PATH.write_text("\n".join(f"{k}={merged[k]}" for k in keys_out) + "\n", encoding="utf-8")
+
+
+def apply_settings_for_run(settings: dict):
+    """Áp settings cho worker: token/secret rỗng → lấy từ file .env (không ghi đè bằng rỗng)."""
+    disk = _parse_env_file_to_dict(ENV_PATH)
+    for k, v in settings.items():
+        s = str(v).strip() if v is not None else ""
+        if k in SECRET_ENV_KEYS:
+            if s:
+                os.environ[k] = s
+            else:
+                dv = (disk.get(k) or "").strip()
+                if dv:
+                    os.environ[k] = dv
+        else:
+            os.environ[k] = s
+
+
+def row_is_dat(offer: dict, filters: dict, source: str, visits: float, min_traffic: float) -> bool:
+    """ĐẠT chỉ khi mọi điều kiện lọc + traffic đều thỏa."""
+    if not offer_passes_filters(offer, filters, source):
+        return False
+    return visits >= float(min_traffic)
 
 
 def load_env_defaults():
@@ -51,6 +120,14 @@ def load_env_defaults():
         "UPPROMOTE_MAX_PAGES": os.getenv("UPPROMOTE_MAX_PAGES", "5"),
         "UPPROMOTE_PAGE_DELAY_MS": os.getenv("UPPROMOTE_PAGE_DELAY_MS", "250"),
         "UPPROMOTE_PER_PAGE": os.getenv("UPPROMOTE_PER_PAGE", "50"),
+        "GOAFFPRO_API_URL": os.getenv(
+            "GOAFFPRO_API_URL",
+            "https://api-server-3.goaffpro.com/v1/public/sites?keyword=&country=&currency=&category=",
+        ),
+        "GOAFFPRO_BEARER_TOKEN": os.getenv("GOAFFPRO_BEARER_TOKEN", ""),
+        "GOAFFPRO_LIMIT": os.getenv("GOAFFPRO_LIMIT", "50"),
+        "GOAFFPRO_MAX_PAGES": os.getenv("GOAFFPRO_MAX_PAGES", "100"),
+        "GOAFFPRO_PAGE_DELAY_MS": os.getenv("GOAFFPRO_PAGE_DELAY_MS", "250"),
         "APIFY_MAX_DOMAINS_PER_RUN": os.getenv("APIFY_MAX_DOMAINS_PER_RUN", "50"),
     }
 
@@ -91,13 +168,14 @@ def extract_commission_percent(value) -> float | None:
         return None
 
 
-def offer_passes_filters(offer: dict, filters: dict) -> bool:
+def offer_passes_filters(offer: dict, filters: dict, source: str = "uppromote") -> bool:
     min_commission = parse_number(filters.get("min_commission"))
     min_cookie = parse_number(filters.get("min_cookie"))
     currency = (filters.get("currency") or "").strip().upper()
     app_review = (filters.get("application_review") or "").strip().lower()
     min_payout_rate = parse_number(filters.get("min_payout_rate"))
     min_approval_rate = parse_number(filters.get("min_approval_rate"))
+    is_goaff = (source or "").lower() == "goaffpro"
 
     if min_commission is not None:
         c = extract_commission_percent(offer.get("offer"))
@@ -118,20 +196,20 @@ def offer_passes_filters(offer: dict, filters: dict) -> bool:
         review = str(offer.get("application_review") or "").strip().lower()
         if review != app_review:
             return False
-    if min_payout_rate is not None:
-        p = extract_percent(offer.get("payout_rate"))
-        if p is None or p < min_payout_rate:
-            return False
-    if min_approval_rate is not None:
-        a = extract_percent(offer.get("approval_rate"))
-        if a is None or a < min_approval_rate:
-            return False
+    if not is_goaff:
+        if min_payout_rate is not None:
+            p = extract_percent(offer.get("payout_rate"))
+            if p is None or p < min_payout_rate:
+                return False
+        if min_approval_rate is not None:
+            a = extract_percent(offer.get("approval_rate"))
+            if a is None or a < min_approval_rate:
+                return False
     return True
 
 
 def run_pipeline(settings: dict, min_traffic: int, filters: dict, log, control: RunControl):
-    for k, v in settings.items():
-        os.environ[k] = str(v)
+    apply_settings_for_run(settings)
     os.environ["MIN_VISITS"] = str(min_traffic)
 
     log("Fetching offers from Uppromote...")
@@ -171,7 +249,7 @@ def run_pipeline(settings: dict, min_traffic: int, filters: dict, log, control: 
 
     by_host = {}
     for item in items:
-        site = item.get("SiteName") or item.get("siteName")
+        site = core.apify_site_field(item)
         key = core.host_key(site)
         if key:
             by_host[key] = item
@@ -189,7 +267,7 @@ def run_pipeline(settings: dict, min_traffic: int, filters: dict, log, control: 
     try:
         fh = out_path.open("w", encoding="utf-8", newline="")
     except PermissionError:
-        out_path = BASE_DIR / f"result-{int(time.time())}.csv"
+        out_path = BASE_DIR / f"uppromote_{int(time.time())}.csv"
         fh = out_path.open("w", encoding="utf-8", newline="")
 
     rows = 0
@@ -203,21 +281,14 @@ def run_pipeline(settings: dict, min_traffic: int, filters: dict, log, control: 
                 log("Stopped.")
                 return
 
-            if not offer_passes_filters(offer, filters):
-                log(f"Record {idx}/{total_offers}: SKIP by filter | {offer.get('brand', '')}")
-                continue
-
             brand = offer.get("brand", "")
             url = offer.get("url", "")
             key = core.host_key(url)
-            item = by_host.get(key, {})
-            eng = item.get("Engagments") or item.get("Engagements") or {}
-            visits_raw = eng.get("Visits", 0)
-            try:
-                visits = float(visits_raw)
-            except Exception:
-                visits = 0
-            status = "GET" if visits > min_traffic else "NO"
+            item = core.lookup_apify_item(url, by_host)
+            eng = core.engagement_from_item(item)
+            visits = core.parse_visits_from_engagement(eng)
+            ok = row_is_dat(offer, filters, "uppromote", visits, float(min_traffic))
+            status = "GET" if ok else "NO"
 
             writer.writerow([
                 status, brand, url, key, eng.get("VisitsFormatted", ""), int(visits) if visits.is_integer() else visits,

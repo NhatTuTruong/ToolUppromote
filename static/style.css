@@ -64,8 +64,12 @@ input, select {
 
 .progress-wrap { margin-top: 16px; display: flex; align-items: center; gap: 10px; }
 .progress-bar { flex: 1; height: 12px; border-radius: 999px; background: #0b1324; border: 1px solid var(--line); overflow: hidden; }
-#progressInner { height: 100%; width: 0%; background: linear-gradient(90deg, #4f7cff, #7fa0ff); }
-#progressText { min-width: 44px; text-align: right; color: var(--muted); }
+#progressInner,
+#progressInnerGp { height: 100%; width: 0%; background: linear-gradient(90deg, #4f7cff, #7fa0ff); }
+#progressText,
+#progressTextGp { min-width: 44px; text-align: right; color: var(--muted); }
+
+.settings-sub { margin: 18px 0 10px; font-size: 15px; font-weight: 600; color: var(--muted); }
 
 .log-box {
   margin-top: 14px; min-height: 320px; max-height: 420px; overflow: auto;

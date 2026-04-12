@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>License server — Admin</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 28rem; margin: 3rem auto; padding: 0 1rem; }
+    h1 { font-size: 1.1rem; }
+    label { display: block; margin-bottom: 0.35rem; }
+    input[type="password"] { width: 100%; padding: 0.5rem; box-sizing: border-box; }
+    button { margin-top: 1rem; padding: 0.5rem 1rem; cursor: pointer; }
+    .err { color: #b00020; margin-top: 0.75rem; }
+  </style>
+</head>
+<body>
+  <h1>Quản lý slot kích hoạt</h1>
+  <form method="post" action="{{ url_for('admin_login') }}">
+    <label for="password">Mật khẩu admin</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" required />
+    <button type="submit">Đăng nhập</button>
+  </form>
+  {% if error %}<p class="err">{{ error }}</p>{% endif %}
+</body>
+</html>

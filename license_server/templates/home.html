@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>License slot server</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 32rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+    h1 { font-size: 1.15rem; }
+    ul { padding-left: 1.2rem; }
+    a { color: #0645ad; }
+    code { font-size: 0.9em; }
+  </style>
+</head>
+<body>
+  <h1>Máy chủ quản lý slot kích hoạt</h1>
+  <p>API: <code>POST /v1/activate</code>, <code>POST /v1/deactivate</code>, <code>GET /v1/health</code></p>
+  <ul>
+    <li><a href="{{ url_for('admin_login') }}">Đăng nhập quản trị</a> — xem / thu hồi slot</li>
+    <li><a href="{{ url_for('api_v1_health') }}">Kiểm tra health (JSON)</a></li>
+  </ul>
+</body>
+</html>

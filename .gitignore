@@ -63,6 +63,9 @@ htmlcov/
 *.egg-info/
 .eggs/
 
+# License server local DB (deploy)
+data/license_slots.db
+
 # Misc
 *.bak
 *.old

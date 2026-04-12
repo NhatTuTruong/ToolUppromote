@@ -1,0 +1,4 @@
+# Chỉ cần khi chạy máy chủ license (VPS / hosting), không bắt buộc cho bản desktop filter.
+flask>=3.0
+pymysql>=1.1.0
+gunicorn>=22.0

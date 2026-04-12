@@ -1,16 +1,19 @@
-import csv
 import os
 import threading
 import time
 from pathlib import Path
 
-from flask import Flask, jsonify, render_template, request, send_from_directory
+from flask import Flask, jsonify, render_template, request, send_file
 
 import filter as core
-from app import apply_settings_for_run, load_env_defaults, offer_passes_filters, row_is_dat, save_env
+from app import ENV_PATH, apply_settings_for_run, load_env_defaults, offer_passes_filters, row_is_dat, save_env
+
+import license_guard
+from runtime_paths import app_dir, bundle_dir
 
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = app_dir()
+license_guard.set_paths(BASE_DIR)
 
 
 class RunControl:
@@ -39,11 +42,13 @@ class RunControl:
 class AppState:
     def __init__(self):
         self.lock = threading.Lock()
+        self.ack_lock = threading.Lock()
         self.running = False
         self.paused = False
         self.status = "Rảnh"
         self.progress = 0.0
         self.logs = []
+        self.log_ack_seen = 0
         self.control = None
         self.worker = None
         self.output_file = ""
@@ -52,6 +57,34 @@ class AppState:
     def add_log(self, message: str):
         with self.lock:
             self.logs.append(message)
+
+    def log_count(self) -> int:
+        with self.lock:
+            return len(self.logs)
+
+    def notify_log_displayed(self, seen_total: int) -> None:
+        """Client đã vẽ xong tới mốc len(logs) == seen_total (sau poll /api/logs)."""
+        if seen_total < 0:
+            return
+        with self.ack_lock:
+            if seen_total > self.log_ack_seen:
+                self.log_ack_seen = seen_total
+
+    def wait_log_displayed(self, target_total: int, deadline_sec: float = 300.0) -> str:
+        """
+        Chờ client xác nhận đã hiển thị tới target_total (len logs sau add_log).
+        Trả về 'ok' | 'stop' | 'timeout'.
+        """
+        deadline = time.monotonic() + deadline_sec
+        ctrl = self.control
+        while time.monotonic() < deadline:
+            if ctrl and ctrl.should_stop():
+                return "stop"
+            with self.ack_lock:
+                if self.log_ack_seen >= target_total:
+                    return "ok"
+            time.sleep(0.012)
+        return "timeout"
 
     def get_logs(self, since: int):
         with self.lock:
@@ -62,21 +95,38 @@ class AppState:
 
 
 STATE = AppState()
-app = Flask(__name__, template_folder="templates", static_folder="static")
+_root = bundle_dir()
+app = Flask(
+    __name__,
+    template_folder=str(_root / "templates"),
+    static_folder=str(_root / "static"),
+)
 
 
 def fetch_offers_uppromote(filters: dict) -> list:
     base_url = (os.getenv("UPPROMOTE_API_URL") or "").strip()
     if not base_url:
         raise RuntimeError("Thiếu UPPROMOTE_API_URL trong cài đặt")
-    max_pages = int(os.getenv("UPPROMOTE_MAX_PAGES", "5") or "5")
+    core.enforce_fixed_fetch_defaults()
+    max_pages_cap = core.uppromote_max_pages_cap()
     start_page = int(filters.get("start_page") or 1)
-    end_page = int(filters.get("end_page") or max_pages)
+    end_raw = filters.get("end_page")
+    if end_raw is None:
+        end_page = 1
+    elif str(end_raw).strip() == "":
+        end_page = None
+    else:
+        end_page = int(end_raw)
     if start_page < 1:
         start_page = 1
-    if end_page < start_page:
+    if end_page is not None and end_page < start_page:
         end_page = start_page
-    delay_ms = int(os.getenv("UPPROMOTE_PAGE_DELAY_MS", "250") or "250")
+    if end_page is not None and max_pages_cap is not None:
+        end_page = min(end_page, max_pages_cap)
+    delay_ms = int(
+        os.getenv("UPPROMOTE_PAGE_DELAY_MS", str(core.DEFAULT_UPPROMOTE_PAGE_DELAY_MS))
+        or str(core.DEFAULT_UPPROMOTE_PAGE_DELAY_MS)
+    )
 
     raw_offers = []
     page = start_page
@@ -96,11 +146,11 @@ def fetch_offers_uppromote(filters: dict) -> list:
             break
         raw_offers.extend(page_items)
         STATE.add_log(f"Uppromote trang {page}: +{len(page_items)} offer (tổng {len(raw_offers)})")
-        if page >= end_page:
+        if end_page is not None and page >= end_page:
             STATE.add_log(f"Uppromote: đã tới trang kết thúc đã chọn: {end_page}")
             break
-        if page >= max_pages:
-            STATE.add_log(f"Uppromote: đã tới giới hạn trang trong cài đặt: {max_pages}")
+        if max_pages_cap is not None and page >= max_pages_cap:
+            STATE.add_log(f"Uppromote: đã tới giới hạn trang trong cài đặt: {max_pages_cap}")
             break
         next_page = payload.get("next_page_url")
         if not next_page:
@@ -136,23 +186,33 @@ def fetch_offers_goaffpro(filters: dict) -> list:
     base_url = (os.getenv("GOAFFPRO_API_URL") or "").strip()
     if not base_url:
         raise RuntimeError("Thiếu GOAFFPRO_API_URL trong cài đặt")
-    limit = int(os.getenv("GOAFFPRO_LIMIT", "50") or "50")
-    max_pages = int(os.getenv("GOAFFPRO_MAX_PAGES", "100") or "100")
+    core.enforce_fixed_fetch_defaults()
+    limit = int(
+        os.getenv("GOAFFPRO_LIMIT", str(core.DEFAULT_OFFERS_PER_PAGE)) or str(core.DEFAULT_OFFERS_PER_PAGE)
+    )
+    max_pages_cap = core.goaffpro_max_pages_cap()
     start_page = int(filters.get("start_page") or 1)
     if start_page < 1:
         start_page = 1
     end_raw = filters.get("end_page")
-    if end_raw is not None and str(end_raw).strip() != "":
-        end_page = int(end_raw)
+    if end_raw is None:
+        end_page = 1
+    elif str(end_raw).strip() == "":
+        end_page = None
     else:
-        end_page = max_pages
-    if end_page < start_page:
+        end_page = int(end_raw)
+    if end_page is not None and end_page < start_page:
         end_page = start_page
-    end_page = min(end_page, max_pages)
-    delay_ms = int(os.getenv("GOAFFPRO_PAGE_DELAY_MS", "250") or "250")
+    if end_page is not None and max_pages_cap is not None:
+        end_page = min(end_page, max_pages_cap)
+    delay_ms = int(
+        os.getenv("GOAFFPRO_PAGE_DELAY_MS", str(core.DEFAULT_GOAFFPRO_PAGE_DELAY_MS))
+        or str(core.DEFAULT_GOAFFPRO_PAGE_DELAY_MS)
+    )
 
     raw_stores = []
-    for page in range(start_page, end_page + 1):
+    page = start_page
+    while True:
         STATE.control.wait_if_paused()
         if STATE.control.should_stop():
             STATE.add_log("Đã dừng.")
@@ -175,8 +235,15 @@ def fetch_offers_goaffpro(filters: dict) -> list:
         if total_n is not None and offset + len(stores) >= total_n:
             STATE.add_log("Goaffpro: đã lấy hết theo tổng từ API.")
             break
+        if end_page is not None and page >= end_page:
+            STATE.add_log(f"Goaffpro: đã tới trang kết thúc đã chọn: {end_page}")
+            break
+        if max_pages_cap is not None and page >= max_pages_cap:
+            STATE.add_log(f"Goaffpro: đã tới giới hạn trang trong cài đặt: {max_pages_cap}")
+            break
         if len(stores) < limit:
             break
+        page += 1
         if delay_ms > 0:
             time.sleep(delay_ms / 1000)
 
@@ -185,6 +252,7 @@ def fetch_offers_goaffpro(filters: dict) -> list:
 
 def run_pipeline(settings: dict, min_traffic: int, filters: dict, source: str = "uppromote"):
     apply_settings_for_run(settings)
+    core.enforce_fixed_fetch_defaults()
     os.environ["MIN_VISITS"] = str(min_traffic)
 
     src = (source or "uppromote").lower()
@@ -200,6 +268,17 @@ def run_pipeline(settings: dict, min_traffic: int, filters: dict, source: str = 
     if STATE.control.should_stop():
         STATE.add_log("Đã dừng.")
         return
+
+    cap = license_guard.export_offer_cap(len(offers), src)
+    if cap == 0:
+        STATE.add_log(license_guard.zero_export_cap_log_message(src))
+        return
+    if cap < len(offers):
+        partial = license_guard.export_cap_partial_log(len(offers), cap, src)
+        if partial:
+            STATE.add_log(partial)
+        offers = offers[:cap]
+
     STATE.add_log(f"Đã tải {len(offers)} offer.")
     snapshot_path.write_text(
         core.json.dumps(
@@ -218,7 +297,10 @@ def run_pipeline(settings: dict, min_traffic: int, filters: dict, source: str = 
 
     STATE.add_log(f"Chạy Apify cho {len(domains)} tên miền...")
     items = []
-    chunk_size = int(os.getenv("APIFY_MAX_DOMAINS_PER_RUN", "50") or "50")
+    chunk_size = int(
+        os.getenv("APIFY_MAX_DOMAINS_PER_RUN", str(core.DEFAULT_APIFY_MAX_DOMAINS_PER_RUN))
+        or str(core.DEFAULT_APIFY_MAX_DOMAINS_PER_RUN)
+    )
     for idx, part in enumerate(core.chunked(domains, chunk_size), start=1):
         STATE.control.wait_if_paused()
         if STATE.control.should_stop():
@@ -236,21 +318,51 @@ def run_pipeline(settings: dict, min_traffic: int, filters: dict, source: str = 
             by_host[key] = item
 
     net_prefix = "goaffpro" if src == "goaffpro" else "uppromote"
-    out_path = BASE_DIR / f"{net_prefix}_{int(time.time())}.csv"
+    xlsx_path = BASE_DIR / f"{net_prefix}_{int(time.time())}.xlsx"
     header = list(core.GOAFF_CSV_HEADER) if src == "goaffpro" else list(core.UPPROMOTE_CSV_HEADER_VI)
 
     exported_rows = []
-    rows = 0
     total_offers = len(offers)
-    # utf-8-sig: BOM giúp Excel Windows hiển thị đúng tiếng Việt
-    with out_path.open("w", encoding="utf-8-sig", newline="") as fh:
-        writer = csv.writer(fh)
-        writer.writerow(header)
+    export_interrupted = False
+
+    def _flush_export_workbook(note: str = "") -> bool:
+        if not exported_rows:
+            return False
+        try:
+            core.write_xlsx_highlight_status(xlsx_path, header, exported_rows, status_col=0)
+        except Exception as exc:
+            STATE.add_log(f"Không ghi được Excel (cần openpyxl): {exc}")
+            return False
+        with STATE.lock:
+            STATE.output_file = str(xlsx_path)
+            STATE.output_files.insert(0, xlsx_path.name)
+            STATE.output_files = STATE.output_files[:100]
+        extra = f" — {note}" if note else ""
+        abs_path = str(xlsx_path.resolve())
+        STATE.add_log(
+            f"Đã ghi Excel{extra}: {len(exported_rows)} dòng → {xlsx_path.name} "
+            f"(cột trạng thái ĐẠT: nền xanh lá nhạt)\n"
+            f"  Đường dẫn đầy đủ: {abs_path}"
+        )
+        return True
+
+    try:
+        STATE.add_log(
+            f"─── Xuất dữ liệu: xử lý lần lượt {total_offers} offer; "
+            f"file .xlsx được lưu khi hoàn tất hoặc khi dừng / lỗi (giữ các dòng đã xử lý) ───"
+        )
+        _w = STATE.wait_log_displayed(STATE.log_count())
+        if _w == "stop":
+            STATE.add_log("Đã dừng trước khi xuất từng offer.")
+            return
+        if _w == "timeout":
+            STATE.add_log("[Cảnh báo] Chờ hiển thị log quá lâu — tiếp tục xử lý.")
         for idx, offer in enumerate(offers, start=1):
             STATE.control.wait_if_paused()
             if STATE.control.should_stop():
-                STATE.add_log("Đã dừng.")
-                return
+                STATE.add_log("Đã nhận lệnh dừng — lưu các dòng đã xử lý ra file…")
+                export_interrupted = True
+                break
 
             brand = offer.get("brand", "")
             url = offer.get("url", "")
@@ -266,40 +378,43 @@ def run_pipeline(settings: dict, min_traffic: int, filters: dict, source: str = 
                 row = core.build_goaff_csv_row(offer, item, status)
             else:
                 row = core.build_uppromote_csv_row_vi(offer, item, status)
-            writer.writerow(row)
             exported_rows.append(row)
-            rows += 1
+            license_guard.record_one_exported_row(src)
             visits_show = eng.get("VisitsFormatted") if eng else ""
             if not visits_show and visits:
                 visits_show = int(visits) if visits == int(visits) else round(visits, 2)
             elif not visits_show:
                 visits_show = 0
-            STATE.add_log(
-                f"Dòng {idx}/{total_offers}: {status} | {brand} | {key} | "
-                f"lọc={'đạt' if filters_ok else 'chưa đạt'} | traffic={'đạt' if traffic_ok else 'chưa đạt'} | "
-                f"~{visits_show} / ngưỡng {min_v}"
+            block = (
+                f"┌─ Record {idx}/{total_offers} ─────────────────────\n"
+                f"│  Thương hiệu : {brand}\n"
+                f"│  Domain/URL  : {key or url}\n"
+                f"│  Trạng thái  : {status}\n"
+                f"│  Lọc offer   : {'đạt' if filters_ok else 'chưa đạt'}\n"
+                f"│  Traffic      : {'đạt' if traffic_ok else 'chưa đạt'} "
+                f"(~{visits_show} so với ngưỡng {min_v})\n"
+                f"└────────────────────────────────────────"
             )
+            STATE.add_log(block)
             with STATE.lock:
                 STATE.progress = (idx / total_offers) * 100
-
-    xlsx_path = out_path.with_suffix(".xlsx")
-    try:
-        core.write_xlsx_highlight_status(xlsx_path, header, exported_rows, status_col=0)
-        xlsx_ok = True
+            _w = STATE.wait_log_displayed(STATE.log_count())
+            if _w == "stop":
+                STATE.add_log("Đã nhận lệnh dừng — lưu các dòng đã xử lý ra file…")
+                export_interrupted = True
+                break
+            if _w == "timeout":
+                STATE.add_log("[Cảnh báo] Chờ hiển thị log quá lâu — tiếp record tiếp theo.")
     except Exception as exc:
-        STATE.add_log(f"Không ghi được Excel (cần openpyxl): {exc}")
-        xlsx_ok = False
-
-    with STATE.lock:
-        STATE.output_file = str(out_path)
-        STATE.output_files.insert(0, out_path.name)
-        if xlsx_ok:
-            STATE.output_files.insert(0, xlsx_path.name)
-        STATE.output_files = STATE.output_files[:100]
-    if xlsx_ok:
-        STATE.add_log(f"Xong: {rows} dòng → {out_path.name} và {xlsx_path.name} (dòng ĐẠT: nền xanh lá nhạt trong Excel)")
-    else:
-        STATE.add_log(f"Xong: {rows} dòng → {out_path.name}")
+        export_interrupted = True
+        STATE.add_log(
+            f"Lỗi trong vòng xuất: {exc} — đã xử lý xong {len(exported_rows)} dòng, sẽ ghi Excel phần đã có."
+        )
+        raise
+    finally:
+        if exported_rows:
+            note = "dừng hoặc lỗi giữa chừng" if export_interrupted else "hoàn tất"
+            _flush_export_workbook(note)
 
 
 def _worker(settings: dict, min_traffic: int, filters: dict, source: str = "uppromote"):
@@ -334,6 +449,37 @@ def api_save_settings():
     return jsonify({"ok": True})
 
 
+@app.get("/api/license")
+def api_license():
+    core.load_env_file(ENV_PATH)
+    license_guard.set_paths(BASE_DIR)
+    return _no_cache_json(license_guard.license_status_payload())
+
+
+@app.post("/api/license/activate")
+def api_license_activate():
+    core.load_env_file(ENV_PATH)
+    license_guard.set_paths(BASE_DIR)
+    payload = request.get_json(force=True) or {}
+    key = (payload.get("key") or "").strip()
+    if not key:
+        return jsonify({"ok": False, "error": "Nhập key kích hoạt."}), 400
+    ok, msg = license_guard.activate_key(key)
+    if not ok:
+        return jsonify({"ok": False, "error": msg}), 400
+    return jsonify({"ok": True, "message": msg, "license": license_guard.license_status_payload()})
+
+
+@app.post("/api/license/deactivate")
+def api_license_deactivate():
+    core.load_env_file(ENV_PATH)
+    license_guard.set_paths(BASE_DIR)
+    ok, msg = license_guard.deactivate_on_this_machine()
+    if not ok:
+        return jsonify({"ok": False, "error": msg}), 400
+    return jsonify({"ok": True, "message": msg, "license": license_guard.license_status_payload()})
+
+
 @app.post("/api/run")
 def api_run():
     payload = request.get_json(force=True) or {}
@@ -347,6 +493,12 @@ def api_run():
     if source not in ("uppromote", "goaffpro"):
         source = "uppromote"
 
+    core.load_env_file(ENV_PATH)
+    license_guard.set_paths(BASE_DIR)
+    ok_run, lic_err = license_guard.assert_can_start_pipeline(source)
+    if not ok_run:
+        return jsonify({"ok": False, "error": lic_err}), 400
+
     with STATE.lock:
         if STATE.running:
             return jsonify({"ok": False, "error": "Đang chạy sẵn, không thể bắt đầu thêm."}), 400
@@ -355,6 +507,8 @@ def api_run():
         STATE.status = "Đang chạy"
         STATE.progress = 0
         STATE.logs = []
+        with STATE.ack_lock:
+            STATE.log_ack_seen = 0
         STATE.control = RunControl()
         STATE.worker = threading.Thread(target=_worker, args=(settings, min_traffic, filters, source), daemon=True)
         STATE.worker.start()
@@ -384,10 +538,17 @@ def api_stop():
     return jsonify({"ok": True})
 
 
+def _no_cache_json(data):
+    resp = jsonify(data)
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    resp.headers["Pragma"] = "no-cache"
+    return resp
+
+
 @app.get("/api/status")
 def api_status():
     with STATE.lock:
-        return jsonify(
+        return _no_cache_json(
             {
                 "running": STATE.running,
                 "paused": STATE.paused,
@@ -402,7 +563,19 @@ def api_status():
 def api_logs():
     since = int(request.args.get("since", "0"))
     logs, total = STATE.get_logs(since)
-    return jsonify({"logs": logs, "total": total})
+    return _no_cache_json({"logs": logs, "total": total})
+
+
+@app.post("/api/logs/ack")
+def api_logs_ack():
+    """Client xác nhận đã hiển thị log tới mốc total (đồng bộ với /api/logs)."""
+    payload = request.get_json(force=True) or {}
+    try:
+        seen = int(payload.get("seen_total", 0))
+    except (TypeError, ValueError):
+        seen = 0
+    STATE.notify_log_displayed(seen)
+    return jsonify({"ok": True})
 
 
 @app.get("/api/results")
@@ -410,11 +583,8 @@ def api_results():
     files = []
     seen = set()
     globs = (
-        list(BASE_DIR.glob("result-*.csv"))
-        + list(BASE_DIR.glob("result-*.xlsx"))
-        + list(BASE_DIR.glob("uppromote_*.csv"))
+        list(BASE_DIR.glob("result-*.xlsx"))
         + list(BASE_DIR.glob("uppromote_*.xlsx"))
-        + list(BASE_DIR.glob("goaffpro_*.csv"))
         + list(BASE_DIR.glob("goaffpro_*.xlsx"))
     )
     for p in sorted(globs, key=lambda x: x.stat().st_mtime, reverse=True):
@@ -433,21 +603,59 @@ def api_results():
 
 def _allowed_export_basename(name: str) -> bool:
     ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
-    if ext not in ("csv", "xlsx"):
+    if ext != "xlsx":
         return False
     return name.startswith("result-") or name.startswith("uppromote_") or name.startswith("goaffpro_")
+
+
+def _safe_result_file_path(safe_name: str) -> Path | None:
+    if not _allowed_export_basename(safe_name):
+        return None
+    base = BASE_DIR.resolve()
+    full = (base / Path(safe_name).name).resolve()
+    try:
+        full.relative_to(base)
+    except ValueError:
+        return None
+    return full
 
 
 @app.get("/api/download/<path:filename>")
 def api_download(filename: str):
     safe_name = Path(filename).name
-    if not _allowed_export_basename(safe_name):
+    full = _safe_result_file_path(safe_name)
+    if full is None:
         return jsonify({"ok": False, "error": "Invalid file"}), 400
-    full = BASE_DIR / safe_name
-    if not full.exists():
+    if not full.is_file():
         return jsonify({"ok": False, "error": "Not found"}), 404
-    return send_from_directory(BASE_DIR, safe_name, as_attachment=True)
+    # str(path): PyInstaller/Windows ổn định hơn với đường dẫn UNC/unicode
+    return send_file(
+        str(full),
+        as_attachment=True,
+        download_name=safe_name,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        max_age=0,
+        conditional=False,
+    )
+
+
+@app.post("/api/results/delete")
+def api_delete_result():
+    payload = request.get_json(force=True) or {}
+    name = (payload.get("name") or "").strip()
+    safe_name = Path(name).name
+    full = _safe_result_file_path(safe_name)
+    if full is None:
+        return jsonify({"ok": False, "error": "Invalid file"}), 400
+    if not full.is_file():
+        return jsonify({"ok": False, "error": "Not found"}), 404
+    try:
+        full.unlink()
+    except OSError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+    return jsonify({"ok": True})
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5050, debug=False)
+    # threaded=True: worker chạy pipeline không chặn request /api/logs (log theo thời gian thực)
+    app.run(host="127.0.0.1", port=5050, debug=False, threaded=True)

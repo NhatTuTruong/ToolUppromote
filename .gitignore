@@ -13,10 +13,17 @@ env/
 .env.*
 !.env.python.example
 
+# Bản quyền / key bán (không commit)
+vendor_keys_AFL1.txt
+.aff_license.json
+.aff_free_usage.json
+.aff_licensed_usage.json
+
 # Build / distribution
 build/
 dist/
 *.spec
+!build_exe.spec
 
 # Logs & temp files
 *.log

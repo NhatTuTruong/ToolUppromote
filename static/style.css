@@ -82,7 +82,7 @@ input, select {
 .file-list { margin-top: 8px; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
 .file-row {
   display: grid;
-  grid-template-columns: 110px 1fr 140px 200px;
+  grid-template-columns: auto 1fr 120px 170px;
   gap: 10px;
   align-items: center;
   padding: 10px 12px;
@@ -92,6 +92,7 @@ input, select {
 .file-row:nth-child(even) { background: rgba(255, 255, 255, 0.02); }
 .file-meta { color: var(--muted); font-size: 12px; }
 .btn.sm { height: 32px; border-radius: 8px; padding: 0 10px; font-size: 12px; }
+.file-row .file-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 
 @media (max-width: 1024px) {
   .form-grid, .form-grid.compact { grid-template-columns: 1fr; }

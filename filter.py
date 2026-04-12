@@ -9,30 +9,129 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import requests
 
+from runtime_paths import app_dir
+
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = app_dir()
 ACTOR_ID = "aqPbs3KeH9aD8b22w"
 MIN_VISITS = int(os.getenv("MIN_VISITS", "9000") or "9000")
 TOP_KEYWORDS_COUNT = int(os.getenv("TOP_KEYWORDS_COUNT", "5") or "5")
 
+# Mặc định cố định (không cấu hình qua UI/.env cho luồng chính)
+DEFAULT_APIFY_MAX_DOMAINS_PER_RUN = 50
+DEFAULT_UPPROMOTE_PAGE_DELAY_MS = 250
+DEFAULT_GOAFFPRO_PAGE_DELAY_MS = 250
+DEFAULT_OFFERS_PER_PAGE = 50
+MAX_OFFERS_PER_PAGE = 50
+MIN_OFFERS_PER_PAGE = 10
+OFFERS_PER_PAGE_STEP = 10
 
-def load_env_file(path: Path):
+
+def clamp_offers_per_page(raw) -> int:
+    """Số offer/trang (Up) hoặc limit request (Go): bội số của 10, trong [10, 50]. Rỗng/sai → mặc định."""
+    if raw is None:
+        return DEFAULT_OFFERS_PER_PAGE
+    s = str(raw).strip()
+    if not s:
+        return DEFAULT_OFFERS_PER_PAGE
+    try:
+        n = int(float(s))
+    except (TypeError, ValueError):
+        return DEFAULT_OFFERS_PER_PAGE
+    n = max(MIN_OFFERS_PER_PAGE, min(MAX_OFFERS_PER_PAGE, n))
+    n = (n // OFFERS_PER_PAGE_STEP) * OFFERS_PER_PAGE_STEP
+    if n < MIN_OFFERS_PER_PAGE:
+        n = MIN_OFFERS_PER_PAGE
+    return n
+
+
+def enforce_fixed_fetch_defaults() -> None:
+    """Apify 50 domain/lần; Uppromote & Goaffpro trễ 250ms/trang; không giới hạn số trang; offer/trang (Up & Go) theo .env/UI đã chuẩn hóa."""
+    os.environ["APIFY_MAX_DOMAINS_PER_RUN"] = str(DEFAULT_APIFY_MAX_DOMAINS_PER_RUN)
+    os.environ["UPPROMOTE_PAGE_DELAY_MS"] = str(DEFAULT_UPPROMOTE_PAGE_DELAY_MS)
+    os.environ.pop("UPPROMOTE_MAX_PAGES", None)
+    os.environ["GOAFFPRO_PAGE_DELAY_MS"] = str(DEFAULT_GOAFFPRO_PAGE_DELAY_MS)
+    os.environ.pop("GOAFFPRO_MAX_PAGES", None)
+    os.environ["UPPROMOTE_PER_PAGE"] = str(clamp_offers_per_page(os.getenv("UPPROMOTE_PER_PAGE")))
+    os.environ["GOAFFPRO_LIMIT"] = str(clamp_offers_per_page(os.getenv("GOAFFPRO_LIMIT")))
+
+
+def uppromote_max_pages_cap() -> int | None:
+    """None = không giới hạn trang. Chỉ dùng khi UPPROMOTE_MAX_PAGES được set thủ công (CLI / thử nghiệm)."""
+    raw = (os.getenv("UPPROMOTE_MAX_PAGES") or "").strip().lower()
+    if not raw or raw in ("0", "unlimited", "none", "no", "inf"):
+        return None
+    try:
+        n = int(raw)
+    except ValueError:
+        return None
+    return n if n > 0 else None
+
+
+def goaffpro_max_pages_cap() -> int | None:
+    """None = không giới hạn trang Goaffpro."""
+    raw = (os.getenv("GOAFFPRO_MAX_PAGES") or "").strip().lower()
+    if not raw or raw in ("0", "unlimited", "none", "no", "inf"):
+        return None
+    try:
+        n = int(raw)
+    except ValueError:
+        return None
+    return n if n > 0 else None
+
+
+def _unescape_dotenv_double_quoted(inner: str) -> str:
+    out: list[str] = []
+    i = 0
+    while i < len(inner):
+        if inner[i] == "\\" and i + 1 < len(inner):
+            n = inner[i + 1]
+            if n == "n":
+                out.append("\n")
+            elif n == "r":
+                out.append("\r")
+            elif n == "t":
+                out.append("\t")
+            elif n in ('"', "\\"):
+                out.append(n)
+            else:
+                out.append(inner[i])
+                out.append(n)
+            i += 2
+            continue
+        out.append(inner[i])
+        i += 1
+    return "".join(out)
+
+
+def parse_env_file(path: Path) -> dict:
+    """Đọc .env → dict. utf-8-sig (bỏ BOM); giá trị trong \"…\" được unescape chuẩn dotenv."""
+    out: dict[str, str] = {}
     if not path.exists():
-        return
-    for raw in path.read_text(encoding="utf-8").splitlines():
+        return out
+    text = path.read_text(encoding="utf-8-sig")
+    for raw in text.splitlines():
         line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
-        key, value = line.split("=", 1)
+        key, val = line.split("=", 1)
         k = key.strip()
-        v = value.strip()
-        if (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
+        v = val.strip()
+        if len(v) >= 2 and v[0] == '"' and v[-1] == '"':
+            v = _unescape_dotenv_double_quoted(v[1:-1])
+        elif len(v) >= 2 and v[0] == "'" and v[-1] == "'":
             v = v[1:-1]
+        out[k] = v
+    return out
+
+
+def load_env_file(path: Path):
+    for k, v in parse_env_file(path).items():
         if k and k not in os.environ:
             os.environ[k] = v
 
@@ -172,7 +271,7 @@ def with_page(url: str, page: int) -> str:
     query = dict(parse_qsl(parsed.query, keep_blank_values=True))
     query["page"] = str(page)
     # Always force per_page from env for consistent paging.
-    query["per_page"] = os.getenv("UPPROMOTE_PER_PAGE", "50")
+    query["per_page"] = os.getenv("UPPROMOTE_PER_PAGE", str(DEFAULT_OFFERS_PER_PAGE))
     new_query = urlencode(query, doseq=True)
     return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
 
@@ -573,9 +672,13 @@ def fetch_all_goaffpro_offers() -> list:
     if not base_url:
         raise RuntimeError("Thiếu GOAFFPRO_API_URL trong .env")
 
-    limit = int(os.getenv("GOAFFPRO_LIMIT", "50") or "50")
-    max_pages = int(os.getenv("GOAFFPRO_MAX_PAGES", "100") or "100")
-    delay_ms = int(os.getenv("GOAFFPRO_PAGE_DELAY_MS", "250") or "250")
+    enforce_fixed_fetch_defaults()
+    limit = int(os.getenv("GOAFFPRO_LIMIT", str(DEFAULT_OFFERS_PER_PAGE)) or str(DEFAULT_OFFERS_PER_PAGE))
+    max_pages_cap = goaffpro_max_pages_cap()
+    delay_ms = int(
+        os.getenv("GOAFFPRO_PAGE_DELAY_MS", str(DEFAULT_GOAFFPRO_PAGE_DELAY_MS))
+        or str(DEFAULT_GOAFFPRO_PAGE_DELAY_MS)
+    )
 
     all_stores = []
     page = 1
@@ -594,8 +697,8 @@ def fetch_all_goaffpro_offers() -> list:
         all_stores.extend(page_items)
         print(f"Goaffpro: +{len(page_items)} store (lũy kế {len(all_stores)})")
 
-        if page >= max_pages:
-            print(f"Goaffpro: dừng vì GOAFFPRO_MAX_PAGES={max_pages}")
+        if max_pages_cap is not None and page >= max_pages_cap:
+            print(f"Goaffpro: dừng vì GOAFFPRO_MAX_PAGES={max_pages_cap}")
             break
 
         total_count = body.get("count")
@@ -672,8 +775,9 @@ def fetch_all_uppromote_offers() -> list:
     if not base_url:
         raise RuntimeError("Thiếu UPPROMOTE_API_URL trong .env")
 
-    max_pages = int(os.getenv("UPPROMOTE_MAX_PAGES", "5") or "5")
-    delay_ms = int(os.getenv("UPPROMOTE_PAGE_DELAY_MS", "250") or "250")
+    enforce_fixed_fetch_defaults()
+    max_pages_cap = uppromote_max_pages_cap()
+    delay_ms = int(os.getenv("UPPROMOTE_PAGE_DELAY_MS", str(DEFAULT_UPPROMOTE_PAGE_DELAY_MS)) or str(DEFAULT_UPPROMOTE_PAGE_DELAY_MS))
 
     all_offers = []
     page = 1
@@ -692,8 +796,8 @@ def fetch_all_uppromote_offers() -> list:
         all_offers.extend(page_items)
         print(f"Uppromote: +{len(page_items)} offer (lũy kế {len(all_offers)})")
 
-        if page >= max_pages:
-            print(f"Uppromote: dừng vì UPPROMOTE_MAX_PAGES={max_pages}")
+        if max_pages_cap is not None and page >= max_pages_cap:
+            print(f"Uppromote: dừng vì UPPROMOTE_MAX_PAGES={max_pages_cap}")
             break
 
         next_page = payload.get("next_page_url")
@@ -759,23 +863,66 @@ def keyword_label(k):
 
 
 def keyword_volume(k):
+    """Khối lượng tìm kiếm (Volume: …); không dùng Traffic/Visits — traffic nằm ở EstimatedValue."""
     candidates = [
         k.get("Volume"),
         k.get("SearchVolume"),
         k.get("MonthlyVolume"),
-        k.get("EstTraffic"),
-        k.get("Traffic"),
-        k.get("Visits"),
         k.get("EstimatedMonthlySearchVolume"),
     ]
     for raw in candidates:
         if isinstance(raw, (int, float)):
             return int(round(raw))
         if isinstance(raw, str) and raw.strip():
-            value = raw.replace(",", "").strip()
-            if value.isdigit():
-                return int(value)
+            v = parse_visits_value(raw)
+            if v > 0:
+                return int(round(v))
     return 0
+
+
+def keyword_traffic_from_estimated(k):
+    """Traffic hiển thị trong Top Keywords: ưu tiên EstimatedValue (Apify), rồi Traffic/EstTraffic…"""
+    if not isinstance(k, dict):
+        return 0
+    candidates = [
+        k.get("EstimatedValue"),
+        k.get("estimatedValue"),
+        k.get("Traffic"),
+        k.get("traffic"),
+        k.get("EstTraffic"),
+        k.get("Visits"),
+    ]
+    for raw in candidates:
+        if raw is None:
+            continue
+        if isinstance(raw, str) and not raw.strip():
+            continue
+        v = parse_visits_value(raw)
+        if abs(v - round(v)) < 1e-9:
+            return int(round(v))
+        return round(v, 4)
+    return 0
+
+
+def keyword_cpc_number_str(k):
+    """Phần số CPC (không kèm $) cho định dạng Cpc:1.07$."""
+    if not isinstance(k, dict):
+        return "0"
+    raw = k.get("Cpc") or k.get("CPC") or k.get("cpc") or k.get("EstimatedCpc") or k.get("estimatedCpc")
+    if raw is None or raw == "":
+        return "0"
+    if isinstance(raw, (int, float)):
+        x = float(raw)
+    else:
+        s = str(raw).strip().rstrip("$").replace(",", "").strip()
+        try:
+            x = float(s)
+        except ValueError:
+            return "0"
+    if abs(x - round(x)) < 1e-9:
+        return str(int(round(x)))
+    t = f"{x:.4f}".rstrip("0").rstrip(".")
+    return t or "0"
 
 
 def top_keywords_csv(keywords, limit=TOP_KEYWORDS_COUNT):
@@ -783,7 +930,20 @@ def top_keywords_csv(keywords, limit=TOP_KEYWORDS_COUNT):
         return ""
     values = []
     for k in keywords[:limit]:
-        values.append(f"{keyword_label(k)} ({keyword_volume(k)})")
+        if isinstance(k, str):
+            s = k.strip()
+            if s:
+                values.append(s)
+            continue
+        if not isinstance(k, dict):
+            continue
+        label = keyword_label(k)
+        if not label:
+            continue
+        vol = keyword_volume(k)
+        traf = keyword_traffic_from_estimated(k)
+        cpc = keyword_cpc_number_str(k)
+        values.append(f"{label} (Volume: {vol}, Traffic: {traf}, Cpc:{cpc}$)")
     return ", ".join(values)
 
 
@@ -807,10 +967,13 @@ def keyword_shares_from_item(item):
         item.get("TopOrganicKeywordShares"),
         item.get("TopOrganicKeywords"),
         eng.get("TopOrganicKeywordShares"),
+        eng.get("TopOrganicKeywords"),
     ]
     for arr in candidates:
         if isinstance(arr, list) and arr:
             return arr
+        if isinstance(arr, str) and arr.strip():
+            return [arr.strip()]
     return []
 
 
@@ -925,7 +1088,10 @@ def main():
 
     print(f"Chạy Actor {ACTOR_ID} với {len(domains)} domain...")
     items = []
-    max_domains_per_run = int(os.getenv("APIFY_MAX_DOMAINS_PER_RUN", "50") or "50")
+    max_domains_per_run = int(
+        os.getenv("APIFY_MAX_DOMAINS_PER_RUN", str(DEFAULT_APIFY_MAX_DOMAINS_PER_RUN))
+        or str(DEFAULT_APIFY_MAX_DOMAINS_PER_RUN)
+    )
     for idx, part in enumerate(chunked(domains, max_domains_per_run), start=1):
         print(f"Apify batch {idx}: {len(part)} domains")
         dataset_id = apify_call_actor(part)

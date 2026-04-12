@@ -1,0 +1,2 @@
+# Chỉ dùng khi đóng gói .exe (Windows)
+pyinstaller>=6.0

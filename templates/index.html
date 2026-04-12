@@ -28,39 +28,45 @@
         <h2>Cài đặt môi trường</h2>
         <p class="muted">Token Apify dùng chung cho cả hai nguồn.</p>
         <div class="form-grid">
-          <label>Token Apify (APIFY_TOKEN)<input id="APIFY_TOKEN" type="password" autocomplete="off" /></label>
-          <label>Số tên miền tối đa mỗi lần chạy Apify<input id="APIFY_MAX_DOMAINS_PER_RUN" type="text" /></label>
+          <label>Token Apify (APIFY_TOKEN)<input id="APIFY_TOKEN" type="password" spellcheck="false" autocomplete="off" /></label>
         </div>
         <h3 class="settings-sub">Uppromote</h3>
         <div class="form-grid">
           <label>URL API (UPPROMOTE_API_URL)<input id="UPPROMOTE_API_URL" type="text" /></label>
-          <label>Bearer token (UPPROMOTE_BEARER_TOKEN)<input id="UPPROMOTE_BEARER_TOKEN" type="password" autocomplete="off" /></label>
-          <label>Số trang tối đa (UPPROMOTE_MAX_PAGES)<input id="UPPROMOTE_MAX_PAGES" type="text" /></label>
-          <label>Độ trễ giữa các trang (ms)<input id="UPPROMOTE_PAGE_DELAY_MS" type="text" /></label>
-          <label>Số offer mỗi trang<input id="UPPROMOTE_PER_PAGE" type="text" /></label>
+          <label>Bearer token (UPPROMOTE_BEARER_TOKEN)<input id="UPPROMOTE_BEARER_TOKEN" type="password" spellcheck="false" autocomplete="off" /></label>
+          <label>Số offer mỗi trang (10–50, bước 10)<input id="UPPROMOTE_PER_PAGE" type="number" min="10" max="50" step="10" value="50" /></label>
         </div>
         <h3 class="settings-sub">Goaffpro</h3>
         <div class="form-grid">
           <label>URL API (GOAFFPRO_API_URL)<input id="GOAFFPRO_API_URL" type="text" /></label>
-          <label>Bearer token (GOAFFPRO_BEARER_TOKEN)<input id="GOAFFPRO_BEARER_TOKEN" type="password" autocomplete="off" /></label>
-          <label>Giới hạn mỗi request<input id="GOAFFPRO_LIMIT" type="text" /></label>
-          <label>Số trang tối đa<input id="GOAFFPRO_MAX_PAGES" type="text" /></label>
-          <label>Độ trễ giữa các trang (ms)<input id="GOAFFPRO_PAGE_DELAY_MS" type="text" /></label>
+          <label>Bearer token (GOAFFPRO_BEARER_TOKEN)<input id="GOAFFPRO_BEARER_TOKEN" type="password" spellcheck="false" autocomplete="off" /></label>
+          <label>Giới hạn mỗi request (10–50, bước 10)<input id="GOAFFPRO_LIMIT" type="number" min="10" max="50" step="10" value="50" /></label>
         </div>
         <div class="actions">
           <button class="btn primary" id="saveSettingsBtn">Lưu cài đặt</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Bản quyền</h2>
+        <p class="muted" id="licenseMessage">Đang tải trạng thái…</p>
+        <div class="form-grid">
+          <label>Key kích hoạt<input id="licenseKeyInput" type="text" spellcheck="false" autocomplete="off" placeholder="AFL1-…" /></label>
+        </div>
+        <div class="actions">
+          <button class="btn primary" id="activateLicenseBtn">Kích hoạt</button>
+          <button class="btn danger" type="button" id="deactivateLicenseBtn" disabled>Hủy kích hoạt</button>
         </div>
       </div>
     </section>
 
     <section id="runUppromoteTab" class="tab-panel">
       <div class="card">
-        <h2>Chạy — Uppromote</h2>
-        <p class="muted">Tải offer từ Uppromote, gắn traffic Similarweb qua Apify. Cột <strong>Trạng thái</strong>: ĐẠT / CHƯA ĐẠT theo ngưỡng traffic.</p>
+        <h2>Chạy — Uppromote1</h2>
         <div class="form-grid compact">
           <label>Ngưỡng traffic tối thiểu<input id="minTraffic" type="number" value="9000" /></label>
           <label>Trang bắt đầu<input id="startPage" type="number" min="1" value="1" /></label>
-          <label>Trang kết thúc<input id="endPage" type="number" min="1" placeholder="Theo cài đặt tối đa" /></label>
+          <label>Trang kết thúc<input id="endPage" type="text" inputmode="numeric" autocomplete="off" placeholder="1 — để trống = tới trang cuối API" /></label>
           <label>Hoa hồng tối thiểu (%)<input id="minCommission" type="number" step="0.01" /></label>
           <label>Ngày cookie tối thiểu<input id="minCookie" type="number" step="1" /></label>
           <label>Tiền tệ<input id="currency" type="text" placeholder="USD" /></label>
@@ -76,7 +82,7 @@
         </div>
 
         <div class="actions">
-          <button class="btn primary" id="runBtnUppromote">Lọc &amp; xuất CSV</button>
+          <button class="btn primary" id="runBtnUppromote">Lọc &amp; xuất Excel</button>
           <button class="btn" id="pauseBtn" disabled>Tạm dừng</button>
           <button class="btn danger" id="stopBtn" disabled>Dừng</button>
         </div>
@@ -97,7 +103,7 @@
         <div class="form-grid compact">
           <label>Ngưỡng traffic tối thiểu<input id="minTrafficGp" type="number" value="9000" /></label>
           <label>Trang bắt đầu<input id="startPageGp" type="number" min="1" value="1" /></label>
-          <label>Trang kết thúc<input id="endPageGp" type="number" min="1" placeholder="Theo cài đặt tối đa" /></label>
+          <label>Trang kết thúc<input id="endPageGp" type="text" inputmode="numeric" autocomplete="off" placeholder="1 — để trống = tới trang cuối API" /></label>
           <label>Hoa hồng tối thiểu (%)<input id="minCommissionGp" type="number" step="0.01" /></label>
           <label>Ngày cookie tối thiểu<input id="minCookieGp" type="number" step="1" /></label>
           <label>Tiền tệ<input id="currencyGp" type="text" placeholder="USD" /></label>
@@ -111,7 +117,7 @@
         </div>
 
         <div class="actions">
-          <button class="btn primary" id="runBtnGoaffpro">Lọc &amp; xuất CSV</button>
+          <button class="btn primary" id="runBtnGoaffpro">Lọc &amp; xuất Excel</button>
           <button class="btn" id="pauseBtnGp" disabled>Tạm dừng</button>
           <button class="btn danger" id="stopBtnGp" disabled>Dừng</button>
         </div>
@@ -131,7 +137,7 @@
           <h2>File kết quả</h2>
           <button class="btn" id="refreshResultsBtn">Làm mới</button>
         </div>
-        <p class="muted">Mỗi lần chạy tạo file CSV (UTF-8, mở đúng tiếng Việt trong Excel) và file Excel (.xlsx): dòng <strong>ĐẠT</strong> có nền xanh lá nhạt. Tải từ danh sách bên dưới.</p>
+        <p class="muted">Mỗi lần chạy chỉ tạo file Excel (.xlsx): dòng <strong>ĐẠT</strong> có nền xanh lá nhạt. Trang kết thúc mặc định <strong>1</strong>, giá trị nhập được lưu cho lần sau.</p>
         <div class="file-list" id="resultFileList">
         </div>
       </div>

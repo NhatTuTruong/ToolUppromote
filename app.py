@@ -8,9 +8,10 @@ from pathlib import Path
 from tkinter import messagebox, scrolledtext, ttk
 
 import filter as core
+from runtime_paths import app_dir
 
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = app_dir()
 ENV_PATH = BASE_DIR / ".env"
 
 
@@ -39,17 +40,12 @@ class RunControl:
 
 ENV_SAVE_KEY_ORDER = [
     "APIFY_TOKEN",
-    "APIFY_MAX_DOMAINS_PER_RUN",
     "UPPROMOTE_API_URL",
     "UPPROMOTE_BEARER_TOKEN",
-    "UPPROMOTE_MAX_PAGES",
-    "UPPROMOTE_PAGE_DELAY_MS",
     "UPPROMOTE_PER_PAGE",
     "GOAFFPRO_API_URL",
     "GOAFFPRO_BEARER_TOKEN",
     "GOAFFPRO_LIMIT",
-    "GOAFFPRO_MAX_PAGES",
-    "GOAFFPRO_PAGE_DELAY_MS",
     "MIN_VISITS",
 ]
 
@@ -57,51 +53,69 @@ SECRET_ENV_KEYS = frozenset({"APIFY_TOKEN", "UPPROMOTE_BEARER_TOKEN", "GOAFFPRO_
 
 
 def _parse_env_file_to_dict(path: Path) -> dict:
-    out = {}
-    if not path.exists():
-        return out
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, val = line.split("=", 1)
-        k = key.strip()
-        v = val.strip()
-        if (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
-            v = v[1:-1]
-        out[k] = v
-    return out
+    return core.parse_env_file(path)
+
+
+def _escape_dotenv_double_quoted(s: str) -> str:
+    return (
+        s.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+    )
+
+
+def _format_env_value_for_write(key: str, value: str) -> str:
+    if key in SECRET_ENV_KEYS:
+        return f'"{_escape_dotenv_double_quoted(value)}"'
+    return value
 
 
 def save_env(values: dict):
-    """Ghi .env: merge với file cũ; không ghi đè token/secret bằng chuỗi rỗng."""
+    """Ghi .env: merge với file cũ; không ghi đè token/secret bằng chuỗi rỗng. Secret ghi trong \"…\" để giữ nguyên ký tự đặc biệt."""
     merged = _parse_env_file_to_dict(ENV_PATH)
     for k, v in values.items():
-        vs = str(v).strip() if v is not None else ""
-        if k in SECRET_ENV_KEYS and not vs:
-            continue
-        merged[k] = vs
+        if k in SECRET_ENV_KEYS:
+            vs = "" if v is None else str(v)
+            if not vs.strip():
+                continue
+            merged[k] = vs
+        else:
+            vs = str(v).strip() if v is not None else ""
+            merged[k] = vs
+    for _fixed in (
+        "APIFY_MAX_DOMAINS_PER_RUN",
+        "UPPROMOTE_MAX_PAGES",
+        "UPPROMOTE_PAGE_DELAY_MS",
+        "GOAFFPRO_MAX_PAGES",
+        "GOAFFPRO_PAGE_DELAY_MS",
+    ):
+        merged.pop(_fixed, None)
+    for _pg in ("UPPROMOTE_PER_PAGE", "GOAFFPRO_LIMIT"):
+        if _pg in merged:
+            merged[_pg] = str(core.clamp_offers_per_page(merged[_pg]))
     keys_out = [k for k in ENV_SAVE_KEY_ORDER if k in merged]
     for k in sorted(merged.keys()):
         if k not in keys_out:
             keys_out.append(k)
-    ENV_PATH.write_text("\n".join(f"{k}={merged[k]}" for k in keys_out) + "\n", encoding="utf-8")
+    lines = [f"{k}={_format_env_value_for_write(k, merged[k])}" for k in keys_out]
+    ENV_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def apply_settings_for_run(settings: dict):
     """Áp settings cho worker: token/secret rỗng → lấy từ file .env (không ghi đè bằng rỗng)."""
     disk = _parse_env_file_to_dict(ENV_PATH)
     for k, v in settings.items():
-        s = str(v).strip() if v is not None else ""
         if k in SECRET_ENV_KEYS:
-            if s:
-                os.environ[k] = s
+            s = "" if v is None else str(v).replace("\r\n", "\n").replace("\r", "\n")
+            if s.strip():
+                os.environ[k] = s.rstrip("\r\n")
             else:
-                dv = (disk.get(k) or "").strip()
-                if dv:
-                    os.environ[k] = dv
+                dv = disk.get(k) or ""
+                if dv.strip():
+                    os.environ[k] = dv.rstrip("\r\n")
         else:
-            os.environ[k] = s
+            os.environ[k] = str(v).strip() if v is not None else ""
 
 
 def row_is_dat(offer: dict, filters: dict, source: str, visits: float, min_traffic: float) -> bool:
@@ -117,18 +131,13 @@ def load_env_defaults():
         "APIFY_TOKEN": os.getenv("APIFY_TOKEN", ""),
         "UPPROMOTE_API_URL": os.getenv("UPPROMOTE_API_URL", ""),
         "UPPROMOTE_BEARER_TOKEN": os.getenv("UPPROMOTE_BEARER_TOKEN", ""),
-        "UPPROMOTE_MAX_PAGES": os.getenv("UPPROMOTE_MAX_PAGES", "5"),
-        "UPPROMOTE_PAGE_DELAY_MS": os.getenv("UPPROMOTE_PAGE_DELAY_MS", "250"),
-        "UPPROMOTE_PER_PAGE": os.getenv("UPPROMOTE_PER_PAGE", "50"),
+        "UPPROMOTE_PER_PAGE": str(core.clamp_offers_per_page(os.getenv("UPPROMOTE_PER_PAGE"))),
         "GOAFFPRO_API_URL": os.getenv(
             "GOAFFPRO_API_URL",
             "https://api-server-3.goaffpro.com/v1/public/sites?keyword=&country=&currency=&category=",
         ),
         "GOAFFPRO_BEARER_TOKEN": os.getenv("GOAFFPRO_BEARER_TOKEN", ""),
-        "GOAFFPRO_LIMIT": os.getenv("GOAFFPRO_LIMIT", "50"),
-        "GOAFFPRO_MAX_PAGES": os.getenv("GOAFFPRO_MAX_PAGES", "100"),
-        "GOAFFPRO_PAGE_DELAY_MS": os.getenv("GOAFFPRO_PAGE_DELAY_MS", "250"),
-        "APIFY_MAX_DOMAINS_PER_RUN": os.getenv("APIFY_MAX_DOMAINS_PER_RUN", "50"),
+        "GOAFFPRO_LIMIT": str(core.clamp_offers_per_page(os.getenv("GOAFFPRO_LIMIT"))),
     }
 
 
@@ -210,6 +219,7 @@ def offer_passes_filters(offer: dict, filters: dict, source: str = "uppromote") 
 
 def run_pipeline(settings: dict, min_traffic: int, filters: dict, log, control: RunControl):
     apply_settings_for_run(settings)
+    core.enforce_fixed_fetch_defaults()
     os.environ["MIN_VISITS"] = str(min_traffic)
 
     log("Fetching offers from Uppromote...")
@@ -237,7 +247,10 @@ def run_pipeline(settings: dict, min_traffic: int, filters: dict, log, control: 
 
     log(f"Running Apify for {len(domains)} domains...")
     items = []
-    chunk_size = int(os.getenv("APIFY_MAX_DOMAINS_PER_RUN", "50") or "50")
+    chunk_size = int(
+        os.getenv("APIFY_MAX_DOMAINS_PER_RUN", str(core.DEFAULT_APIFY_MAX_DOMAINS_PER_RUN))
+        or str(core.DEFAULT_APIFY_MAX_DOMAINS_PER_RUN)
+    )
     for idx, part in enumerate(core.chunked(domains, chunk_size), start=1):
         control.wait_if_paused()
         if control.should_stop():

@@ -39,6 +39,7 @@ body {
   border-radius: 14px;
   padding: 18px;
   box-shadow: 0 10px 25px rgba(0, 0, 0, 0.24);
+  margin-top: 10px;
 }
 .card h2 { margin: 0 0 14px; font-size: 20px; }
 
@@ -49,6 +50,58 @@ body {
 }
 .form-grid.compact { grid-template-columns: repeat(3, 1fr); }
 .form-grid label { display: flex; flex-direction: column; gap: 6px; color: var(--muted); font-size: 13px; }
+.form-field-label { min-width: 0; }
+.form-field-caption { display: block; }
+.secret-field-row {
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+}
+.secret-eye-btn {
+  flex-shrink: 0;
+  width: 40px;
+  min-width: 40px;
+  height: 40px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #0f1728;
+  color: var(--muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+.secret-eye-btn:hover {
+  color: var(--text);
+  border-color: #38539a;
+}
+.secret-field-row.is-open .secret-eye-btn {
+  color: var(--primary);
+  border-color: #4f7cff;
+}
+.secret-eye-btn .eye-icon--open {
+  display: none;
+}
+.secret-field-row.is-open .secret-eye-btn .eye-icon--shut {
+  display: none;
+}
+.secret-field-row.is-open .secret-eye-btn .eye-icon--open {
+  display: block;
+}
+.secret-field-row .secret-field-input {
+  flex: 1;
+  min-width: 0;
+  width: auto;
+}
+input.token-apify,
+.secret-field-input.token-apify {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
 input, select {
   height: 40px; border: 1px solid var(--line); border-radius: 10px; background: #0f1728; color: var(--text); padding: 0 12px;
 }

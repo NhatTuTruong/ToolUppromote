@@ -11,7 +11,7 @@
     <header class="topbar">
       <div>
         <h1>Lọc offer affiliate</h1>
-        <p>Bảng điều khiển Uppromote / Goaffpro + lọc traffic Similarweb (Apify)</p>
+        <p>Bảng điều khiển Uppromote / Goaffpro</p>
       </div>
       <div class="status-chip" id="statusChip">Rảnh</div>
     </header>
@@ -28,18 +28,63 @@
         <h2>Cài đặt môi trường</h2>
         <p class="muted">Token Apify dùng chung cho cả hai nguồn.</p>
         <div class="form-grid">
-          <label>Token Apify (APIFY_TOKEN)<input id="APIFY_TOKEN" type="password" spellcheck="false" autocomplete="off" /></label>
+          <label class="form-field-label">
+            <span class="form-field-caption">Token Apify (APIFY_TOKEN)</span>
+            <div class="secret-field-row" data-secret-for="APIFY_TOKEN">
+              <button type="button" class="secret-eye-btn" aria-expanded="false" aria-label="Hiện để chỉnh sửa" title="Hiện / ẩn để sửa">
+                <svg class="eye-icon eye-icon--shut" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                <svg class="eye-icon eye-icon--open" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              </button>
+              <input id="APIFY_TOKEN" class="secret-field-input token-apify" type="password" spellcheck="false" autocomplete="off" />
+            </div>
+          </label>
         </div>
         <h3 class="settings-sub">Uppromote</h3>
         <div class="form-grid">
-          <label>URL API (UPPROMOTE_API_URL)<input id="UPPROMOTE_API_URL" type="text" /></label>
-          <label>Bearer token (UPPROMOTE_BEARER_TOKEN)<input id="UPPROMOTE_BEARER_TOKEN" type="password" spellcheck="false" autocomplete="off" /></label>
+          <label class="form-field-label">
+            <span class="form-field-caption">URL API (UPPROMOTE_API_URL)</span>
+            <div class="secret-field-row" data-secret-for="UPPROMOTE_API_URL">
+              <button type="button" class="secret-eye-btn" aria-expanded="false" aria-label="Hiện để chỉnh sửa" title="Hiện / ẩn để sửa">
+                <svg class="eye-icon eye-icon--shut" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                <svg class="eye-icon eye-icon--open" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              </button>
+              <input id="UPPROMOTE_API_URL" class="secret-field-input" type="password" spellcheck="false" autocomplete="off" />
+            </div>
+          </label>
+          <label class="form-field-label">
+            <span class="form-field-caption">Bearer token (UPPROMOTE_BEARER_TOKEN)</span>
+            <div class="secret-field-row" data-secret-for="UPPROMOTE_BEARER_TOKEN">
+              <button type="button" class="secret-eye-btn" aria-expanded="false" aria-label="Hiện để chỉnh sửa" title="Hiện / ẩn để sửa">
+                <svg class="eye-icon eye-icon--shut" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                <svg class="eye-icon eye-icon--open" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              </button>
+              <input id="UPPROMOTE_BEARER_TOKEN" class="secret-field-input token-apify" type="password" spellcheck="false" autocomplete="off" />
+            </div>
+          </label>
           <label>Số offer mỗi trang (10–50, bước 10)<input id="UPPROMOTE_PER_PAGE" type="number" min="10" max="50" step="10" value="50" /></label>
         </div>
         <h3 class="settings-sub">Goaffpro</h3>
         <div class="form-grid">
-          <label>URL API (GOAFFPRO_API_URL)<input id="GOAFFPRO_API_URL" type="text" /></label>
-          <label>Bearer token (GOAFFPRO_BEARER_TOKEN)<input id="GOAFFPRO_BEARER_TOKEN" type="password" spellcheck="false" autocomplete="off" /></label>
+          <label class="form-field-label">
+            <span class="form-field-caption">URL API (GOAFFPRO_API_URL)</span>
+            <div class="secret-field-row" data-secret-for="GOAFFPRO_API_URL">
+              <button type="button" class="secret-eye-btn" aria-expanded="false" aria-label="Hiện để chỉnh sửa" title="Hiện / ẩn để sửa">
+                <svg class="eye-icon eye-icon--shut" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                <svg class="eye-icon eye-icon--open" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              </button>
+              <input id="GOAFFPRO_API_URL" class="secret-field-input" type="password" spellcheck="false" autocomplete="off" />
+            </div>
+          </label>
+          <label class="form-field-label">
+            <span class="form-field-caption">Bearer token (GOAFFPRO_BEARER_TOKEN)</span>
+            <div class="secret-field-row" data-secret-for="GOAFFPRO_BEARER_TOKEN">
+              <button type="button" class="secret-eye-btn" aria-expanded="false" aria-label="Hiện để chỉnh sửa" title="Hiện / ẩn để sửa">
+                <svg class="eye-icon eye-icon--shut" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                <svg class="eye-icon eye-icon--open" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              </button>
+              <input id="GOAFFPRO_BEARER_TOKEN" class="secret-field-input token-apify" type="password" spellcheck="false" autocomplete="off" />
+            </div>
+          </label>
           <label>Giới hạn mỗi request (10–50, bước 10)<input id="GOAFFPRO_LIMIT" type="number" min="10" max="50" step="10" value="50" /></label>
         </div>
         <div class="actions">
@@ -62,7 +107,7 @@
 
     <section id="runUppromoteTab" class="tab-panel">
       <div class="card">
-        <h2>Chạy — Uppromote1</h2>
+        <h2>Chạy — Uppromote</h2>
         <div class="form-grid compact">
           <label>Ngưỡng traffic tối thiểu<input id="minTraffic" type="number" value="9000" /></label>
           <label>Trang bắt đầu<input id="startPage" type="number" min="1" value="1" /></label>
@@ -99,7 +144,6 @@
     <section id="runGoaffproTab" class="tab-panel">
       <div class="card">
         <h2>Chạy — Goaffpro</h2>
-        <p class="muted">Tải cửa hàng từ API Goaffpro, gắn traffic Similarweb qua Apify. Cột <strong>Trạng thái</strong>: ĐẠT / CHƯA ĐẠT theo ngưỡng traffic.</p>
         <div class="form-grid compact">
           <label>Ngưỡng traffic tối thiểu<input id="minTrafficGp" type="number" value="9000" /></label>
           <label>Trang bắt đầu<input id="startPageGp" type="number" min="1" value="1" /></label>
@@ -137,7 +181,7 @@
           <h2>File kết quả</h2>
           <button class="btn" id="refreshResultsBtn">Làm mới</button>
         </div>
-        <p class="muted">Mỗi lần chạy chỉ tạo file Excel (.xlsx): dòng <strong>ĐẠT</strong> có nền xanh lá nhạt. Trang kết thúc mặc định <strong>1</strong>, giá trị nhập được lưu cho lần sau.</p>
+        
         <div class="file-list" id="resultFileList">
         </div>
       </div>

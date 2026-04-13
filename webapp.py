@@ -103,6 +103,22 @@ app = Flask(
 )
 
 
+def _refresh_license_env_from_file() -> None:
+    """
+    Đồng bộ các biến license từ .env vào process hiện tại.
+    Cần vì core.load_env_file() không overwrite biến đã tồn tại trong os.environ.
+    """
+    disk = core.parse_env_file(ENV_PATH)
+    for key in (
+        "AFF_LICENSE_API_BASE_URL",
+        "AFF_LICENSE_SERVER_URL",
+        "AFF_LICENSE_API_TOKEN",
+        "AFF_LICENSE_DAILY_LIMIT",
+    ):
+        if key in disk:
+            os.environ[key] = str(disk.get(key) or "").strip()
+
+
 def fetch_offers_uppromote(filters: dict) -> list:
     base_url = (os.getenv("UPPROMOTE_API_URL") or "").strip()
     if not base_url:
@@ -452,6 +468,7 @@ def api_save_settings():
 @app.get("/api/license")
 def api_license():
     core.load_env_file(ENV_PATH)
+    _refresh_license_env_from_file()
     license_guard.set_paths(BASE_DIR)
     return _no_cache_json(license_guard.license_status_payload())
 
@@ -459,6 +476,7 @@ def api_license():
 @app.post("/api/license/activate")
 def api_license_activate():
     core.load_env_file(ENV_PATH)
+    _refresh_license_env_from_file()
     license_guard.set_paths(BASE_DIR)
     payload = request.get_json(force=True) or {}
     key = (payload.get("key") or "").strip()
@@ -473,6 +491,7 @@ def api_license_activate():
 @app.post("/api/license/deactivate")
 def api_license_deactivate():
     core.load_env_file(ENV_PATH)
+    _refresh_license_env_from_file()
     license_guard.set_paths(BASE_DIR)
     ok, msg = license_guard.deactivate_on_this_machine()
     if not ok:
@@ -494,6 +513,7 @@ def api_run():
         source = "uppromote"
 
     core.load_env_file(ENV_PATH)
+    _refresh_license_env_from_file()
     license_guard.set_paths(BASE_DIR)
     ok_run, lic_err = license_guard.assert_can_start_pipeline(source)
     if not ok_run:

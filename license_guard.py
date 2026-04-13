@@ -1,20 +1,15 @@
 """
-Bản quyền: key HMAC (AFF_LICENSE_HMAC_SECRET) để xác thực key bán;
-tối đa 2 máy / key. Chưa kích hoạt: tối đa 10 record Uppromote + 10 record Goaffpro trọn đời trên máy
-(không reset theo ngày). Đã kích hoạt: quota record / ngày / máy (hằng LICENSED_EXPORTS_PER_DAY), reset 23h05 giờ Việt Nam (UTC+7).
-Không có secret: vẫn giới hạn dùng thử; kích hoạt key cần secret trong .env.
-
-Nếu đặt AFF_LICENSE_SERVER_URL: kích hoạt / hủy kích hoạt bắt buộc gọi máy chủ (đếm slot trên DB);
-file local lưu chữ ký REMOTEv1 từ server để tránh bịa binding_id.
+License guard (Python client):
+- Không tự quản lý key shape/HMAC ở Python nữa.
+- Kích hoạt / hủy kích hoạt / kiểm tra key qua API Laravel.
+- Python chỉ giữ trạng thái activation local + quota local.
 """
 from __future__ import annotations
 
-import base64
 import hashlib
 import hmac
 import json
 import os
-import re
 import subprocess
 import sys
 import time
@@ -26,12 +21,9 @@ except ImportError:
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-KEY_PREFIX = "AFL1"
-KEY_VERSION = b"AFL1v1|"
 FREE_TRIAL_UP_LIMIT = 10
 FREE_TRIAL_GP_LIMIT = 10
-LICENSED_EXPORTS_PER_DAY = 500
-MAX_MACHINES_PER_KEY = 2
+DEFAULT_LICENSED_EXPORTS_PER_DAY = 500
 # Chu kỳ quota theo VN: mỗi “ngày quota” là [D 23:05, D+1 23:05).
 _QUOTA_RESET_HOUR = 23
 _QUOTA_RESET_MINUTE = 5
@@ -51,7 +43,7 @@ _LICENSED_USAGE_PATH: Path | None = None
 
 
 def calendar_day_vietnam() -> str:
-    """Mã ngày quota YYYY-MM-DD (giờ VN UTC+7): đổi chu kỳ lúc 23:05 mỗi ngày lịch."""
+    """Mã ngày quota YYYY-MM-DD (giờ VN UTC+7): đổi chu kỳ lúc 00:00 mỗi ngày lịch."""
     now = datetime.now(_TZ_VN)
     boundary = now.replace(
         hour=_QUOTA_RESET_HOUR,
@@ -79,21 +71,34 @@ def _paths_ok() -> bool:
     )
 
 
-def license_hmac_secret() -> bytes | None:
-    """Secret vendor: dùng xác thực key AFL1 và ký file usage (nếu có). None = không bán key nhưng vẫn giới hạn dùng thử."""
-    raw = (os.getenv("AFF_LICENSE_HMAC_SECRET") or "").strip()
+def license_api_base_url() -> str:
+    """Ưu tiên AFF_LICENSE_API_BASE_URL; fallback AFF_LICENSE_SERVER_URL để tương thích cũ."""
+    return (
+        (os.getenv("AFF_LICENSE_API_BASE_URL") or os.getenv("AFF_LICENSE_SERVER_URL") or "")
+        .strip()
+        .rstrip("/")
+    )
+
+
+def license_api_token() -> str:
+    return (os.getenv("AFF_LICENSE_API_TOKEN") or "").strip()
+
+
+def licensed_exports_per_day() -> int:
+    raw = (os.getenv("AFF_LICENSE_DAILY_LIMIT") or "").strip()
     if not raw:
-        return None
-    return raw.encode("utf-8")
+        return DEFAULT_LICENSED_EXPORTS_PER_DAY
+    try:
+        n = int(raw)
+    except ValueError:
+        return DEFAULT_LICENSED_EXPORTS_PER_DAY
+    return max(1, n)
 
 
 def _usage_hmac_key() -> bytes:
-    """Ký số lần xuất dùng thử: dùng secret vendor nếu có, không thì khóa phụ cố định theo fingerprint máy."""
-    s = license_hmac_secret()
-    if s:
-        return s
+    """Ký usage local bằng key theo fingerprint máy."""
     mfp = machine_fingerprint().encode("ascii", errors="replace")
-    return hashlib.sha256(b"AFF_TRIAL_USAGE_LOCAL_v1|" + mfp).digest()
+    return hashlib.sha256(b"AFF_TRIAL_USAGE_LOCAL_v2|" + mfp).digest()
 
 
 def _creationflags_no_window() -> int:
@@ -163,61 +168,15 @@ def normalize_license_key(key: str) -> str:
     return s
 
 
-_KEY_RE = re.compile(rf"^{KEY_PREFIX}-([A-Z2-7]+)-([A-Z2-7]+)$")
-
-
-def verify_license_key_shape(secret: bytes, key: str) -> bool:
-    """Key hợp lệ khi HMAC(secret, AFL1v1|body) khớp phần checksum (chống giả mạo không có secret)."""
-    norm = normalize_license_key(key)
-    m = _KEY_RE.match(norm)
-    if not m:
-        return False
-    body_b32, mac_b32 = m.group(1), m.group(2)
-    try:
-        pad = "=" * ((8 - len(body_b32) % 8) % 8)
-        body = base64.b32decode(body_b32 + pad, casefold=True)
-        pad2 = "=" * ((8 - len(mac_b32) % 8) % 8)
-        expect = base64.b32decode(mac_b32 + pad2, casefold=True)
-    except Exception:
-        return False
-    if len(body) < 10 or len(expect) < 4:
-        return False
-    msg = KEY_VERSION + body
-    mac = hmac.new(secret, msg, hashlib.sha256).digest()[: len(expect)]
-    return hmac.compare_digest(mac, expect)
-
-
-def binding_id_for_key(secret: bytes, normalized_key: str) -> str:
-    return hashlib.sha256(hmac.new(secret, normalized_key.encode("utf-8"), hashlib.sha256).digest()).hexdigest()
-
-
-def license_server_url() -> str:
-    """Base URL máy chủ slot (không có / cuối). Rỗng = chỉ dùng kích hoạt local như cũ."""
-    return (os.getenv("AFF_LICENSE_SERVER_URL") or "").strip().rstrip("/")
-
-
-def _remote_activation_expected_sig(secret: bytes, binding_id: str, machine_fp: str, ts: str) -> str:
-    msg = f"REMOTEv1|{binding_id}|{machine_fp}|{ts}".encode("utf-8")
-    return hmac.new(secret, msg, hashlib.sha256).hexdigest()
-
-
-def _remote_activation_sig_valid(secret: bytes, inst: dict, machine_fp: str) -> bool:
-    bid = str(inst.get("binding_id") or "")
-    ts = str(inst.get("activation_ts") or "")
-    sig = str(inst.get("activation_sig") or "")
-    if not bid or not ts or not sig:
-        return False
-    if str(inst.get("machine_fingerprint") or "") != machine_fp:
-        return False
-    exp = _remote_activation_expected_sig(secret, bid, machine_fp, ts)
-    return hmac.compare_digest(exp, sig)
-
-
 def _license_server_post_json(url: str, payload: dict, timeout_sec: float = 28.0) -> tuple[bool, dict | str]:
     if not requests:
         return False, "Thiếu thư viện requests — cài: pip install requests"
+    headers = {"Content-Type": "application/json"}
+    token = license_api_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     try:
-        res = requests.post(url, json=payload, timeout=timeout_sec)
+        res = requests.post(url, json=payload, headers=headers, timeout=timeout_sec)
     except requests.RequestException as exc:
         return False, f"Không kết nối được máy chủ license: {exc}"
     try:
@@ -230,19 +189,18 @@ def _license_server_post_json(url: str, payload: dict, timeout_sec: float = 28.0
 
 
 def _activate_via_license_server(norm_key: str) -> tuple[bool, str]:
-    base = license_server_url()
-    secret = license_hmac_secret()
-    if not secret:
-        return (
-            False,
-            "Thiếu AFF_LICENSE_HMAC_SECRET — cần secret trùng server để xác thực chữ ký kích hoạt.",
-        )
-    if not verify_license_key_shape(secret, norm_key):
-        return False, "Key không hợp lệ hoặc đã nhập sai."
+    base = license_api_base_url()
+    if not base:
+        return False, "Thiếu AFF_LICENSE_API_BASE_URL (hoặc AFF_LICENSE_SERVER_URL)."
     mfp = machine_fingerprint()
-    url = f"{base}/v1/activate"
+    url = f"{base}/api/v1/licenses/activate"
     ok, data = _license_server_post_json(
-        url, {"license_key": norm_key, "machine_fingerprint": mfp}
+        url,
+        {
+            "license_key": norm_key,
+            "machine_fingerprint": mfp,
+            "client": "python-filter",
+        },
     )
     if not ok:
         assert isinstance(data, str)
@@ -250,44 +208,31 @@ def _activate_via_license_server(norm_key: str) -> tuple[bool, str]:
     assert isinstance(data, dict)
     if not data.get("ok"):
         return False, str(data.get("error") or "Server từ chối kích hoạt.")
-    bid = str(data.get("binding_id") or "")
-    ts = str(data.get("activation_ts") or "")
-    sig = str(data.get("activation_sig") or "")
-    if not bid or not ts or not sig:
-        return False, "Server không trả đủ dữ liệu kích hoạt (binding_id / activation_ts / activation_sig)."
-    if not _remote_activation_sig_valid(
-        secret,
-        {
-            "binding_id": bid,
-            "activation_ts": ts,
-            "activation_sig": sig,
-            "machine_fingerprint": mfp,
-        },
-        mfp,
-    ):
-        return False, "Chữ ký kích hoạt từ server không khớp — kiểm tra AFF_LICENSE_HMAC_SECRET trùng với server."
-    hint = str(data.get("key_hint") or (norm_key[-8:] if len(norm_key) >= 8 else norm_key))
+    activation_id = str(data.get("activation_id") or "")
+    if not activation_id:
+        return False, "Server không trả activation_id."
+    hint = str(data.get("key_hint") or (norm_key[-6:] if len(norm_key) >= 6 else norm_key))
+    daily_limit = int(data.get("daily_limit") or licensed_exports_per_day())
+    expires_at = str(data.get("expires_at") or "")
     st = load_license_state()
     st["this_install"] = {
-        "mode": "remote",
-        "binding_id": bid,
+        "activation_id": activation_id,
         "key_hint": hint,
         "machine_fingerprint": mfp,
-        "activation_ts": ts,
-        "activation_sig": sig,
+        "daily_limit": max(1, daily_limit),
+        "expires_at": expires_at,
         "activated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
-    st["per_key_machines"] = {}
     st["v"] = 1
     save_license_state(st)
     return True, "Kích hoạt thành công (đã đăng ký slot trên server)."
 
 
 def _deactivate_via_license_server(binding_id: str, machine_fp: str) -> tuple[bool, str]:
-    base = license_server_url()
-    url = f"{base}/v1/deactivate"
+    base = license_api_base_url()
+    url = f"{base}/api/v1/licenses/deactivate"
     ok, data = _license_server_post_json(
-        url, {"binding_id": binding_id, "machine_fingerprint": machine_fp}
+        url, {"activation_id": binding_id, "machine_fingerprint": machine_fp}
     )
     if not ok:
         assert isinstance(data, str)
@@ -296,6 +241,50 @@ def _deactivate_via_license_server(binding_id: str, machine_fp: str) -> tuple[bo
     if not data.get("ok"):
         return False, str(data.get("error") or "Server từ chối hủy kích hoạt.")
     return True, str(data.get("message") or "Đã gỡ slot trên server.")
+
+
+def _validate_via_license_server(activation_id: str, machine_fp: str) -> tuple[bool, dict | str]:
+    base = license_api_base_url()
+    if not base:
+        return False, "Thiếu AFF_LICENSE_API_BASE_URL (hoặc AFF_LICENSE_SERVER_URL)."
+    url = f"{base}/api/v1/licenses/validate"
+    return _license_server_post_json(
+        url,
+        {"activation_id": activation_id, "machine_fingerprint": machine_fp},
+    )
+
+
+def _sync_this_install_from_server() -> tuple[bool, str]:
+    """
+    Đồng bộ trạng thái activation local (đặc biệt daily_limit) từ Laravel server.
+    Trả về (ok, message). ok=False khi key không còn hợp lệ hoặc lỗi kết nối/xác thực.
+    """
+    st = load_license_state()
+    inst = st.get("this_install") or {}
+    activation_id = str(inst.get("activation_id") or "").strip()
+    if not activation_id:
+        return False, "Thiếu activation_id local."
+
+    mfp = machine_fingerprint()
+    ok_remote, remote_data = _validate_via_license_server(activation_id, mfp)
+    if not ok_remote:
+        assert isinstance(remote_data, str)
+        return False, remote_data
+    assert isinstance(remote_data, dict)
+    if not remote_data.get("ok"):
+        st["this_install"] = {}
+        save_license_state(st)
+        return False, str(remote_data.get("error") or "Key không còn hiệu lực trên server.")
+
+    daily_limit = int(remote_data.get("daily_limit") or _effective_daily_limit())
+    st["this_install"] = {
+        **inst,
+        "daily_limit": max(1, daily_limit),
+        "expires_at": str(remote_data.get("expires_at") or inst.get("expires_at") or ""),
+        "machine_fingerprint": mfp,
+    }
+    save_license_state(st)
+    return True, ""
 
 
 def _load_json(path: Path) -> dict:
@@ -324,102 +313,51 @@ def save_license_state(data: dict) -> None:
 
 
 def is_licensed_on_this_machine() -> bool:
-    secret = license_hmac_secret()
     st = load_license_state()
     inst = st.get("this_install") or {}
-    bid = inst.get("binding_id")
-    if not bid:
+    activation_id = str(inst.get("activation_id") or "")
+    if not activation_id:
         return False
     mfp = machine_fingerprint()
-    if inst.get("mode") == "remote":
-        if not secret:
-            return False
-        return _remote_activation_sig_valid(secret, inst, mfp)
-    if not secret:
+    if str(inst.get("machine_fingerprint") or "") != mfp:
         return False
-    machines = (st.get("per_key_machines") or {}).get(bid) or []
-    return mfp in machines
+    expires_at = str(inst.get("expires_at") or "").strip()
+    if not expires_at:
+        return True
+    try:
+        expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    return expiry > datetime.now(timezone.utc)
 
 
 def activate_key(key: str) -> tuple[bool, str]:
     norm = normalize_license_key(key)
-    if license_server_url():
-        return _activate_via_license_server(norm)
-
-    secret = license_hmac_secret()
-    if not secret:
-        return (
-            False,
-            "Thiếu AFF_LICENSE_HMAC_SECRET trong .env — không thể xác thực key. "
-            "Thêm secret (trùng lúc sinh key) rồi khởi động lại app.",
-        )
-    if not verify_license_key_shape(secret, norm):
-        return False, "Key không hợp lệ hoặc đã nhập sai."
-    bid = binding_id_for_key(secret, norm)
-    mfp = machine_fingerprint()
-    st = load_license_state()
-    per = dict(st.get("per_key_machines") or {})
-    lst = list(per.get(bid) or [])
-    if mfp in lst:
-        pass
-    elif len(lst) >= MAX_MACHINES_PER_KEY:
-        return False, f"Key này đã kích hoạt trên {MAX_MACHINES_PER_KEY} máy khác."
-    else:
-        lst.append(mfp)
-    per[bid] = lst
-    st["per_key_machines"] = per
-    st["this_install"] = {
-        "binding_id": bid,
-        "key_hint": norm[-8:] if len(norm) >= 8 else norm,
-        "activated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-    }
-    st["v"] = 1
-    save_license_state(st)
-    return True, "Kích hoạt thành công."
+    return _activate_via_license_server(norm)
 
 
 def deactivate_on_this_machine() -> tuple[bool, str]:
     """
-    Gỡ kích hoạt trên máy này: xóa khỏi danh sách máy của key, xóa this_install,
-    giải phóng 1 slot (tối đa 2 máy/key). Giữ file .aff_licensed_usage.json để kích hoạt lại cùng key
-    không reset quota 400/ngày trong cùng ngày.
-
-    Nếu this_install.mode == remote: bắt buộc gọi máy chủ (AFF_LICENSE_SERVER_URL) trước khi xóa local.
+    Hủy kích hoạt máy hiện tại trên Laravel API và xóa trạng thái local.
+    Giữ file .aff_licensed_usage.json để không reset quota ngày hiện tại khi kích hoạt lại.
     """
-    if not is_licensed_on_this_machine():
-        return False, "Máy này chưa được kích hoạt."
     if not _paths_ok():
         return False, "Không ghi được trạng thái license."
+    if not is_licensed_on_this_machine():
+        return False, "Máy này chưa được kích hoạt."
     st = load_license_state()
     inst = st.get("this_install") or {}
-    bid = inst.get("binding_id")
+    bid = str(inst.get("activation_id") or "")
     if not bid:
         return False, "Không có thông tin kích hoạt trên máy này."
     mfp = machine_fingerprint()
-
-    if inst.get("mode") == "remote":
-        base = license_server_url()
-        if not base:
-            return (
-                False,
-                "Kích hoạt qua server: cần AFF_LICENSE_SERVER_URL trong .env để báo hủy slot lên server. "
-                "Khôi phục URL rồi thử lại.",
-            )
-        ok, msg = _deactivate_via_license_server(bid, mfp)
-        if not ok:
-            return False, msg
-
-    per = dict(st.get("per_key_machines") or {})
-    lst = [x for x in (per.get(bid) or []) if x != mfp]
-    if lst:
-        per[bid] = lst
-    else:
-        per.pop(bid, None)
-    st["per_key_machines"] = per
+    ok, msg = _deactivate_via_license_server(bid, mfp)
+    if not ok:
+        return False, msg
     st["this_install"] = {}
     st["v"] = int(st.get("v") or 1)
     save_license_state(st)
-    return True, "Đã hủy kích hoạt trên máy này. Slot máy trên key được giải phóng (có thể kích hoạt lại hoặc dùng máy khác)."
+    return True, "Đã hủy kích hoạt trên máy này."
 
 
 def _sign_free_v1(secret: bytes, mfp: str, day: str, n: int) -> str:
@@ -535,15 +473,16 @@ def licensed_exports_used_today() -> int:
     day, n, sig = _load_licensed_usage()
     if day != today:
         return 0
+    daily_limit = _effective_daily_limit()
     if not _licensed_usage_valid(key, mfp, day, n, sig):
-        return LICENSED_EXPORTS_PER_DAY
-    return min(n, LICENSED_EXPORTS_PER_DAY)
+        return daily_limit
+    return min(n, daily_limit)
 
 
 def licensed_exports_remaining_today() -> int:
     if not is_licensed_on_this_machine():
         return 10**9
-    return max(0, LICENSED_EXPORTS_PER_DAY - licensed_exports_used_today())
+    return max(0, _effective_daily_limit() - licensed_exports_used_today())
 
 
 def record_free_export_rows(count: int, source: str) -> None:
@@ -577,7 +516,7 @@ def record_licensed_export_rows(count: int) -> None:
     if day != today or not _licensed_usage_valid(key, mfp, day, n, sig):
         n = 0
         day = today
-    n2 = min(LICENSED_EXPORTS_PER_DAY, n + count)
+    n2 = min(_effective_daily_limit(), n + count)
     out = {"day": day, "n": n2, "sig": _sign_licensed_daily(key, mfp, day, n2)}
     _atomic_write(_LICENSED_USAGE_PATH, out)
 
@@ -600,9 +539,14 @@ def export_offer_cap(total_offers: int, source: str) -> int:
 def assert_can_start_pipeline(source: str) -> tuple[bool, str]:
     """Trước khi chạy pipeline: chặn nếu hết quota (dùng thử trọn đời hoặc bản quyền theo ngày VN)."""
     if is_licensed_on_this_machine():
+        ok_sync, sync_msg = _sync_this_install_from_server()
+        if not ok_sync:
+            return False, f"Không xác thực được key với License API: {sync_msg}"
+
+    if is_licensed_on_this_machine():
         if licensed_exports_remaining_today() <= 0:
             return False, (
-                f"Đã kích hoạt nhưng đã dùng hết {LICENSED_EXPORTS_PER_DAY} record hôm nay "
+                f"Đã kích hoạt nhưng đã dùng hết {_effective_daily_limit()} record hôm nay "
                 "(theo giờ Việt Nam UTC+7, reset lúc 23h05). Thử lại sau."
             )
         return True, ""
@@ -621,13 +565,13 @@ def zero_export_cap_log_message(source: str) -> str:
     """Thông báo khi cap == 0 trước pipeline."""
     if is_licensed_on_this_machine():
         return (
-            f"Đã dùng hết {LICENSED_EXPORTS_PER_DAY} record hôm nay (giờ Việt Nam UTC+7, reset 23h05). "
+            f"Đã dùng hết {_effective_daily_limit()} record hôm nay (giờ Việt Nam UTC+7, reset 23h05). "
             "Thử lại ngày mai."
         )
     lab = "Goaffpro" if normalize_free_source(source) == "goaffpro" else "Uppromote"
     cap = FREE_TRIAL_GP_LIMIT if normalize_free_source(source) == "goaffpro" else FREE_TRIAL_UP_LIMIT
     return (
-        f"Đã hết {cap} record dùng thử {lab} trên máy này (không reset theo thời gian). "
+        f"Đã hết {cap} record dùng thử {lab} trên máy này. "
         "Thử nguồn còn lại hoặc kích hoạt key."
     )
 
@@ -638,7 +582,7 @@ def export_cap_partial_log(total_offers: int, cap: int, source: str) -> str:
     if is_licensed_on_this_machine():
         return (
             f"Giới hạn bản đã kích hoạt: chỉ xử lý {cap}/{total_offers} offer trong lần chạy này "
-            f"(tối đa {LICENSED_EXPORTS_PER_DAY} record / ngày / máy, reset 23h05 giờ Việt Nam UTC+7; "
+            f"(tối đa {_effective_daily_limit()} record / ngày / máy, reset 23h05 giờ Việt Nam UTC+7; "
             f"lần này chỉ còn quota {cap} record)."
         )
     lab = "Goaffpro" if normalize_free_source(source) == "goaffpro" else "Uppromote"
@@ -650,17 +594,17 @@ def export_cap_partial_log(total_offers: int, cap: int, source: str) -> str:
 
 
 def license_status_payload() -> dict:
-    secret = license_hmac_secret()
     mfp = machine_fingerprint()
+    sync_error = ""
+    if is_licensed_on_this_machine():
+        ok_sync, sync_msg = _sync_this_install_from_server()
+        if not ok_sync:
+            sync_error = sync_msg
     licensed = is_licensed_on_this_machine()
     st = load_license_state()
     inst = st.get("this_install") or {}
-    srv = bool(license_server_url())
-    activation_mode = (
-        "remote"
-        if inst.get("mode") == "remote"
-        else ("local" if licensed else "none")
-    )
+    srv = bool(license_api_base_url())
+    activation_mode = "remote" if licensed else "none"
     rem_up = free_exports_remaining_today("uppromote")
     rem_gp = free_exports_remaining_today("goaffpro")
     used_up = free_branch_used_today("uppromote")
@@ -669,33 +613,27 @@ def license_status_payload() -> dict:
     lic_rem = licensed_exports_remaining_today() if licensed else None
     if licensed:
         msg = (
-            f"Đã kích hoạt — còn {lic_rem}/{LICENSED_EXPORTS_PER_DAY} record hôm nay "
-            "(giờ Việt Nam UTC+7, reset 23h05)."
-        )
-        if inst.get("mode") == "remote":
-            msg += " Slot được quản lý trên máy chủ license."
-    elif not secret:
-        msg = (
-            f"Chưa kích hoạt — dùng thử trọn đời: Uppromote còn {rem_up}/{FREE_TRIAL_UP_LIMIT}, "
-            f"Goaffpro còn {rem_gp}/{FREE_TRIAL_GP_LIMIT} record (không reset). "
-            "Thêm AFF_LICENSE_HMAC_SECRET vào .env để khách nhập key đã mua."
+            f"Đã kích hoạt — còn {lic_rem}/{_effective_daily_limit()} record hôm nay "
+            "(reset 23h05)."
         )
     else:
         msg = (
             f"Chưa kích hoạt — dùng thử: Uppromote còn {rem_up}/{FREE_TRIAL_UP_LIMIT}, "
-            f"Goaffpro còn {rem_gp}/{FREE_TRIAL_GP_LIMIT} record (không reset theo thời gian)."
+            f"Goaffpro còn {rem_gp}/{FREE_TRIAL_GP_LIMIT} record."
         )
     if srv and not licensed:
-        msg += " Kích hoạt / hủy kích hoạt cần internet (AFF_LICENSE_SERVER_URL)."
+        msg += " Kích hoạt / hủy kích hoạt cần internet."
+    if sync_error and licensed:
+        msg += f" (Chưa đồng bộ được limit mới từ server: {sync_error})"
     return {
         "enforcement": True,
-        "vendor_secret_configured": bool(secret),
+        "vendor_secret_configured": bool(license_api_token()),
         "license_server_configured": srv,
         "license_activation_mode": activation_mode,
         "licensed": licensed,
         "machine_id": mfp,
         "timezone_note": (
-            "Bản quyền: ngày quota giờ Việt Nam (UTC+7), đổi chu kỳ 23h05."
+            "Bản quyền (Laravel): ngày quota giờ Việt Nam (UTC+7), đổi chu kỳ 23h05."
             if licensed
             else "Dùng thử: không reset theo ngày; bản kích hoạt có quota theo ngày (VN UTC+7, 23h05)."
         ),
@@ -711,13 +649,25 @@ def license_status_payload() -> dict:
         "free_remaining_uppromote_today": None if licensed else rem_up,
         "free_remaining_goaffpro_today": None if licensed else rem_gp,
         "free_remaining_today": None if licensed else min(rem_up, rem_gp),
-        "licensed_daily_limit": LICENSED_EXPORTS_PER_DAY,
+        "licensed_daily_limit": _effective_daily_limit(),
         "licensed_used_today": lic_used if licensed else 0,
         "licensed_remaining_today": lic_rem,
-        "max_machines_per_key": MAX_MACHINES_PER_KEY,
+        "max_machines_per_key": None,
+        "activation_id": inst.get("activation_id") if licensed else None,
         "message": msg,
     }
 
 
 def should_track_free_usage() -> bool:
     return not is_licensed_on_this_machine()
+
+
+def _effective_daily_limit() -> int:
+    st = load_license_state()
+    inst = st.get("this_install") or {}
+    v = inst.get("daily_limit")
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        return licensed_exports_per_day()
+    return max(1, n)

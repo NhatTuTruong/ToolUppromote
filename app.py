@@ -46,10 +46,15 @@ ENV_SAVE_KEY_ORDER = [
     "GOAFFPRO_API_URL",
     "GOAFFPRO_BEARER_TOKEN",
     "GOAFFPRO_LIMIT",
+    "AFF_LICENSE_API_BASE_URL",
+    "AFF_LICENSE_API_TOKEN",
+    "AFF_LICENSE_DAILY_LIMIT",
     "MIN_VISITS",
 ]
 
-SECRET_ENV_KEYS = frozenset({"APIFY_TOKEN", "UPPROMOTE_BEARER_TOKEN", "GOAFFPRO_BEARER_TOKEN"})
+SECRET_ENV_KEYS = frozenset(
+    {"APIFY_TOKEN", "UPPROMOTE_BEARER_TOKEN", "GOAFFPRO_BEARER_TOKEN", "AFF_LICENSE_API_TOKEN"}
+)
 
 
 def _parse_env_file_to_dict(path: Path) -> dict:
@@ -138,6 +143,9 @@ def load_env_defaults():
         ),
         "GOAFFPRO_BEARER_TOKEN": os.getenv("GOAFFPRO_BEARER_TOKEN", ""),
         "GOAFFPRO_LIMIT": str(core.clamp_offers_per_page(os.getenv("GOAFFPRO_LIMIT"))),
+        "AFF_LICENSE_API_BASE_URL": os.getenv("AFF_LICENSE_API_BASE_URL", os.getenv("AFF_LICENSE_SERVER_URL", "")),
+        "AFF_LICENSE_API_TOKEN": os.getenv("AFF_LICENSE_API_TOKEN", ""),
+        "AFF_LICENSE_DAILY_LIMIT": os.getenv("AFF_LICENSE_DAILY_LIMIT", "500"),
     }
 
 
@@ -388,7 +396,7 @@ class App(tk.Tk):
         row = 0
         for key in self.vars:
             ttk.Label(settings, text=key, width=26).grid(row=row, column=0, sticky="w", pady=3)
-            ttk.Entry(settings, textvariable=self.vars[key], width=95, show="*" if "TOKEN" in key else "").grid(
+            ttk.Entry(settings, textvariable=self.vars[key], width=95).grid(
                 row=row, column=1, sticky="ew", pady=3
             )
             row += 1

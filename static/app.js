@@ -16,6 +16,9 @@ const settingKeys = [
   "GOAFFPRO_API_URL",
   "GOAFFPRO_BEARER_TOKEN",
   "GOAFFPRO_LIMIT",
+  "AFF_LICENSE_API_BASE_URL",
+  "AFF_LICENSE_API_TOKEN",
+  "AFF_LICENSE_DAILY_LIMIT",
 ];
 
 function clampOffersPerPageField(id) {
@@ -32,6 +35,7 @@ const SECRET_SETTING_KEYS = new Set([
   "APIFY_TOKEN",
   "UPPROMOTE_BEARER_TOKEN",
   "GOAFFPRO_BEARER_TOKEN",
+  "AFF_LICENSE_API_TOKEN",
 ]);
 
 function settingValueForPayload(key) {
@@ -57,6 +61,38 @@ const FILTER_SYNC_PAIRS = [
 
 function $(id) {
   return document.getElementById(id);
+}
+
+/** Ô Token Apify / URL / Bearer: mặc định đóng (type=password che ký tự); bấm mắt để sửa; lưu hoặc load lại → đóng. Giá trị .value không đổi khi đóng/mở. */
+function setSecretFieldRowOpen(row, open) {
+  if (!row) return;
+  const id = row.getAttribute("data-secret-for");
+  const input = id ? $(id) : null;
+  if (!input) return;
+  row.classList.toggle("is-open", open);
+  input.type = open ? "text" : "password";
+  const btn = row.querySelector(".secret-eye-btn");
+  if (btn) {
+    btn.setAttribute("aria-expanded", open ? "true" : "false");
+    btn.setAttribute("aria-label", open ? "Ẩn (đóng ô nhập)" : "Hiện để chỉnh sửa");
+  }
+  if (open) input.focus();
+}
+
+function closeAllSecretFieldRows() {
+  document.querySelectorAll(".secret-field-row").forEach((row) => setSecretFieldRowOpen(row, false));
+}
+
+function bindSecretEyeButtons() {
+  document.querySelectorAll(".secret-field-row").forEach((row) => {
+    const btn = row.querySelector(".secret-eye-btn");
+    if (!btn) return;
+    btn.addEventListener("click", (e) => {
+      e.preventDefault();
+      const open = !row.classList.contains("is-open");
+      setSecretFieldRowOpen(row, open);
+    });
+  });
 }
 
 function syncFiltersToGoaffpro() {
@@ -127,6 +163,7 @@ async function loadSettings() {
   settingKeys.forEach((k) => {
     if ($(k)) $(k).value = data[k] || "";
   });
+  closeAllSecretFieldRows();
 }
 
 async function saveSettings() {
@@ -145,6 +182,7 @@ async function saveSettings() {
     alert("Không lưu được cài đặt.");
     return;
   }
+  closeAllSecretFieldRows();
   alert("Đã lưu cài đặt.");
 }
 
@@ -494,6 +532,7 @@ function bindEvents() {
   document.querySelectorAll(".tab-btn").forEach((btn) => {
     btn.addEventListener("click", () => switchTab(btn.dataset.tab, true));
   });
+  bindSecretEyeButtons();
   $("saveSettingsBtn").addEventListener("click", saveSettings);
   $("runBtnUppromote").addEventListener("click", () => runFilter("uppromote"));
   $("runBtnGoaffpro").addEventListener("click", () => runFilter("goaffpro"));

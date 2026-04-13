@@ -2,6 +2,35 @@
 
 Tài liệu dành cho người phát triển / đóng gói ứng dụng **Lọc offer affiliate** (Uppromote / Goaffpro + traffic qua Apify).
 
+## Lưu ý mới về license
+
+- Từ bản này, app Python **không xác thực key cục bộ bằng HMAC** nữa.
+- Luồng kích hoạt/hủy kích hoạt key chuyển sang **Laravel API**.
+- Source Laravel deploy riêng nằm tại `license_server_laravel_app/` (độc lập với tool Python).
+- Cấu hình Python app:
+
+```env
+AFF_LICENSE_API_BASE_URL=https://license.your-domain.com
+AFF_LICENSE_API_TOKEN=replace-with-strong-token
+AFF_LICENSE_DAILY_LIMIT=500
+```
+
+## Tách deploy Laravel khỏi Python
+
+Mục tiêu production:
+
+- Deploy **chỉ** source Laravel lên VPS/shared hosting.
+- Tool Python chỉ cần `.env` chứa `AFF_LICENSE_API_BASE_URL` + `AFF_LICENSE_API_TOKEN`.
+- Không cần deploy `license_server` (Flask cũ), không cần copy source Laravel vào máy user chạy tool.
+
+Quy trình nhanh:
+
+1. Lấy thư mục `license_server_laravel_app/` ra repo/server riêng.
+2. Trên server Laravel: `composer install`, cấu hình `.env` (MySQL), `php artisan migrate`.
+3. Import key: `php artisan license:import-keys "/path/vendor_keys_AFL1.txt"`.
+4. Trên tool Python: chỉnh `.env` trỏ URL license server public (HTTPS).
+5. Build/đóng gói Python như bình thường, không kèm source Laravel.
+
 ## Yêu cầu môi trường
 
 - Python 3.10+ (khuyến nghị bản ổn định mới nhất trên Windows).
@@ -35,12 +64,80 @@ python desktop_app.py
 
 File cấu hình `.env` nằm cùng thư mục làm việc của app (xem `runtime_paths.app_dir()` — thường là thư mục chứa `.exe` khi đóng gói, hoặc thư mục project khi chạy `python webapp.py`).
 
+## Chạy thử trên máy local trước (license server + app lọc)
+
+Làm **từ thư mục gốc project** (nơi có `webapp.py`, `license_guard.py`, `license_server/`).
+
+### 1. Cài thêm gói cho license server (một lần)
+
+```bash
+python -m pip install -r requirements.txt
+python -m pip install -r license_server/requirements.txt
+```
+
+(Chỉ cần Flask + SQLite thì về lý thuyết chỉ cài `flask`; file `license_server/requirements.txt` đã gồm `pymysql`, `gunicorn` — dùng luôn cho đỡ nhầm khi sau này bật MySQL.)
+
+### 2. Cấu hình `.env` gốc project
+
+Ít nhất:
+
+```env
+AFF_LICENSE_HMAC_SECRET=chuỗi-tối-thiểu-16-ký-tự-trùng-khi-sinh-key
+LICENSE_ADMIN_PASSWORD=mật-khẩu-admin-tạm
+```
+
+Để **app lọc** gọi **license server trên cùng máy**, thêm:
+
+```env
+AFF_LICENSE_SERVER_URL=http://127.0.0.1:8765
+```
+
+**Không** đặt `MYSQL_HOST` / `LICENSE_DB_DRIVER=mysql` → server dùng **SQLite**, file `data/license_slots.db` (tự tạo).
+
+### 3. Hai terminal (hoặc hai cửa sổ)
+
+**Terminal A — license server:**
+
+```bat
+cd đường\dẫn\gốc\project
+python -m license_server
+```
+
+Mở trình duyệt: `http://127.0.0.1:8765/` (trang chủ), `http://127.0.0.1:8765/v1/health` (JSON), `http://127.0.0.1:8765/admin/login` (quản lý slot).
+
+**Terminal B — app lọc:**
+
+```bat
+cd đường\dẫn\gốc\project
+python webapp.py
+```
+
+Mở `http://127.0.0.1:5050` → tab **Cài đặt / Bản quyền**: kích hoạt bằng key `AFL1-…` (đã sinh bằng `tools/gen_license_keys.py` với cùng secret).
+
+### 4. Kiểm tra nhanh
+
+| Việc | Kỳ vọng |
+|------|--------|
+| `GET http://127.0.0.1:8765/v1/health` | `{"ok":true,"service":"aff-license-slots"}` |
+| Kích hoạt key trên webapp | Thành công, admin server thấy thêm 1 dòng slot |
+| Hủy kích hoạt trên webapp | Slot trên server giảm / mất tương ứng |
+
+### 5. Build `.exe` rồi vẫn test với server local
+
+Chạy `build_exe.bat`, copy `.env` (có `AFF_LICENSE_SERVER_URL=http://127.0.0.1:8765`) **cạnh** file `.exe`. Trên cùng PC, bật `python -m license_server` trước, rồi mở app `.exe` — kích hoạt/hủy vẫn gọi về `127.0.0.1:8765`.
+
+Khi đã deploy server lên hosting, đổi `AFF_LICENSE_SERVER_URL` thành `https://license.domain.com` (không dùng `127.0.0.1` trên máy khách ngoài mạng của bạn).
+
 ## Đóng gói Windows (.exe)
 
 Trên Windows, từ thư mục gốc project:
 
+py -3.11 -m venv venv
+source venv/Scripts/activate
+
 ```bat
-build_exe.bat
+./build_exe.bat
+
 ```
 
 Script sẽ cài dependency và gọi PyInstaller với `build_exe.spec`. Kết quả: `dist\AffiliateOfferFilter.exe`.
@@ -210,6 +307,8 @@ Mở firewall cho port `8765` và dùng URL `http://IP:8765` hoặc tên miền 
 ## Giới hạn dùng thử (tham chiếu code)
 
 - Chưa kích hoạt key: **10** record Uppromote + **10** record Goaffpro **trên mỗi máy**, **không reset** theo ngày (file `.aff_free_usage.json`).
-- Đã kích hoạt: quota **theo ngày** (giờ Việt Nam, reset ~23:05) — giá trị cụ thể trong `LICENSED_EXPORTS_PER_DAY` tại `license_guard.py`.
+- Đã kích hoạt: quota **theo ngày** (giờ Việt Nam, reset 00:00) — giá trị cụ thể trong `LICENSED_EXPORTS_PER_DAY` tại `license_guard.py`.
+
+**Reset quota “record hôm nay” khi đã kích hoạt (không chờ tới 23h05):** đếm nằm trong file **`.aff_licensed_usage.json`** (cùng thư mục với `.env` / file `.exe`). Đóng app, **xóa** file này, mở lại app — bộ đếm trong ngày về **0** (lần chạy pipeline tiếp theo sẽ tạo file mới có chữ ký hợp lệ). Không xóa `.aff_license.json` nếu vẫn muốn giữ trạng thái đã kích hoạt key.
 
 Khi đổi logic quota, cập nhật `license_guard.py` và thông báo trên UI / tài liệu người dùng cho khớp.

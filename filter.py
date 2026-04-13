@@ -510,6 +510,56 @@ def map_goaffpro_store(store: dict) -> dict:
 STATUS_TRAFFIC_OK = "ĐẠT"
 STATUS_TRAFFIC_FAIL = "CHƯA ĐẠT"
 
+
+def format_uppromote_cookie_days_cell(raw) -> str:
+    """Excel: ví dụ 30 → \"30 day\"; giữ nguyên nếu đã có chữ day/days."""
+    if raw is None:
+        return ""
+    s = str(raw).strip()
+    if not s:
+        return ""
+    low = s.lower()
+    if "day" in low:
+        return s
+    m = re.match(r"^(\d+(?:[.,]\d+)?)", s.replace(",", "."))
+    if m:
+        num = m.group(1).replace(",", ".")
+        return f"{num} day"
+    return f"{s} day"
+
+
+def format_percent_cell(raw) -> str:
+    """Excel: hiển thị tỷ lệ kèm %, ví dụ 20%. Số float trong (0,1) coi như phân số → nhân 100."""
+    if raw is None:
+        return ""
+    if isinstance(raw, bool):
+        return ""
+    if isinstance(raw, (int, float)):
+        x = float(raw)
+        if isinstance(raw, float) and 0 < x < 1:
+            x *= 100
+        if abs(x - round(x)) < 1e-6:
+            return f"{int(round(x))}%"
+        t = f"{x:.4f}".rstrip("0").rstrip(".")
+        return f"{t}%"
+    s = str(raw).strip()
+    if not s:
+        return ""
+    if "%" in s:
+        return s
+    s2 = s.replace(",", ".").replace("%", "")
+    try:
+        x = float(s2)
+        if 0 < x < 1:
+            x *= 100
+        if abs(x - round(x)) < 1e-6:
+            return f"{int(round(x))}%"
+        t = f"{x:.4f}".rstrip("0").rstrip(".")
+        return f"{t}%"
+    except ValueError:
+        return f"{s}%"
+
+
 # CSV Uppromote (tiếng Việt)
 UPPROMOTE_CSV_HEADER_VI = [
     "Trạng thái",
@@ -520,14 +570,13 @@ UPPROMOTE_CSV_HEADER_VI = [
     "Ngày cookie",
     "Danh mục",
     "Traffic (hiển thị)",
-    "Traffic (số)",
     "Trang/lượt xem",
+    "Tỷ lệ thanh toán",
+    "Tỷ lệ duyệt",
     "Tỷ lệ thoát",
     "Top quốc gia",
     "Top từ khóa",
     "Tiền tệ",
-    "Tỷ lệ thanh toán",
-    "Tỷ lệ duyệt",
     "Điểm offer",
     "Điểm gợi ý",
     "Duyệt đơn",
@@ -571,25 +620,22 @@ GOAFF_CSV_HEADER = [
 
 def build_uppromote_csv_row_vi(offer: dict, item: dict, status: str) -> list:
     eng = engagement_from_item(item)
-    visits = parse_visits_from_engagement(eng)
-    visits_raw = int(visits) if visits.is_integer() else visits
     return [
         status,
         offer.get("brand", ""),
         offer.get("url", ""),
         offer.get("client_url", ""),
         offer.get("offer", ""),
-        offer.get("cookieDays", ""),
+        format_uppromote_cookie_days_cell(offer.get("cookieDays", "")),
         offer.get("category", ""),
         eng.get("VisitsFormatted", ""),
-        visits_raw,
         eng.get("PagePerVisit", ""),
-        eng.get("BounceRate", ""),
+        format_percent_cell(offer.get("payout_rate", "")),
+        format_percent_cell(offer.get("approval_rate", "")),
+        format_percent_cell(eng.get("BounceRate", "")),
         top_countries_csv(item.get("TopCountryShares") or []),
         top_keywords_csv(keyword_shares_from_item(item)),
         offer.get("currency", ""),
-        offer.get("payout_rate", ""),
-        offer.get("approval_rate", ""),
         offer.get("offer_score", ""),
         offer.get("recommend_score", ""),
         offer.get("application_review", ""),

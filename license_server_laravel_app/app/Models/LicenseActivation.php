@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class LicenseActivation extends Model
 {
@@ -27,5 +28,10 @@ class LicenseActivation extends Model
     public function licenseKey(): BelongsTo
     {
         return $this->belongsTo(LicenseKey::class);
+    }
+
+    public function dailyUsages(): HasMany
+    {
+        return $this->hasMany(LicenseDailyUsage::class, 'license_activation_id');
     }
 }

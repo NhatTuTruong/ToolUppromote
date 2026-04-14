@@ -80,6 +80,7 @@
 
     <div class="card">
         <h3>Activation đang hoạt động</h3>
+        <div class="muted" style="margin-bottom:8px;">Usage theo ngày VN ({{ $usageDayVn }})</div>
         <form method="get" action="{{ route('admin.dashboard') }}" class="search-row">
             <input type="hidden" name="keys_q" value="{{ request('keys_q') }}">
             <input type="search" name="activation_q" value="{{ request('activation_q') }}" placeholder="Tìm theo mã activation, mã máy, key hoặc chú thích key…" autocomplete="off">
@@ -91,7 +92,7 @@
         <table>
             <thead>
             <tr>
-                <th>ID</th><th>Mã activation</th><th>Key</th><th>Mã máy</th><th>Kích hoạt lúc</th><th>Lần cuối online</th><th>Chú thích</th><th>Thao tác</th>
+                <th>ID</th><th>Mã activation</th><th>Key</th><th>Mã máy</th><th>Đã dùng hôm nay</th><th>Kích hoạt lúc</th><th>Lần cuối online</th><th>Chú thích</th><th>Thao tác</th>
             </tr>
             </thead>
             <tbody>
@@ -101,6 +102,7 @@
                     <td>{{ $a->activation_id }}</td>
                     <td>{{ $a->licenseKey?->license_key }}</td>
                     <td><code>{{ $a->machine_fingerprint }}</code></td>
+                    <td>{{ (int) (($a->dailyUsages->first()->used_total ?? 0)) }}</td>
                     <td>{{ $a->activated_at }}</td>
                     <td>{{ $a->last_seen_at }}</td>
                     <td>

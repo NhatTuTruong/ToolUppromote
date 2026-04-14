@@ -4,9 +4,11 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\LicenseActivation;
+use App\Models\LicenseDailyUsage;
 use App\Models\LicenseKey;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 
@@ -51,6 +53,23 @@ class LicenseController extends Controller
                 return ['ok' => true, 'activation' => $existing, 'license' => $license];
             }
 
+            // Nếu máy này từng kích hoạt rồi nhưng đã hủy, tái dùng lại activation cũ
+            // để giữ nguyên usage theo ngày (không tạo activation mới làm reset usage).
+            $reactivation = LicenseActivation::query()
+                ->where('license_key_id', $license->id)
+                ->where('machine_fingerprint', $machine)
+                ->whereNotNull('deactivated_at')
+                ->orderByDesc('id')
+                ->lockForUpdate()
+                ->first();
+            if ($reactivation) {
+                $reactivation->deactivated_at = null;
+                $reactivation->activated_at = now();
+                $reactivation->last_seen_at = now();
+                $reactivation->save();
+                return ['ok' => true, 'activation' => $reactivation, 'license' => $license];
+            }
+
             $activeCount = LicenseActivation::query()
                 ->where('license_key_id', $license->id)
                 ->whereNull('deactivated_at')
@@ -86,6 +105,8 @@ class LicenseController extends Controller
             'activation_id' => $activation->activation_id,
             'key_hint' => $license->key_hint ?? substr($license->license_key, -6),
             'daily_limit' => (int) ($license->daily_limit ?: config('license.default_daily_limit', 500)),
+            'usage_day' => $this->todayVnDate(),
+            'used_today' => $this->usedTodayForActivationId((int) $activation->id),
             'expires_at' => optional($license->expires_at)->toIso8601String(),
         ]);
     }
@@ -142,8 +163,63 @@ class LicenseController extends Controller
             'ok' => true,
             'activation_id' => $activation->activation_id,
             'daily_limit' => (int) ($license->daily_limit ?: config('license.default_daily_limit', 500)),
+            'usage_day' => $this->todayVnDate(),
+            'used_today' => $this->usedTodayForActivationId((int) $activation->id),
             'expires_at' => optional($license->expires_at)->toIso8601String(),
             'key_hint' => $license->key_hint ?? substr($license->license_key, -6),
+        ]);
+    }
+
+    public function syncUsage(Request $request): JsonResponse
+    {
+        if (!$this->authorized($request)) {
+            return response()->json(['ok' => false, 'error' => 'Unauthorized'], 401);
+        }
+        $data = $request->validate([
+            'activation_id' => ['required', 'string', 'max:100'],
+            'machine_fingerprint' => ['required', 'string', 'max:128'],
+            'usage_day' => ['nullable', 'date_format:Y-m-d'],
+            'used_total' => ['required', 'integer', 'min:0'],
+        ]);
+        $activation = LicenseActivation::query()
+            ->where('activation_id', trim($data['activation_id']))
+            ->where('machine_fingerprint', trim($data['machine_fingerprint']))
+            ->whereNull('deactivated_at')
+            ->with('licenseKey')
+            ->first();
+        if (!$activation) {
+            return response()->json(['ok' => false, 'error' => 'Activation không hợp lệ.'], 404);
+        }
+        $license = $activation->licenseKey;
+        if (!$license || $license->status !== 'active') {
+            return response()->json(['ok' => false, 'error' => 'Key không còn hiệu lực.'], 400);
+        }
+        if ($license->expires_at && now()->greaterThan($license->expires_at)) {
+            return response()->json(['ok' => false, 'error' => 'Key đã hết hạn.'], 400);
+        }
+
+        $usageDay = (string) ($data['usage_day'] ?? $this->todayVnDate());
+        $reportedUsed = max(0, (int) $data['used_total']);
+
+        $usage = LicenseDailyUsage::query()->firstOrNew([
+            'license_activation_id' => $activation->id,
+            'usage_day' => $usageDay,
+        ]);
+        $usage->used_total = max((int) ($usage->used_total ?? 0), $reportedUsed);
+        $usage->last_reported_at = now();
+        $usage->save();
+
+        $activation->update(['last_seen_at' => now()]);
+        $dailyLimit = (int) ($license->daily_limit ?: config('license.default_daily_limit', 500));
+        $usedToday = (int) $usage->used_total;
+
+        return response()->json([
+            'ok' => true,
+            'activation_id' => $activation->activation_id,
+            'usage_day' => $usageDay,
+            'used_today' => $usedToday,
+            'daily_limit' => $dailyLimit,
+            'remaining_today' => max(0, $dailyLimit - $usedToday),
         ]);
     }
 
@@ -159,5 +235,18 @@ class LicenseController extends Controller
             return false;
         }
         return hash_equals($expected, trim(substr($header, strlen($prefix))));
+    }
+
+    private function todayVnDate(): string
+    {
+        return Carbon::now('Asia/Ho_Chi_Minh')->toDateString();
+    }
+
+    private function usedTodayForActivationId(int $activationId): int
+    {
+        return (int) (LicenseDailyUsage::query()
+            ->where('license_activation_id', $activationId)
+            ->where('usage_day', $this->todayVnDate())
+            ->value('used_total') ?? 0);
     }
 }

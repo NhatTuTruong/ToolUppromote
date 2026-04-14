@@ -1,4 +1,5 @@
 import csv
+import ast
 import json
 import os
 import re
@@ -208,6 +209,89 @@ def parse_visits_from_engagement(eng: dict) -> float:
     if raw is None:
         raw = eng.get("EstimatedVisits") or eng.get("Traffic") or eng.get("MonthlyVisits")
     return parse_visits_value(raw)
+
+
+def estimated_monthly_visits_formatted(item: dict, eng: dict | None = None) -> str:
+    """Chuỗi traffic theo tháng từ Apify, ưu tiên field gốc trên item."""
+    src_eng = eng if isinstance(eng, dict) else {}
+    candidates = (
+        (item or {}).get("EstimatedMonthlyVisitsFormatted"),
+        src_eng.get("EstimatedMonthlyVisitsFormatted"),
+        (item or {}).get("EstimatedMonthlyVisits"),
+        src_eng.get("EstimatedMonthlyVisits"),
+    )
+    for v in candidates:
+        if v is not None and str(v).strip():
+            return format_estimated_monthly_visits(v)
+    return ""
+
+
+def format_estimated_monthly_visits(raw) -> str:
+    """
+    Chuẩn hóa traffic theo tháng:
+    {'2026-01-01': '577', '2026-02-01': '226'} -> T1(577), T2(226)
+    """
+    if raw is None:
+        return ""
+    obj = raw
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return ""
+        obj = text
+        if text.startswith("{") and text.endswith("}"):
+            try:
+                obj = json.loads(text)
+            except Exception:
+                try:
+                    obj = ast.literal_eval(text)
+                except Exception:
+                    obj = text
+    if isinstance(obj, dict):
+        parts = []
+        for k in sorted(obj.keys(), key=lambda x: str(x)):
+            key_text = str(k)
+            month_match = re.search(r"-(\d{2})-", key_text)
+            month_label = f"T{int(month_match.group(1))}" if month_match else key_text
+            v = obj.get(k)
+            value_text = "" if v is None else str(v).strip()
+            parts.append(f"{month_label}({value_text})")
+        return ", ".join(parts)
+    return str(obj).strip()
+
+
+def _highlight_max_monthly_traffic(cell, raw_text: str) -> None:
+    """
+    Tô đỏ phần tháng có traffic lớn nhất trong chuỗi:
+    T1(577), T2(226), T3(314)
+    """
+    text = (raw_text or "").strip()
+    if not text:
+        return
+    matches = list(re.finditer(r"(T\d+\()([^)]+)(\))", text))
+    if not matches:
+        return
+
+    parsed = []
+    for m in matches:
+        num_txt = (m.group(2) or "").replace(",", "").strip()
+        try:
+            val = float(num_txt)
+        except ValueError:
+            continue
+        parsed.append((m.span(), val))
+    if not parsed:
+        return
+    max_val = max(v for _, v in parsed)
+    max_spans = [span for span, v in parsed if v == max_val]
+    if not max_spans:
+        return
+
+    from openpyxl.styles import Font
+    # Dùng cách an toàn cho mọi bản openpyxl: tô đỏ toàn bộ ô khi có max.
+    # (Tránh rich text gây lỗi save trên một số môi trường.)
+    if max_spans:
+        cell.font = Font(color="FF0000")
 
 
 def lookup_apify_item(url: str, by_host: dict) -> dict:
@@ -570,6 +654,7 @@ UPPROMOTE_CSV_HEADER_VI = [
     "Ngày cookie",
     "Danh mục",
     "Traffic (hiển thị)",
+    "Traffic ước tính/tháng",
     "Trang/lượt xem",
     "Tỷ lệ thanh toán",
     "Tỷ lệ duyệt",
@@ -603,23 +688,25 @@ GOAFF_CSV_HEADER = [
     "Số tiền HH",
     "Ngày cookie",
     "Traffic (hiển thị)",
+    "Traffic ước tính/tháng",
     "Link đăng ký",
     "Trang/lượt xem",
+    "Duyệt tự động",
+    "Top từ khóa",
     "Tỷ lệ thoát",
     "Top quốc gia",
-    "Top từ khóa",
     "Tiền tệ",
-    "ID cửa hàng",
     "Tên (API)",
     "Đăng ký mở",
-    "Duyệt tự động",
     "Loại hoa hồng",
     "Hoa hồng trên",
+    "ID cửa hàng",
 ]
 
 
 def build_uppromote_csv_row_vi(offer: dict, item: dict, status: str) -> list:
     eng = engagement_from_item(item)
+    estimated_monthly = estimated_monthly_visits_formatted(item, eng)
     return [
         status,
         offer.get("brand", ""),
@@ -629,6 +716,7 @@ def build_uppromote_csv_row_vi(offer: dict, item: dict, status: str) -> list:
         format_uppromote_cookie_days_cell(offer.get("cookieDays", "")),
         offer.get("category", ""),
         eng.get("VisitsFormatted", ""),
+        estimated_monthly,
         eng.get("PagePerVisit", ""),
         format_percent_cell(offer.get("payout_rate", "")),
         format_percent_cell(offer.get("approval_rate", "")),
@@ -658,25 +746,31 @@ def build_uppromote_csv_row_vi(offer: dict, item: dict, status: str) -> list:
 def build_goaff_csv_row(offer: dict, item: dict, status: str) -> list:
     url = offer.get("url", "")
     eng = engagement_from_item(item)
+    estimated_monthly = estimated_monthly_visits_formatted(item, eng)
+    cookie_days = offer.get("cookieDays", "")
+    cookie_days_text = str(cookie_days).strip() if cookie_days is not None else ""
+    if cookie_days_text and cookie_days_text.replace(".", "", 1).isdigit():
+        cookie_days_text = f"{cookie_days_text} day"
     return [
         status,
         offer.get("brand", ""),
         url,
         format_goaff_commission_amount_display(offer),
-        offer.get("cookieDays", ""),
+        cookie_days_text,
         eng.get("VisitsFormatted", ""),
+        estimated_monthly,
         goaff_create_account_url(offer),
         eng.get("PagePerVisit", ""),
-        eng.get("BounceRate", ""),
-        top_countries_csv(item.get("TopCountryShares") or []),
+        fmt_yes_no_01(offer.get("goaff_is_approved_automatically")),
         top_keywords_csv(keyword_shares_from_item(item)),
+        format_percent_cell(eng.get("BounceRate", "")),
+        top_countries_csv(item.get("TopCountryShares") or []),
         offer.get("currency", ""),
-        offer.get("goaff_id", ""),
         offer.get("goaff_name", ""),
         fmt_yes_no_01(offer.get("goaff_are_registrations_open")),
-        fmt_yes_no_01(offer.get("goaff_is_approved_automatically")),
         offer.get("goaff_commission_type", ""),
         offer.get("goaff_commission_on", ""),
+        offer.get("goaff_id", ""),
     ]
 
 
@@ -688,12 +782,28 @@ def write_xlsx_highlight_status(path: Path, header: list, rows: list, status_col
     wb = Workbook()
     ws = wb.active
     ws.append(list(header))
+    header_list = list(header)
+    hyperlink_columns = {
+        i + 1
+        for i, name in enumerate(header_list)
+        if str(name).strip() in {"Website", "URL apply", "Link đăng ký"}
+    }
+    header_fill = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
     green = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+    for c in range(1, len(header_list) + 1):
+        ws.cell(row=1, column=c).fill = header_fill
     ok_values = {STATUS_TRAFFIC_OK, "GET", "ĐẠT"}
     for row in rows:
         cells = list(row)
         ws.append(cells)
         r = ws.max_row
+        for c in hyperlink_columns:
+            if c <= len(cells):
+                cell = ws.cell(row=r, column=c)
+                value = str(cell.value or "").strip()
+                if value.startswith("http://") or value.startswith("https://"):
+                    cell.hyperlink = value
+                    cell.style = "Hyperlink"
         if len(cells) > status_col and str(cells[status_col]).strip() in ok_values:
             for c in range(1, len(cells) + 1):
                 ws.cell(row=r, column=c).fill = green
@@ -798,6 +908,7 @@ def map_uppromote_offer(offer: dict, detail: dict | None = None) -> dict:
         "target_audience_genders": detail.get("target_audience_genders") or offer.get("target_audience_genders") or [],
         "can_apply_offer": detail.get("can_apply_offer") if "can_apply_offer" in detail else offer.get("can_apply_offer"),
         "is_applied_offer": detail.get("is_applied_offer") if "is_applied_offer" in detail else offer.get("is_applied_offer"),
+        "payment_support": detail.get("payment_support") or offer.get("payment_support"),
     }
 
 

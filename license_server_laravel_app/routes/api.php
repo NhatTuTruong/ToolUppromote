@@ -8,4 +8,5 @@ Route::prefix('v1/licenses')->group(function () {
     Route::post('/activate', [LicenseController::class, 'activate']);
     Route::post('/deactivate', [LicenseController::class, 'deactivate']);
     Route::post('/validate', [LicenseController::class, 'validateActivation']);
+    Route::post('/usage/sync', [LicenseController::class, 'syncUsage']);
 });

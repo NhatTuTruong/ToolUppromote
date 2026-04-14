@@ -233,7 +233,7 @@ async function pollStatus() {
     const st = await stRes.json();
     const lg = await lgRes.json();
 
-    $("statusChip").textContent = st.status || "Rảnh";
+    $("statusChip").textContent = st.status || "Sảnh";
     setProgress(st.progress || 0);
 
     const pauseBtns = [$("pauseBtn"), $("pauseBtnGp")].filter(Boolean);
@@ -280,6 +280,78 @@ async function pollStatus() {
   }
 }
 
+function collectCheckedValues(groupSelector) {
+  const root = document.querySelector(groupSelector);
+  if (!root) return [];
+  return Array.from(root.querySelectorAll('input[type="checkbox"]:checked')).map((c) => c.value);
+}
+
+let multiSelectDocListenersBound = false;
+
+function bindMultiSelectDropdowns() {
+  document.querySelectorAll(".multi-select").forEach((root) => {
+    const btn = root.querySelector(".multi-select-btn");
+    const textEl = root.querySelector(".multi-select-btn-text");
+    const panel = root.querySelector(".multi-select-panel");
+    if (!btn || !textEl || !panel) return;
+
+    function updateSummary() {
+      const checked = panel.querySelectorAll('input[type="checkbox"]:checked');
+      const n = checked.length;
+      textEl.classList.toggle("muted-hint", n === 0);
+      if (n === 0) {
+        textEl.textContent = "Tất cả";
+        return;
+      }
+      if (n === 1) {
+        const opt = checked[0].closest(".multi-select-option");
+        const span = opt && opt.querySelector("span");
+        textEl.textContent = span ? span.textContent.trim() : String(checked[0].value || "");
+        return;
+      }
+      textEl.textContent = `Đã chọn ${n} mục`;
+    }
+
+    btn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const wasOpen = root.classList.contains("is-open");
+      document.querySelectorAll(".multi-select.is-open").forEach((o) => {
+        o.classList.remove("is-open");
+        const b = o.querySelector(".multi-select-btn");
+        if (b) b.setAttribute("aria-expanded", "false");
+      });
+      if (!wasOpen) {
+        root.classList.add("is-open");
+        btn.setAttribute("aria-expanded", "true");
+      }
+    });
+
+    panel.addEventListener("change", () => updateSummary());
+    updateSummary();
+  });
+
+  if (!multiSelectDocListenersBound) {
+    multiSelectDocListenersBound = true;
+    document.addEventListener("click", (e) => {
+      document.querySelectorAll(".multi-select.is-open").forEach((root) => {
+        if (root.contains(e.target)) return;
+        root.classList.remove("is-open");
+        const b = root.querySelector(".multi-select-btn");
+        if (b) b.setAttribute("aria-expanded", "false");
+      });
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape") return;
+      document.querySelectorAll(".multi-select.is-open").forEach((root) => {
+        root.classList.remove("is-open");
+        const b = root.querySelector(".multi-select-btn");
+        if (b) b.setAttribute("aria-expanded", "false");
+      });
+    });
+  }
+}
+
 function collectFilters(source) {
   if (source === "goaffpro") {
     return {
@@ -300,6 +372,8 @@ function collectFilters(source) {
     application_review: $("applicationReview").value.trim(),
     min_payout_rate: $("minPayoutRate").value.trim(),
     min_approval_rate: $("minApprovalRate").value.trim(),
+    categories: collectCheckedValues("#categoryUppromoteGroup"),
+    payment_methods: collectCheckedValues("#paymentMethodUppromoteGroup"),
   };
 }
 
@@ -531,6 +605,7 @@ function bindEvents() {
   document.querySelectorAll(".tab-btn").forEach((btn) => {
     btn.addEventListener("click", () => switchTab(btn.dataset.tab, true));
   });
+  bindMultiSelectDropdowns();
   bindSecretEyeButtons();
   $("saveSettingsBtn").addEventListener("click", saveSettings);
   $("runBtnUppromote").addEventListener("click", () => runFilter("uppromote"));

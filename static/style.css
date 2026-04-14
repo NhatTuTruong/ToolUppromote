@@ -49,6 +49,107 @@ body {
   gap: 12px 16px;
 }
 .form-grid.compact { grid-template-columns: repeat(3, 1fr); }
+.filter-field-full { grid-column: 1 / -1; }
+.multi-select {
+  position: relative;
+  width: 100%;
+  margin-top: 5px;
+}
+.multi-select-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: #0f1728;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 14px;
+  text-align: left;
+  min-height: 42px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.multi-select-btn:hover {
+  border-color: #38539a;
+}
+.multi-select.is-open .multi-select-btn {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px rgba(79, 124, 255, 0.2);
+}
+.multi-select-btn-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+.multi-select-btn .muted-hint {
+  color: var(--muted);
+  font-weight: 400;
+}
+.multi-select-chevron {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--muted);
+  transition: transform 0.2s ease;
+}
+.multi-select.is-open .multi-select-chevron {
+  transform: rotate(180deg);
+}
+.multi-select-panel {
+  display: none;
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 6px);
+  max-height: min(320px, 55vh);
+  overflow-y: auto;
+  overflow-x: hidden;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
+  z-index: 50;
+}
+.multi-select.is-open .multi-select-panel {
+  display: block;
+}
+.multi-select-option {
+  display: flex;
+  flex-direction: row !important;
+  gap: 12px;
+  padding: 11px 14px;
+  margin: 10px 0;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--text);
+  border-bottom: 1px solid rgba(34, 49, 79, 0.65);
+  transition: background 0.12s ease;
+}
+.multi-select-option:last-child {
+  border-bottom: none;
+}
+.multi-select-option:hover {
+  background: #1a2744;
+}
+.multi-select-option input[type="checkbox"] {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+.multi-select-option span {
+  flex: 1;
+  min-width: 0;
+  line-height: 1.35;
+}
 .form-grid label { display: flex; flex-direction: column; gap: 6px; color: var(--muted); font-size: 13px; }
 .form-field-label { min-width: 0; }
 .form-field-caption { display: block; }

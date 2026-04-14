@@ -13,7 +13,7 @@
         <h1>Lọc offer affiliate</h1>
         <p>Bảng điều khiển Uppromote / Goaffpro</p>
       </div>
-      <div class="status-chip" id="statusChip">Rảnh</div>
+      <div class="status-chip" id="statusChip">Sảnh</div>
     </header>
 
     <nav class="tabs">
@@ -124,6 +124,76 @@
           </label>
           <label>Tỷ lệ thanh toán tối thiểu (%)<input id="minPayoutRate" type="number" step="0.01" /></label>
           <label>Tỷ lệ duyệt tối thiểu (%)<input id="minApprovalRate" type="number" step="0.01" /></label>
+          <div class="filter-field-full">
+            <label class="form-field-caption">Danh mục</label>
+            <div class="multi-select" data-multi-label="Category">
+              <button type="button" class="multi-select-btn" aria-expanded="false" aria-haspopup="listbox">
+                <span class="multi-select-btn-text muted-hint">Tất cả</span>
+                <span class="multi-select-chevron" aria-hidden="true">▼</span>
+              </button>
+              <div class="multi-select-panel" id="categoryUppromoteGroup" role="listbox" aria-multiselectable="true">
+                <label class="multi-select-option"><input type="checkbox" name="categoryUppromote" value="Art"><span>Art</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryUppromote" value="Adult products"><span>Adult products</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryUppromote" value="Automobiles &amp; Motorcycles"><span>Automobiles &amp; Motorcycles</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryUppromote" value="Baby &amp; Toddler"><span>Baby &amp; Toddler</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryUppromote" value="Beauty &amp; Health"><span>Beauty &amp; Health</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryUppromote" value="Books"><span>Books</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryUppromote" value="Bundles"><span>Bundles</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryUppromote" value="Business &amp; Industrial"><span>Business &amp; Industrial</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryUppromote" value="Business &amp; Professional services"><span>Business &amp; Professional services</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryUppromote" value="Cameras &amp; Optics"><span>Cameras &amp; Optics</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryUppromote" value="Computers &amp; Office"><span>Computers &amp; Office</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryUppromote" value="Education &amp; Training"><span>Education &amp; Training</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryUppromote" value="Electronics"><span>Electronics</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryUppromote" value="Fashion"><span>Fashion</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryUppromote" value="Furniture"><span>Furniture</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryUppromote" value="Gaming"><span>Gaming</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryUppromote" value="Garden &amp; Outdoors"><span>Garden &amp; Outdoors</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryUppromote" value="Gift Cards"><span>Gift Cards</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryUppromote" value="Grocery &amp; Food"><span>Grocery &amp; Food</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryUppromote" value="Hardware"><span>Hardware</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryUppromote" value="Home &amp; Tools"><span>Home &amp; Tools</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryUppromote" value="Jewelry &amp; Accessories"><span>Jewelry &amp; Accessories</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryUppromote" value="Luggage &amp; Bags"><span>Luggage &amp; Bags</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryUppromote" value="Media"><span>Media</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryUppromote" value="Mom &amp; Kids"><span>Mom &amp; Kids</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryUppromote" value="Pet supplies"><span>Pet supplies</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryUppromote" value="Phone &amp; Telecommunication"><span>Phone &amp; Telecommunication</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryUppromote" value="Product Add-Ons"><span>Product Add-Ons</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryUppromote" value="Religion &amp; Spirituality"><span>Religion &amp; Spirituality</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryUppromote" value="Retail &amp; Consumer goods"><span>Retail &amp; Consumer goods</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryUppromote" value="Software &amp; Digital products"><span>Software &amp; Digital products</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryUppromote" value="Sports &amp; Entertainment"><span>Sports &amp; Entertainment</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryUppromote" value="Tobacco products"><span>Tobacco products</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryUppromote" value="Toys &amp; Hobbies"><span>Toys &amp; Hobbies</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryUppromote" value="Travel"><span>Travel</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryUppromote" value="Vehicles &amp; Parts"><span>Vehicles &amp; Parts</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryUppromote" value="Wellness &amp; Lifestyle"><span>Wellness &amp; Lifestyle</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryUppromote" value="Others"><span>Others</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryUppromote" value="Uncategorized"><span>Uncategorized</span></label>
+              </div>
+            </div>
+          </div>
+          <div class="filter-field-full">
+            <label class="form-field-caption">Phương thức thanh toán</label>
+            <div class="multi-select" data-multi-label="Payment">
+              <button type="button" class="multi-select-btn" aria-expanded="false" aria-haspopup="listbox">
+                <span class="multi-select-btn-text muted-hint">Tất cả</span>
+                <span class="multi-select-chevron" aria-hidden="true">▼</span>
+              </button>
+              <div class="multi-select-panel" id="paymentMethodUppromoteGroup" role="listbox" aria-multiselectable="true">
+                <label class="multi-select-option"><input type="checkbox" name="paymentMethodUppromote" value="paypal"><span>Paypal</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="paymentMethodUppromote" value="bank"><span>Bank transfer</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="paymentMethodUppromote" value="debit"><span>Debit card</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="paymentMethodUppromote" value="cheque"><span>Check</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="paymentMethodUppromote" value="venmo"><span>Venmo</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="paymentMethodUppromote" value="paytm"><span>PayTM</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="paymentMethodUppromote" value="upi"><span>UPI</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="paymentMethodUppromote" value="store_credit"><span>Store credit</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="paymentMethodUppromote" value="other"><span>Other</span></label>
+              </div>
+            </div>
+          </div>
         </div>
 
         <div class="actions">

@@ -1,4 +1,6 @@
+import ast
 import csv
+import json
 import os
 import queue
 import threading
@@ -204,6 +206,58 @@ def extract_commission_percent(value) -> float | None:
         return None
 
 
+def _normalize_payment_support(raw) -> dict | None:
+    """Normalize payment_support from API (dict or JSON string)."""
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return None
+        try:
+            obj = json.loads(text)
+        except Exception:
+            try:
+                obj = ast.literal_eval(text)
+            except Exception:
+                return None
+        return obj if isinstance(obj, dict) else None
+    return None
+
+
+def _norm_filter_str_list(val) -> list[str]:
+    """Chuẩn hóa danh sách chuỗi lọc từ JSON (list) hoặc một chuỗi (tương thích cũ)."""
+    if val is None:
+        return []
+    if isinstance(val, list):
+        return [str(x).strip().lower() for x in val if str(x).strip()]
+    if isinstance(val, str):
+        s = val.strip()
+        if not s:
+            return []
+        return [s.lower()]
+    return []
+
+
+def _payment_support_method_on(support: dict, method_key: str) -> bool:
+    """True only when the chosen method is on (1); missing key or 0 -> False."""
+    if not method_key or not isinstance(support, dict):
+        return False
+    if method_key not in support:
+        return False
+    v = support[method_key]
+    if v is True:
+        return True
+    if v is False or v is None:
+        return False
+    try:
+        return int(v) == 1
+    except (TypeError, ValueError):
+        return str(v).strip() == "1"
+
+
 def offer_passes_filters(offer: dict, filters: dict, source: str = "uppromote") -> bool:
     min_commission = parse_number(filters.get("min_commission"))
     min_cookie = parse_number(filters.get("min_cookie"))
@@ -211,6 +265,12 @@ def offer_passes_filters(offer: dict, filters: dict, source: str = "uppromote") 
     app_review = (filters.get("application_review") or "").strip().lower()
     min_payout_rate = parse_number(filters.get("min_payout_rate"))
     min_approval_rate = parse_number(filters.get("min_approval_rate"))
+    categories = _norm_filter_str_list(filters.get("categories"))
+    if not categories:
+        categories = _norm_filter_str_list(filters.get("category"))
+    payment_methods = _norm_filter_str_list(filters.get("payment_methods"))
+    if not payment_methods:
+        payment_methods = _norm_filter_str_list(filters.get("payment_method"))
     is_goaff = (source or "").lower() == "goaffpro"
 
     if min_commission is not None:
@@ -231,6 +291,16 @@ def offer_passes_filters(offer: dict, filters: dict, source: str = "uppromote") 
     if app_review:
         review = str(offer.get("application_review") or "").strip().lower()
         if review != app_review:
+            return False
+    if not is_goaff and categories:
+        offer_category = str(offer.get("category") or "").strip().lower()
+        if offer_category not in set(categories):
+            return False
+    if not is_goaff and payment_methods:
+        support = _normalize_payment_support(offer.get("payment_support"))
+        if support is None:
+            return False
+        if not any(_payment_support_method_on(support, pm) for pm in payment_methods):
             return False
     if not is_goaff:
         if min_payout_rate is not None:
@@ -296,7 +366,7 @@ def run_pipeline(settings: dict, min_traffic: int, filters: dict, log, control: 
 
     out_path = BASE_DIR / "result.csv"
     header = [
-        "Status", "Brand", "Website", "Domain", "Traffic Formatted", "Traffic Raw", "Pages Per Visit", "Bounce Rate",
+        "Status", "Brand", "Website", "Domain", "Traffic Formatted", "Estimated Monthly Visits Formatted", "Traffic Raw", "Pages Per Visit", "Bounce Rate",
         "Top Countries", "Top Keywords", "Commission", "Commission Type", "Cookie Days", "Currency", "Category",
         "Payout Rate", "Approval Rate", "Offer Score", "Recommend Score", "Application Review", "Payout Period",
         "Promotion Details", "Allowed Channels", "Target Locations", "Target Ages", "Target Genders", "Can Apply",
@@ -331,7 +401,9 @@ def run_pipeline(settings: dict, min_traffic: int, filters: dict, log, control: 
             status = "GET" if ok else "NO"
 
             writer.writerow([
-                status, brand, url, key, eng.get("VisitsFormatted", ""), int(visits) if visits.is_integer() else visits,
+                status, brand, url, key, eng.get("VisitsFormatted", ""),
+                core.estimated_monthly_visits_formatted(item, eng),
+                int(visits) if visits.is_integer() else visits,
                 eng.get("PagePerVisit", ""), eng.get("BounceRate", ""), core.top_countries_csv(item.get("TopCountryShares") or []),
                 core.top_keywords_csv(core.keyword_shares_from_item(item)), offer.get("offer", ""), offer.get("commission_type", ""),
                 offer.get("cookieDays", ""), offer.get("currency", ""), offer.get("category", ""), offer.get("payout_rate", ""),

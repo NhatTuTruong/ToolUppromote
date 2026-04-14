@@ -13,6 +13,7 @@ class LicenseManagementController extends Controller
 {
     public function dashboard(): View
     {
+        $todayVn = now('Asia/Ho_Chi_Minh')->toDateString();
         $keysQ = trim((string) request('keys_q', ''));
         $keysQuery = LicenseKey::query()
             ->withCount(['activations as active_activations_count' => function ($query): void {
@@ -32,7 +33,9 @@ class LicenseManagementController extends Controller
 
         $activationQ = trim((string) request('activation_q', ''));
         $activationsQuery = LicenseActivation::query()
-            ->with('licenseKey')
+            ->with(['licenseKey', 'dailyUsages' => function ($q) use ($todayVn): void {
+                $q->where('usage_day', $todayVn);
+            }])
             ->whereNull('deactivated_at')
             ->orderByDesc('activated_at');
 
@@ -52,6 +55,7 @@ class LicenseManagementController extends Controller
         return view('admin.dashboard', [
             'keys' => $keys,
             'activations' => $activations,
+            'usageDayVn' => $todayVn,
         ]);
     }
 

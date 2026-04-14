@@ -21,12 +21,10 @@ except ImportError:
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-FREE_TRIAL_UP_LIMIT = 10
-FREE_TRIAL_GP_LIMIT = 10
+FREE_TRIAL_UP_LIMIT = 3
+FREE_TRIAL_GP_LIMIT = 3
 DEFAULT_LICENSED_EXPORTS_PER_DAY = 500
-# Chu kỳ quota theo VN: mỗi “ngày quota” là [D 23:05, D+1 23:05).
-_QUOTA_RESET_HOUR = 23
-_QUOTA_RESET_MINUTE = 5
+# Chu kỳ quota theo VN: reset đúng 00:00 mỗi ngày lịch.
 
 
 def normalize_free_source(source: str) -> str:
@@ -43,17 +41,8 @@ _LICENSED_USAGE_PATH: Path | None = None
 
 
 def calendar_day_vietnam() -> str:
-    """Mã ngày quota YYYY-MM-DD (giờ VN UTC+7): đổi chu kỳ lúc 00:00 mỗi ngày lịch."""
-    now = datetime.now(_TZ_VN)
-    boundary = now.replace(
-        hour=_QUOTA_RESET_HOUR,
-        minute=_QUOTA_RESET_MINUTE,
-        second=0,
-        microsecond=0,
-    )
-    if now < boundary:
-        return (now.date() - timedelta(days=1)).isoformat()
-    return now.date().isoformat()
+    """Mã ngày quota YYYY-MM-DD (giờ VN UTC+7), reset đúng 00:00."""
+    return datetime.now(_TZ_VN).date().isoformat()
 
 
 def set_paths(base_dir: Path) -> None:
@@ -214,6 +203,8 @@ def _activate_via_license_server(norm_key: str) -> tuple[bool, str]:
     hint = str(data.get("key_hint") or (norm_key[-6:] if len(norm_key) >= 6 else norm_key))
     daily_limit = int(data.get("daily_limit") or licensed_exports_per_day())
     expires_at = str(data.get("expires_at") or "")
+    usage_day = str(data.get("usage_day") or calendar_day_vietnam())
+    used_today = max(0, int(data.get("used_today") or 0))
     st = load_license_state()
     st["this_install"] = {
         "activation_id": activation_id,
@@ -225,6 +216,7 @@ def _activate_via_license_server(norm_key: str) -> tuple[bool, str]:
     }
     st["v"] = 1
     save_license_state(st)
+    _save_licensed_usage(usage_day, used_today)
     return True, "Kích hoạt thành công (đã đăng ký slot trên server)."
 
 
@@ -254,6 +246,27 @@ def _validate_via_license_server(activation_id: str, machine_fp: str) -> tuple[b
     )
 
 
+def _sync_usage_via_license_server(
+    activation_id: str,
+    machine_fp: str,
+    usage_day: str,
+    used_total: int,
+) -> tuple[bool, dict | str]:
+    base = license_api_base_url()
+    if not base:
+        return False, "Thiếu AFF_LICENSE_API_BASE_URL (hoặc AFF_LICENSE_SERVER_URL)."
+    url = f"{base}/api/v1/licenses/usage/sync"
+    return _license_server_post_json(
+        url,
+        {
+            "activation_id": activation_id,
+            "machine_fingerprint": machine_fp,
+            "usage_day": usage_day,
+            "used_total": max(0, int(used_total)),
+        },
+    )
+
+
 def _sync_this_install_from_server() -> tuple[bool, str]:
     """
     Đồng bộ trạng thái activation local (đặc biệt daily_limit) từ Laravel server.
@@ -277,6 +290,8 @@ def _sync_this_install_from_server() -> tuple[bool, str]:
         return False, str(remote_data.get("error") or "Key không còn hiệu lực trên server.")
 
     daily_limit = int(remote_data.get("daily_limit") or _effective_daily_limit())
+    usage_day = str(remote_data.get("usage_day") or calendar_day_vietnam())
+    used_today = max(0, int(remote_data.get("used_today") or 0))
     st["this_install"] = {
         **inst,
         "daily_limit": max(1, daily_limit),
@@ -284,6 +299,7 @@ def _sync_this_install_from_server() -> tuple[bool, str]:
         "machine_fingerprint": mfp,
     }
     save_license_state(st)
+    _save_licensed_usage(usage_day, used_today)
     return True, ""
 
 
@@ -438,6 +454,16 @@ def _load_licensed_usage() -> tuple[str, int, str]:
     return (str(data.get("day") or ""), int(data.get("n") or 0), str(data.get("sig") or ""))
 
 
+def _save_licensed_usage(day: str, used_total: int) -> None:
+    if not _paths_ok():
+        return
+    key = _usage_hmac_key()
+    mfp = machine_fingerprint()
+    n = max(0, int(used_total))
+    out = {"day": day, "n": n, "sig": _sign_licensed_daily(key, mfp, day, n)}
+    _atomic_write(_LICENSED_USAGE_PATH, out)
+
+
 def _licensed_usage_valid(secret: bytes, mfp: str, day: str, n: int, sig: str) -> bool:
     if not day or n < 0:
         return False
@@ -506,7 +532,7 @@ def record_free_export_rows(count: int, source: str) -> None:
     _atomic_write(_FREE_USAGE_PATH, out)
 
 
-def record_licensed_export_rows(count: int) -> None:
+def record_licensed_export_rows(count: int, source: str = "") -> None:
     if count <= 0 or not is_licensed_on_this_machine() or not _paths_ok():
         return
     key = _usage_hmac_key()
@@ -517,14 +543,25 @@ def record_licensed_export_rows(count: int) -> None:
         n = 0
         day = today
     n2 = min(_effective_daily_limit(), n + count)
-    out = {"day": day, "n": n2, "sig": _sign_licensed_daily(key, mfp, day, n2)}
-    _atomic_write(_LICENSED_USAGE_PATH, out)
+    _save_licensed_usage(day, n2)
+
+    st = load_license_state()
+    activation_id = str((st.get("this_install") or {}).get("activation_id") or "").strip()
+    if not activation_id:
+        return
+    ok_remote, remote = _sync_usage_via_license_server(activation_id, mfp, day, n2)
+    if not ok_remote or not isinstance(remote, dict) or not remote.get("ok"):
+        return
+    remote_day = str(remote.get("usage_day") or day)
+    remote_used = max(0, int(remote.get("used_today") or n2))
+    # Đồng bộ lại local theo số liệu server để tránh reset quota khi file local bị xóa/sửa.
+    _save_licensed_usage(remote_day, remote_used)
 
 
 def record_one_exported_row(source: str) -> None:
     """Mỗi dòng đã ghi vào Excel trong pipeline (đếm quota free hoặc licensed)."""
     if is_licensed_on_this_machine():
-        record_licensed_export_rows(1)
+        record_licensed_export_rows(1, source)
     else:
         record_free_export_rows(1, source)
 
@@ -547,7 +584,7 @@ def assert_can_start_pipeline(source: str) -> tuple[bool, str]:
         if licensed_exports_remaining_today() <= 0:
             return False, (
                 f"Đã kích hoạt nhưng đã dùng hết {_effective_daily_limit()} record hôm nay "
-                "(theo giờ Việt Nam UTC+7, reset lúc 23h05). Thử lại sau."
+                "(theo giờ Việt Nam UTC+7, reset lúc 00:00). Thử lại sau."
             )
         return True, ""
     if free_exports_remaining_today(source) <= 0:
@@ -565,7 +602,7 @@ def zero_export_cap_log_message(source: str) -> str:
     """Thông báo khi cap == 0 trước pipeline."""
     if is_licensed_on_this_machine():
         return (
-            f"Đã dùng hết {_effective_daily_limit()} record hôm nay (giờ Việt Nam UTC+7, reset 23h05). "
+            f"Đã dùng hết {_effective_daily_limit()} record hôm nay (giờ Việt Nam UTC+7, reset 00:00). "
             "Thử lại ngày mai."
         )
     lab = "Goaffpro" if normalize_free_source(source) == "goaffpro" else "Uppromote"
@@ -582,7 +619,7 @@ def export_cap_partial_log(total_offers: int, cap: int, source: str) -> str:
     if is_licensed_on_this_machine():
         return (
             f"Giới hạn bản đã kích hoạt: chỉ xử lý {cap}/{total_offers} offer trong lần chạy này "
-            f"(tối đa {_effective_daily_limit()} record / ngày / máy, reset 23h05 giờ Việt Nam UTC+7; "
+            f"(tối đa {_effective_daily_limit()} record / ngày / máy, reset 00:00 giờ Việt Nam UTC+7; "
             f"lần này chỉ còn quota {cap} record)."
         )
     lab = "Goaffpro" if normalize_free_source(source) == "goaffpro" else "Uppromote"
@@ -614,7 +651,7 @@ def license_status_payload() -> dict:
     if licensed:
         msg = (
             f"Đã kích hoạt — còn {lic_rem}/{_effective_daily_limit()} record hôm nay "
-            "(reset 23h05)."
+            "(reset 00:00)."
         )
     else:
         msg = (
@@ -633,9 +670,9 @@ def license_status_payload() -> dict:
         "licensed": licensed,
         "machine_id": mfp,
         "timezone_note": (
-            "Bản quyền (Laravel): ngày quota giờ Việt Nam (UTC+7), đổi chu kỳ 23h05."
+            "Bản quyền (Laravel): ngày quota giờ Việt Nam (UTC+7), đổi chu kỳ 00:00."
             if licensed
-            else "Dùng thử: không reset theo ngày; bản kích hoạt có quota theo ngày (VN UTC+7, 23h05)."
+            else "Dùng thử: không reset theo ngày; bản kích hoạt có quota theo ngày (VN UTC+7, 00:00)."
         ),
         "free_trial_up_limit": FREE_TRIAL_UP_LIMIT,
         "free_trial_gp_limit": FREE_TRIAL_GP_LIMIT,

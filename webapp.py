@@ -53,7 +53,7 @@ class AppState:
         self.ack_lock = threading.Lock()
         self.running = False
         self.paused = False
-        self.status = "Rảnh"
+        self.status = "Sảnh"
         self.progress = 0.0
         self.logs = []
         self.log_ack_seen = 0
@@ -450,7 +450,7 @@ def _worker(settings: dict, min_traffic: int, filters: dict, source: str = "uppr
         with STATE.lock:
             STATE.running = False
             STATE.paused = False
-            STATE.status = "Rảnh"
+            STATE.status = "Sảnh"
             if STATE.progress < 100:
                 STATE.progress = 100
         STATE.add_log("Hoàn tất.")

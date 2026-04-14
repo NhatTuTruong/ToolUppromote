@@ -56,6 +56,25 @@ SECRET_ENV_KEYS = frozenset(
     {"APIFY_TOKEN", "UPPROMOTE_BEARER_TOKEN", "GOAFFPRO_BEARER_TOKEN", "AFF_LICENSE_API_TOKEN"}
 )
 
+# Biến mà tab Cài đặt của webapp có ô nhập (templates/index.html). POST /api/settings chỉ được merge các key này — tránh ghi rỗng đè lên key chỉ chỉnh tay trong .env (AFF_LICENSE_*, HMAC, …).
+WEB_SETTINGS_SAVE_KEYS = frozenset(
+    {
+        "APIFY_TOKEN",
+        "UPPROMOTE_API_URL",
+        "UPPROMOTE_BEARER_TOKEN",
+        "UPPROMOTE_PER_PAGE",
+        "GOAFFPRO_API_URL",
+        "GOAFFPRO_BEARER_TOKEN",
+        "GOAFFPRO_LIMIT",
+    }
+)
+
+
+def filter_web_settings_payload(raw: dict | None) -> dict:
+    if not raw:
+        return {}
+    return {k: v for k, v in raw.items() if k in WEB_SETTINGS_SAVE_KEYS}
+
 
 def _parse_env_file_to_dict(path: Path) -> dict:
     return core.parse_env_file(path)

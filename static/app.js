@@ -8,6 +8,7 @@ const POLL_MS = 120;
 
 let pollStatusBusy = false;
 
+/** Khớp với ô nhập trong templates/index.html — không gồm AFF_LICENSE_* (chỉnh trong .env, không có field trên web). */
 const settingKeys = [
   "APIFY_TOKEN",
   "UPPROMOTE_API_URL",
@@ -16,9 +17,6 @@ const settingKeys = [
   "GOAFFPRO_API_URL",
   "GOAFFPRO_BEARER_TOKEN",
   "GOAFFPRO_LIMIT",
-  "AFF_LICENSE_API_BASE_URL",
-  "AFF_LICENSE_API_TOKEN",
-  "AFF_LICENSE_DAILY_LIMIT",
 ];
 
 function clampOffersPerPageField(id) {
@@ -171,6 +169,7 @@ async function saveSettings() {
   clampOffersPerPageField("GOAFFPRO_LIMIT");
   const payload = {};
   settingKeys.forEach((k) => {
+    if (!$(k)) return;
     payload[k] = settingValueForPayload(k);
   });
   const res = await fetch("/api/settings", {

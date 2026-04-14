@@ -37,6 +37,8 @@
         .pg-btn:hover { background: #eef4ff; }
         .pg-btn.disabled { opacity: 0.5; pointer-events: none; }
         code { font-size: 12px; background: #f3f7ff; padding: 2px 4px; border-radius: 5px; }
+        .search-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+        .search-row input[type="search"] { flex: 1; min-width: 180px; max-width: 420px; }
     </style>
 </head>
 <body>
@@ -62,7 +64,7 @@
                     <label>Key bản quyền</label>
                     <div style="display:flex; gap:6px; align-items:center;">
                         <input id="quick-license-key" name="license_key" required>
-                        <button id="btn-generate-key" type="button" class="btn btn-warn">Tạo key</button>
+                        <button id="btn-generate-key" type="button" class="btn btn-warn">Tạo</button>
                     </div>
                 </div>
                 <div><label>Giới hạn record/ngày</label><input name="daily_limit" type="number" min="1" value="500"></div>
@@ -78,6 +80,14 @@
 
     <div class="card">
         <h3>Activation đang hoạt động</h3>
+        <form method="get" action="{{ route('admin.dashboard') }}" class="search-row">
+            <input type="hidden" name="keys_q" value="{{ request('keys_q') }}">
+            <input type="search" name="activation_q" value="{{ request('activation_q') }}" placeholder="Tìm theo mã activation, mã máy, key hoặc chú thích key…" autocomplete="off">
+            <button type="submit" class="btn btn-primary">Tìm</button>
+            @if(request()->filled('activation_q'))
+                <a class="pg-btn" href="{{ route('admin.dashboard', array_filter(['keys_q' => request('keys_q')])) }}">Xóa lọc activation</a>
+            @endif
+        </form>
         <table>
             <thead>
             <tr>
@@ -93,7 +103,10 @@
                     <td><code>{{ $a->machine_fingerprint }}</code></td>
                     <td>{{ $a->activated_at }}</td>
                     <td>{{ $a->last_seen_at }}</td>
-                    <td>{{ data_get($a->meta, 'notes', '-') }}</td>
+                    <td>
+                        @php($keyNotes = trim((string) ($a->licenseKey?->notes ?? '')))
+                        {{ $keyNotes !== '' ? $keyNotes : (data_get($a->meta, 'notes') ?: '—') }}
+                    </td>
                     <td>
                         <form method="post" action="{{ route('admin.activations.revoke', ['id' => $a->id]) }}" onsubmit="return confirm('Bạn có chắc muốn thu hồi activation này?');">
                             @csrf
@@ -113,6 +126,14 @@
 
     <div class="card">
         <h3>Danh sách key</h3>
+        <form method="get" action="{{ route('admin.dashboard') }}" class="search-row">
+            <input type="hidden" name="activation_q" value="{{ request('activation_q') }}">
+            <input type="search" name="keys_q" value="{{ request('keys_q') }}" placeholder="Tìm theo key, key_hint hoặc chú thích…" autocomplete="off">
+            <button type="submit" class="btn btn-primary">Tìm</button>
+            @if(request()->filled('keys_q'))
+                <a class="pg-btn" href="{{ route('admin.dashboard', array_filter(['activation_q' => request('activation_q')])) }}">Xóa lọc key</a>
+            @endif
+        </form>
         <table>
             <thead>
             <tr>

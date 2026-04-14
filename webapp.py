@@ -6,7 +6,15 @@ from pathlib import Path
 from flask import Flask, jsonify, render_template, request, send_file
 
 import filter as core
-from app import ENV_PATH, apply_settings_for_run, load_env_defaults, offer_passes_filters, row_is_dat, save_env
+from app import (
+    ENV_PATH,
+    apply_settings_for_run,
+    filter_web_settings_payload,
+    load_env_defaults,
+    offer_passes_filters,
+    row_is_dat,
+    save_env,
+)
 
 import license_guard
 from runtime_paths import app_dir, bundle_dir
@@ -460,7 +468,7 @@ def api_settings():
 
 @app.post("/api/settings")
 def api_save_settings():
-    payload = request.get_json(force=True) or {}
+    payload = filter_web_settings_payload(request.get_json(force=True))
     save_env(payload)
     return jsonify({"ok": True})
 

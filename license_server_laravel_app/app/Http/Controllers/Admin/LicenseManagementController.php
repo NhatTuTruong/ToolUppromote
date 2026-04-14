@@ -13,18 +13,41 @@ class LicenseManagementController extends Controller
 {
     public function dashboard(): View
     {
-        $keys = LicenseKey::query()
+        $keysQ = trim((string) request('keys_q', ''));
+        $keysQuery = LicenseKey::query()
             ->withCount(['activations as active_activations_count' => function ($query): void {
                 $query->whereNull('deactivated_at');
             }])
-            ->orderByDesc('id')
-            ->paginate(20, ['*'], 'keys_page');
+            ->orderByDesc('id');
 
-        $activations = LicenseActivation::query()
+        if ($keysQ !== '') {
+            $keysQuery->where(function ($q) use ($keysQ): void {
+                $q->where('license_key', 'like', '%'.$keysQ.'%')
+                    ->orWhere('notes', 'like', '%'.$keysQ.'%')
+                    ->orWhere('key_hint', 'like', '%'.$keysQ.'%');
+            });
+        }
+
+        $keys = $keysQuery->paginate(20, ['*'], 'keys_page')->withQueryString();
+
+        $activationQ = trim((string) request('activation_q', ''));
+        $activationsQuery = LicenseActivation::query()
             ->with('licenseKey')
             ->whereNull('deactivated_at')
-            ->orderByDesc('activated_at')
-            ->paginate(20, ['*'], 'activations_page');
+            ->orderByDesc('activated_at');
+
+        if ($activationQ !== '') {
+            $activationsQuery->where(function ($q) use ($activationQ): void {
+                $q->where('activation_id', 'like', '%'.$activationQ.'%')
+                    ->orWhere('machine_fingerprint', 'like', '%'.$activationQ.'%')
+                    ->orWhereHas('licenseKey', function ($q2) use ($activationQ): void {
+                        $q2->where('license_key', 'like', '%'.$activationQ.'%')
+                            ->orWhere('notes', 'like', '%'.$activationQ.'%');
+                    });
+            });
+        }
+
+        $activations = $activationsQuery->paginate(20, ['*'], 'activations_page')->withQueryString();
 
         return view('admin.dashboard', [
             'keys' => $keys,

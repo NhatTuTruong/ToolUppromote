@@ -527,6 +527,53 @@ def fmt_yes_no_01(val) -> str:
     return ""
 
 
+def fmt_yes_no_bool_like(val) -> str:
+    """Chuẩn hóa bool/0/1/"true"/"false" -> Có/Không cho cột trạng thái."""
+    if val is None:
+        return ""
+    if isinstance(val, bool):
+        return "Có" if val else "Không"
+    if isinstance(val, (int, float)):
+        return "Có" if int(val) != 0 else "Không"
+    s = str(val).strip().lower()
+    if not s:
+        return ""
+    if s in ("1", "true", "yes", "y", "on"):
+        return "Có"
+    if s in ("0", "false", "no", "n", "off"):
+        return "Không"
+    return str(val)
+
+
+def fmt_refersion_scalar(value) -> str:
+    """Giữ dữ liệu Refersion dạng chuỗi gọn cho Excel (list/dict -> text)."""
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        return join_list(value)
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value).strip()
+
+
+def refersion_active_from_denied(denied) -> str:
+    """Hoạt động = phủ định của denied."""
+    if denied is None:
+        return ""
+    if isinstance(denied, bool):
+        return "Có" if not denied else "Không"
+    if isinstance(denied, (int, float)):
+        return "Có" if int(denied) == 0 else "Không"
+    s = str(denied).strip().lower()
+    if not s:
+        return ""
+    if s in ("1", "true", "yes", "y", "on"):
+        return "Không"
+    if s in ("0", "false", "no", "n", "off"):
+        return "Có"
+    return ""
+
+
 def cookie_days_from_goaffpro(raw) -> str | int | float:
     if raw is None:
         return ""
@@ -623,6 +670,12 @@ def map_goaffpro_store(store: dict) -> dict:
 
 
 def map_refersion_offer(offer: dict) -> dict:
+    category_raw = offer.get("category")
+    if category_raw in (None, ""):
+        category_raw = offer.get("categories")
+    denied_raw = offer.get("denied")
+    pending_raw = offer.get("pending")
+    payments_raw = offer.get("payments")
     return {
         "brand": offer.get("brand") or "",
         "url": offer.get("url") or "",
@@ -634,9 +687,9 @@ def map_refersion_offer(offer: dict) -> dict:
         "program_id": offer.get("id") or "",
         "mkp_listing_id": offer.get("id") or "",
         "commission_type": offer.get("commission_type") or "",
-        "category": offer.get("category") or "",
+        "category": fmt_refersion_scalar(category_raw),
         "epc": offer.get("epc") or "",
-        "payments": offer.get("payments") or "",
+        "payments": fmt_refersion_scalar(payments_raw),
         "currency": offer.get("client_currency_symbol") or "",
         "payout_rate": "",
         "approval_rate": "",
@@ -654,7 +707,10 @@ def map_refersion_offer(offer: dict) -> dict:
         "refersion_client_id": offer.get("client_id") or "",
         "refersion_offer_id": offer.get("offer_id") or "",
         "refersion_visible_url": offer.get("visible_url") or "",
-        "refersion_payments": offer.get("payments") or "",
+        "refersion_payments": fmt_refersion_scalar(payments_raw),
+        "refersion_category": fmt_refersion_scalar(category_raw),
+        "refersion_denied": denied_raw,
+        "refersion_pending": pending_raw,
     }
 
 
@@ -779,6 +835,8 @@ REFERSION_CSV_HEADER = [
     "Hoa hồng",
     "Ngày cookie",
     "Danh mục",
+    "Hoạt động",
+    "Đang tạm dừng",
     "Traffic (hiển thị)",
     "Traffic ước tính/tháng",
     "Trang/lượt xem",
@@ -876,6 +934,8 @@ def build_refersion_csv_row(offer: dict, item: dict, status: str) -> list:
         offer.get("offer", ""),
         format_uppromote_cookie_days_cell(offer.get("cookieDays", "")),
         offer.get("category", ""),
+        refersion_active_from_denied(offer.get("refersion_denied")),
+        fmt_yes_no_bool_like(offer.get("refersion_pending")),
         eng.get("VisitsFormatted", ""),
         estimated_monthly,
         eng.get("PagePerVisit", ""),
@@ -1380,6 +1440,32 @@ def apify_call_actor(domains: list) -> str:
     if not dataset_id:
         raise RuntimeError("Apify không trả về defaultDatasetId")
     return dataset_id
+
+
+def check_apify_connection() -> str:
+    """Kiểm tra kết nối/tính hợp lệ APIFY_TOKEN trước khi chạy lọc."""
+    token = (os.getenv("APIFY_TOKEN") or "").strip()
+    if not token:
+        raise RuntimeError("Thiếu APIFY_TOKEN trong .env")
+    url = f"https://api.apify.com/v2/users/me?token={token}"
+    try:
+        res = requests.get(url, timeout=20)
+    except requests.RequestException as exc:
+        raise RuntimeError(f"Không kết nối được Apify: {exc}") from exc
+    if not res.ok:
+        raise RuntimeError(f"Apify connection check lỗi HTTP {res.status_code}: {res.text[:300]}")
+    try:
+        body = res.json()
+    except Exception as exc:
+        raise RuntimeError("Apify connection check trả về dữ liệu không hợp lệ.") from exc
+    data = body.get("data") or {}
+    username = (
+        str(data.get("username") or "").strip()
+        or str(data.get("email") or "").strip()
+        or str(data.get("id") or "").strip()
+        or "unknown-user"
+    )
+    return username
 
 
 def apify_list_items(dataset_id: str) -> list:

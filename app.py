@@ -324,6 +324,9 @@ def run_pipeline(settings: dict, min_traffic: int, filters: dict, log, control: 
     apply_settings_for_run(settings)
     core.enforce_fixed_fetch_defaults()
     os.environ["MIN_VISITS"] = str(min_traffic)
+    log("Checking Apify connection...")
+    apify_user = core.check_apify_connection()
+    log(f"Apify connection OK ({apify_user}). Start filtering pipeline.")
 
     log("Fetching offers from Uppromote...")
     offers = core.fetch_all_uppromote_offers()

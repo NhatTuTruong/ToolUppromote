@@ -1,6 +1,7 @@
 const state = {
   logCursor: 0,
   pollTimer: null,
+  currentLicense: null,
 };
 
 /** Poll nhanh hơn khi đang chạy; server phải threaded=True để /api/logs không bị chặn bởi worker. */
@@ -155,6 +156,14 @@ function mirrorEndPageOther(fromUppromote) {
   if (src && dstB) dstB.value = src.value;
 }
 
+function mirrorEndPageFromRefersion() {
+  const src = $("endPageRf");
+  const dstA = $("endPage");
+  const dstB = $("endPageGp");
+  if (src && dstA) dstA.value = src.value;
+  if (src && dstB) dstB.value = src.value;
+}
+
 function persistEndPageBoth() {
   const a = ($("endPage")?.value ?? "").trim();
   const b = ($("endPageGp")?.value ?? "").trim();
@@ -184,6 +193,56 @@ function switchTab(tabId, fromUser = false) {
   document.querySelectorAll(".tab-panel").forEach((panel) => {
     panel.classList.toggle("active", panel.id === tabId);
   });
+}
+
+const TAB_SOURCE_MAP = {
+  runUppromoteTab: "uppromote",
+  runGoaffproTab: "goaffpro",
+  runRefersionTab: "refersion",
+};
+
+function normalizeAllowedSourcesFromLicense(lic) {
+  const all = ["uppromote", "goaffpro", "refersion"];
+  if (!lic || !lic.licensed) return all;
+  const incoming = Array.isArray(lic.allowed_sources) ? lic.allowed_sources : [];
+  const normalized = Array.from(
+    new Set(
+      incoming
+        .map((v) => String(v || "").trim().toLowerCase())
+        .filter((s) => all.includes(s))
+    )
+  );
+  return normalized.length ? normalized : ["uppromote", "goaffpro"];
+}
+
+function applyLicenseSourceVisibility(lic) {
+  const allowed = new Set(normalizeAllowedSourcesFromLicense(lic));
+  document.querySelectorAll(".tab-btn").forEach((btn) => {
+    const source = TAB_SOURCE_MAP[btn.dataset.tab || ""];
+    if (!source) return;
+    const visible = allowed.has(source);
+    btn.style.display = visible ? "" : "none";
+  });
+  document.querySelectorAll(".tab-panel").forEach((panel) => {
+    const source = TAB_SOURCE_MAP[panel.id || ""];
+    if (!source) return;
+    panel.style.display = allowed.has(source) ? "" : "none";
+  });
+  document.querySelectorAll("[data-settings-source]").forEach((el) => {
+    const source = String(el.getAttribute("data-settings-source") || "").trim().toLowerCase();
+    if (!source) return;
+    el.style.display = allowed.has(source) ? "" : "none";
+  });
+  const activeBtn = document.querySelector(".tab-btn.active");
+  const activeTab = activeBtn ? activeBtn.dataset.tab : null;
+  if (activeTab && TAB_SOURCE_MAP[activeTab] && !allowed.has(TAB_SOURCE_MAP[activeTab])) {
+    const fallback = document.querySelector('.tab-btn[data-tab="settingsTab"]');
+    if (fallback) switchTab("settingsTab");
+  }
+}
+
+function finishLicenseLoadingState() {
+  document.body.classList.remove("license-loading");
 }
 
 async function loadSettings() {
@@ -572,11 +631,19 @@ async function loadLicense() {
   try {
     const res = await fetch("/api/license", { cache: "no-store" });
     const lic = await res.json();
+    state.currentLicense = lic;
     renderLicenseStatus(lic);
+    applyLicenseSourceVisibility(lic);
+    finishLicenseLoadingState();
     return lic;
   } catch (_) {
     const msg = $("licenseMessage");
     if (msg) msg.textContent = "Không đọc được trạng thái bản quyền.";
+    // Nếu lỗi gọi server, mở full tab để không khóa người dùng.
+    const fallbackLicense = { licensed: false, allowed_sources: ["uppromote", "goaffpro", "refersion"] };
+    state.currentLicense = fallbackLicense;
+    applyLicenseSourceVisibility(fallbackLicense);
+    finishLicenseLoadingState();
   }
   return null;
 }
@@ -692,7 +759,7 @@ function bindEvents() {
     egp.addEventListener("change", persistEndPageBoth);
   }
   if (erf) {
-    erf.addEventListener("input", persistEndPageBoth);
+    erf.addEventListener("input", () => mirrorEndPageFromRefersion());
     erf.addEventListener("change", persistEndPageBoth);
   }
 }

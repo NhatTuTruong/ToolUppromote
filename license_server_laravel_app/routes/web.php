@@ -17,5 +17,6 @@ Route::middleware('license.admin')->group(function (): void {
     Route::post('/admin/keys', [LicenseManagementController::class, 'storeKey'])->name('admin.keys.store');
     Route::post('/admin/keys/import', [LicenseManagementController::class, 'bulkImport'])->name('admin.keys.import');
     Route::post('/admin/keys/{id}', [LicenseManagementController::class, 'updateKey'])->name('admin.keys.update');
+    Route::post('/admin/keys/{id}/delete', [LicenseManagementController::class, 'deleteKey'])->name('admin.keys.delete');
     Route::post('/admin/activations/{id}/revoke', [LicenseManagementController::class, 'revokeActivation'])->name('admin.activations.revoke');
 });

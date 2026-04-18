@@ -5,13 +5,24 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Lọc offer affiliate</title>
   <link rel="stylesheet" href="/static/style.css" />
+  <style>
+    /* Tránh nháy tab net trước khi đồng bộ quyền từ server. */
+    body.license-loading .tab-btn[data-tab="runUppromoteTab"],
+    body.license-loading .tab-btn[data-tab="runGoaffproTab"],
+    body.license-loading .tab-btn[data-tab="runRefersionTab"],
+    body.license-loading #runUppromoteTab,
+    body.license-loading #runGoaffproTab,
+    body.license-loading #runRefersionTab {
+      display: none !important;
+    }
+  </style>
 </head>
-<body>
+<body class="license-loading">
   <div class="app-shell">
     <header class="topbar">
       <div>
         <h1>Lọc offer affiliate</h1>
-        <p>Bảng điều khiển Uppromote / Goaffpro</p>
+        <p>Bảng điều khiển</p>
       </div>
       <div class="status-chip" id="statusChip">Sảnh</div>
     </header>
@@ -40,8 +51,8 @@
             </div>
           </label>
         </div>
-        <h3 class="settings-sub">Uppromote</h3>
-        <div class="form-grid">
+        <h3 class="settings-sub" data-settings-source="uppromote">Uppromote</h3>
+        <div class="form-grid" data-settings-source="uppromote">
           <label class="form-field-label">
             <span class="form-field-caption">URL API (UPPROMOTE_API_URL)</span>
             <div class="secret-field-row" data-secret-for="UPPROMOTE_API_URL">
@@ -64,8 +75,8 @@
           </label>
           <label>Số offer mỗi trang (10–50, bước 10)<input id="UPPROMOTE_PER_PAGE" type="number" min="10" max="50" step="10" value="50" /></label>
         </div>
-        <h3 class="settings-sub">Goaffpro</h3>
-        <div class="form-grid">
+        <h3 class="settings-sub" data-settings-source="goaffpro">Goaffpro</h3>
+        <div class="form-grid" data-settings-source="goaffpro">
           <label class="form-field-label">
             <span class="form-field-caption">URL API (GOAFFPRO_API_URL)</span>
             <div class="secret-field-row" data-secret-for="GOAFFPRO_API_URL">
@@ -88,8 +99,8 @@
           </label>
           <label>Giới hạn mỗi request (10–50, bước 10)<input id="GOAFFPRO_LIMIT" type="number" min="10" max="50" step="10" value="50" /></label>
         </div>
-        <h3 class="settings-sub">Refersion</h3>
-        <div class="form-grid">
+        <h3 class="settings-sub" data-settings-source="refersion">Refersion</h3>
+        <div class="form-grid" data-settings-source="refersion">
           <label class="form-field-label">
             <span class="form-field-caption">URL API (REFERSION_API_URL)</span>
             <div class="secret-field-row" data-secret-for="REFERSION_API_URL">

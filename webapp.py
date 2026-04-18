@@ -341,6 +341,9 @@ def run_pipeline(settings: dict, min_traffic: int, filters: dict, source: str = 
     apply_settings_for_run(settings)
     core.enforce_fixed_fetch_defaults()
     os.environ["MIN_VISITS"] = str(min_traffic)
+    STATE.add_log("Đang kiểm tra kết nối Apify...")
+    apify_user = core.check_apify_connection()
+    STATE.add_log(f"Kết nối Apify OK ({apify_user}). Bắt đầu tiến trình lọc.")
 
     src = (source or "uppromote").lower()
     if src == "goaffpro":

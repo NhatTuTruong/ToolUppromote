@@ -27,6 +27,7 @@ TOP_KEYWORDS_COUNT = int(os.getenv("TOP_KEYWORDS_COUNT", "5") or "5")
 DEFAULT_APIFY_MAX_DOMAINS_PER_RUN = 50
 DEFAULT_UPPROMOTE_PAGE_DELAY_MS = 250
 DEFAULT_GOAFFPRO_PAGE_DELAY_MS = 250
+DEFAULT_REFERSION_PAGE_DELAY_MS = 250
 DEFAULT_OFFERS_PER_PAGE = 50
 MAX_OFFERS_PER_PAGE = 50
 MIN_OFFERS_PER_PAGE = 10
@@ -58,6 +59,8 @@ def enforce_fixed_fetch_defaults() -> None:
     os.environ.pop("UPPROMOTE_MAX_PAGES", None)
     os.environ["GOAFFPRO_PAGE_DELAY_MS"] = str(DEFAULT_GOAFFPRO_PAGE_DELAY_MS)
     os.environ.pop("GOAFFPRO_MAX_PAGES", None)
+    os.environ["REFERSION_PAGE_DELAY_MS"] = str(DEFAULT_REFERSION_PAGE_DELAY_MS)
+    os.environ.pop("REFERSION_MAX_PAGES", None)
     os.environ["UPPROMOTE_PER_PAGE"] = str(clamp_offers_per_page(os.getenv("UPPROMOTE_PER_PAGE")))
     os.environ["GOAFFPRO_LIMIT"] = str(clamp_offers_per_page(os.getenv("GOAFFPRO_LIMIT")))
 
@@ -77,6 +80,18 @@ def uppromote_max_pages_cap() -> int | None:
 def goaffpro_max_pages_cap() -> int | None:
     """None = không giới hạn trang Goaffpro."""
     raw = (os.getenv("GOAFFPRO_MAX_PAGES") or "").strip().lower()
+    if not raw or raw in ("0", "unlimited", "none", "no", "inf"):
+        return None
+    try:
+        n = int(raw)
+    except ValueError:
+        return None
+    return n if n > 0 else None
+
+
+def refersion_max_pages_cap() -> int | None:
+    """None = không giới hạn trang Refersion."""
+    raw = (os.getenv("REFERSION_MAX_PAGES") or "").strip().lower()
     if not raw or raw in ("0", "unlimited", "none", "no", "inf"):
         return None
     try:
@@ -350,6 +365,23 @@ def build_goaffpro_headers() -> dict:
     }
 
 
+def build_refersion_headers() -> dict:
+    token = normalize_bearer(os.getenv("REFERSION_TOKEN", ""))
+    if not token:
+        raise RuntimeError("Thiếu REFERSION_TOKEN trong .env")
+    return {
+        "accept": "application/json",
+        "origin": os.getenv("REFERSION_ORIGIN", "https://marketplace.refersion.com"),
+        "referer": os.getenv("REFERSION_REFERER", "https://marketplace.refersion.com/"),
+        "refersion-token": token,
+        "user-agent": os.getenv(
+            "REFERSION_USER_AGENT",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+        ),
+    }
+
+
 def with_page(url: str, page: int) -> str:
     parsed = urlparse(url)
     query = dict(parse_qsl(parsed.query, keep_blank_values=True))
@@ -590,6 +622,42 @@ def map_goaffpro_store(store: dict) -> dict:
     }
 
 
+def map_refersion_offer(offer: dict) -> dict:
+    return {
+        "brand": offer.get("brand") or "",
+        "url": offer.get("url") or "",
+        "offer": offer.get("offer") or "",
+        "cookieDays": offer.get("cookieDays") or "",
+        "client_url": offer.get("client_url") or "",
+        "offer_id": offer.get("offer_id") or "",
+        "shop_id": offer.get("client_id") or "",
+        "program_id": offer.get("id") or "",
+        "mkp_listing_id": offer.get("id") or "",
+        "commission_type": offer.get("commission_type") or "",
+        "category": offer.get("category") or "",
+        "epc": offer.get("epc") or "",
+        "payments": offer.get("payments") or "",
+        "currency": offer.get("client_currency_symbol") or "",
+        "payout_rate": "",
+        "approval_rate": "",
+        "offer_score": "",
+        "recommend_score": "",
+        "application_review": "",
+        "promotion_details": [],
+        "target_audience_customer_channels": [],
+        "target_audience_locations": [],
+        "target_audience_ages": [],
+        "target_audience_genders": [],
+        "can_apply_offer": offer.get("applied"),
+        "is_applied_offer": offer.get("applied"),
+        "refersion_id": offer.get("id") or "",
+        "refersion_client_id": offer.get("client_id") or "",
+        "refersion_offer_id": offer.get("offer_id") or "",
+        "refersion_visible_url": offer.get("visible_url") or "",
+        "refersion_payments": offer.get("payments") or "",
+    }
+
+
 # Trạng thái traffic so với ngưỡng (CSV + log)
 STATUS_TRAFFIC_OK = "ĐẠT"
 STATUS_TRAFFIC_FAIL = "CHƯA ĐẠT"
@@ -703,6 +771,29 @@ GOAFF_CSV_HEADER = [
     "ID cửa hàng",
 ]
 
+REFERSION_CSV_HEADER = [
+    "Trạng thái",
+    "Thương hiệu",
+    "Website",
+    "URL apply",
+    "Hoa hồng",
+    "Ngày cookie",
+    "Danh mục",
+    "Traffic (hiển thị)",
+    "Traffic ước tính/tháng",
+    "Trang/lượt xem",
+    "Tỷ lệ thoát",
+    "Top quốc gia",
+    "Top từ khóa",
+    "Loại hoa hồng",
+    "EPC",
+    "Thanh toán",
+    "Tiền tệ",
+    "ID Refersion",
+    "Client ID",
+    "Offer ID",
+]
+
 
 def build_uppromote_csv_row_vi(offer: dict, item: dict, status: str) -> list:
     eng = engagement_from_item(item)
@@ -774,6 +865,33 @@ def build_goaff_csv_row(offer: dict, item: dict, status: str) -> list:
     ]
 
 
+def build_refersion_csv_row(offer: dict, item: dict, status: str) -> list:
+    eng = engagement_from_item(item)
+    estimated_monthly = estimated_monthly_visits_formatted(item, eng)
+    return [
+        status,
+        offer.get("brand", ""),
+        offer.get("url", ""),
+        offer.get("client_url", ""),
+        offer.get("offer", ""),
+        format_uppromote_cookie_days_cell(offer.get("cookieDays", "")),
+        offer.get("category", ""),
+        eng.get("VisitsFormatted", ""),
+        estimated_monthly,
+        eng.get("PagePerVisit", ""),
+        format_percent_cell(eng.get("BounceRate", "")),
+        top_countries_csv(item.get("TopCountryShares") or []),
+        top_keywords_csv(keyword_shares_from_item(item)),
+        offer.get("commission_type", ""),
+        offer.get("epc", ""),
+        offer.get("payments", ""),
+        offer.get("currency", ""),
+        offer.get("refersion_id", ""),
+        offer.get("refersion_client_id", ""),
+        offer.get("refersion_offer_id", ""),
+    ]
+
+
 def write_xlsx_highlight_status(path: Path, header: list, rows: list, status_col: int = 0) -> None:
     """Ghi file Excel: dòng có trạng thái ĐẠT (hoặc GET) được tô nền xanh lá nhạt."""
     from openpyxl import Workbook
@@ -820,6 +938,29 @@ def fetch_goaffpro_page(base_url: str, offset: int, limit: int) -> dict:
         raise RuntimeError(f"Goaffpro parse JSON lỗi (HTTP {res.status_code}): {text[:180]}") from exc
     if not res.ok:
         raise RuntimeError(f"Goaffpro HTTP {res.status_code}: {text[:300]}")
+    return body if isinstance(body, dict) else {}
+
+
+def with_refersion_page(url: str, page: int) -> str:
+    parsed = urlparse(url)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    query["page"] = str(page)
+    new_query = urlencode(query, doseq=True)
+    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
+
+
+def fetch_refersion_page(base_url: str, page: int) -> dict:
+    request_url = with_refersion_page(base_url, page)
+    res = requests.get(request_url, headers=build_refersion_headers(), timeout=60)
+    text = res.text
+    try:
+        body = res.json()
+    except Exception as exc:
+        raise RuntimeError(f"Refersion parse JSON lỗi (HTTP {res.status_code}): {text[:180]}") from exc
+    if not res.ok:
+        raise RuntimeError(f"Refersion HTTP {res.status_code}: {text[:300]}")
+    if str(body.get("status") or "").lower() != "success":
+        raise RuntimeError(f"Refersion API lỗi: {text[:300]}")
     return body if isinstance(body, dict) else {}
 
 
@@ -873,6 +1014,48 @@ def fetch_all_goaffpro_offers() -> list:
             time.sleep(delay_ms / 1000)
 
     return [map_goaffpro_store(s) for s in all_stores]
+
+
+def fetch_all_refersion_offers() -> list:
+    base_url = (os.getenv("REFERSION_API_URL") or "").strip()
+    if not base_url:
+        raise RuntimeError("Thiếu REFERSION_API_URL trong .env")
+    enforce_fixed_fetch_defaults()
+    max_pages_cap = refersion_max_pages_cap()
+    delay_ms = int(
+        os.getenv("REFERSION_PAGE_DELAY_MS", str(DEFAULT_REFERSION_PAGE_DELAY_MS))
+        or str(DEFAULT_REFERSION_PAGE_DELAY_MS)
+    )
+    all_offers = []
+    page = 1
+    while True:
+        print(f"Refersion: tải trang {page}...")
+        body = fetch_refersion_page(base_url, page)
+        payload = body.get("data") or {}
+        page_items = payload.get("offers") or []
+        if not isinstance(page_items, list):
+            page_items = []
+        if not page_items:
+            print("Refersion: không còn offer — kết thúc phân trang.")
+            break
+        all_offers.extend(page_items)
+        print(f"Refersion: +{len(page_items)} offer (lũy kế {len(all_offers)})")
+        if max_pages_cap is not None and page >= max_pages_cap:
+            print(f"Refersion: dừng vì REFERSION_MAX_PAGES={max_pages_cap}")
+            break
+        total_results = payload.get("total_results")
+        try:
+            total_n = int(total_results) if total_results is not None else None
+        except Exception:
+            total_n = None
+        if total_n is not None and len(all_offers) >= total_n:
+            break
+        if len(page_items) == 0:
+            break
+        page += 1
+        if delay_ms > 0:
+            time.sleep(delay_ms / 1000)
+    return [map_refersion_offer(o) for o in all_offers]
 
 
 def map_uppromote_offer(offer: dict, detail: dict | None = None) -> dict:

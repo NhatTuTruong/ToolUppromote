@@ -20,6 +20,7 @@
       <button class="tab-btn active" data-tab="settingsTab">Cài đặt</button>
       <button class="tab-btn" data-tab="runUppromoteTab">Uppromote</button>
       <button class="tab-btn" data-tab="runGoaffproTab">Goaffpro</button>
+      <button class="tab-btn" data-tab="runRefersionTab">Refersion</button>
       <button class="tab-btn" data-tab="resultsTab">Kết quả</button>
     </nav>
 
@@ -86,6 +87,29 @@
             </div>
           </label>
           <label>Giới hạn mỗi request (10–50, bước 10)<input id="GOAFFPRO_LIMIT" type="number" min="10" max="50" step="10" value="50" /></label>
+        </div>
+        <h3 class="settings-sub">Refersion</h3>
+        <div class="form-grid">
+          <label class="form-field-label">
+            <span class="form-field-caption">URL API (REFERSION_API_URL)</span>
+            <div class="secret-field-row" data-secret-for="REFERSION_API_URL">
+              <button type="button" class="secret-eye-btn" aria-expanded="false" aria-label="Hiện để chỉnh sửa" title="Hiện / ẩn để sửa">
+                <svg class="eye-icon eye-icon--shut" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                <svg class="eye-icon eye-icon--open" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              </button>
+              <input id="REFERSION_API_URL" class="secret-field-input" type="password" spellcheck="false" autocomplete="off" />
+            </div>
+          </label>
+          <label class="form-field-label">
+            <span class="form-field-caption">Token (REFERSION_TOKEN)</span>
+            <div class="secret-field-row" data-secret-for="REFERSION_TOKEN">
+              <button type="button" class="secret-eye-btn" aria-expanded="false" aria-label="Hiện để chỉnh sửa" title="Hiện / ẩn để sửa">
+                <svg class="eye-icon eye-icon--shut" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                <svg class="eye-icon eye-icon--open" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              </button>
+              <input id="REFERSION_TOKEN" class="secret-field-input token-apify" type="password" spellcheck="false" autocomplete="off" />
+            </div>
+          </label>
         </div>
         <div class="actions">
           <button class="btn primary" id="saveSettingsBtn">Lưu cài đặt</button>
@@ -242,6 +266,33 @@
         </div>
 
         <div class="log-box" id="logBoxGp"></div>
+      </div>
+    </section>
+
+    <section id="runRefersionTab" class="tab-panel">
+      <div class="card">
+        <h2>Chạy — Refersion</h2>
+        <div class="form-grid compact">
+          <label>Ngưỡng traffic tối thiểu<input id="minTrafficRf" type="number" value="9000" /></label>
+          <label>Trang bắt đầu<input id="startPageRf" type="number" min="1" value="1" /></label>
+          <label>Trang kết thúc<input id="endPageRf" type="text" inputmode="numeric" autocomplete="off" placeholder="1 — để trống = tới trang cuối API" /></label>
+          <label>Hoa hồng tối thiểu (%)<input id="minCommissionRf" type="number" step="0.01" /></label>
+          <label>Ngày cookie tối thiểu<input id="minCookieRf" type="number" step="1" /></label>
+          <label>Tiền tệ<input id="currencyRf" type="text" placeholder="$ hoặc USD" /></label>
+        </div>
+
+        <div class="actions">
+          <button class="btn primary" id="runBtnRefersion">Lọc &amp; xuất Excel</button>
+          <button class="btn" id="pauseBtnRf" disabled>Tạm dừng</button>
+          <button class="btn danger" id="stopBtnRf" disabled>Dừng</button>
+        </div>
+
+        <div class="progress-wrap">
+          <div class="progress-bar"><div id="progressInnerRf"></div></div>
+          <span id="progressTextRf">0%</span>
+        </div>
+
+        <div class="log-box" id="logBoxRf"></div>
       </div>
     </section>
 

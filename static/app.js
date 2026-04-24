@@ -1,6 +1,7 @@
 const state = {
   logCursor: 0,
   pollTimer: null,
+  currentLicense: null,
 };
 
 /** Poll nhanh hơn khi đang chạy; server phải threaded=True để /api/logs không bị chặn bởi worker. */
@@ -17,6 +18,8 @@ const settingKeys = [
   "GOAFFPRO_API_URL",
   "GOAFFPRO_BEARER_TOKEN",
   "GOAFFPRO_LIMIT",
+  "REFERSION_API_URL",
+  "REFERSION_TOKEN",
 ];
 
 function clampOffersPerPageField(id) {
@@ -33,6 +36,7 @@ const SECRET_SETTING_KEYS = new Set([
   "APIFY_TOKEN",
   "UPPROMOTE_BEARER_TOKEN",
   "GOAFFPRO_BEARER_TOKEN",
+  "REFERSION_TOKEN",
   "AFF_LICENSE_API_TOKEN",
 ]);
 
@@ -48,13 +52,21 @@ function settingValueForPayload(key) {
 /** Đồng bộ khi đổi tab — không gồm minTraffic (để hai tab không ghi đè ngưỡng traffic). */
 const LS_END_PAGE = "aff_filter_end_page";
 
-const FILTER_SYNC_PAIRS = [
+const FILTER_SYNC_PAIRS_GP = [
   ["startPage", "startPageGp"],
   ["endPage", "endPageGp"],
   ["minCommission", "minCommissionGp"],
   ["minCookie", "minCookieGp"],
   ["currency", "currencyGp"],
   ["applicationReview", "applicationReviewGp"],
+];
+
+const FILTER_SYNC_PAIRS_RF = [
+  ["startPage", "startPageRf"],
+  ["endPage", "endPageRf"],
+  ["minCommission", "minCommissionRf"],
+  ["minCookie", "minCookieRf"],
+  ["currency", "currencyRf"],
 ];
 
 function $(id) {
@@ -94,7 +106,15 @@ function bindSecretEyeButtons() {
 }
 
 function syncFiltersToGoaffpro() {
-  FILTER_SYNC_PAIRS.forEach(([a, b]) => {
+  FILTER_SYNC_PAIRS_GP.forEach(([a, b]) => {
+    const ela = $(a);
+    const elb = $(b);
+    if (ela && elb) elb.value = ela.value;
+  });
+}
+
+function syncFiltersToRefersion() {
+  FILTER_SYNC_PAIRS_RF.forEach(([a, b]) => {
     const ela = $(a);
     const elb = $(b);
     if (ela && elb) elb.value = ela.value;
@@ -102,7 +122,12 @@ function syncFiltersToGoaffpro() {
 }
 
 function syncFiltersToUppromote() {
-  FILTER_SYNC_PAIRS.forEach(([a, b]) => {
+  FILTER_SYNC_PAIRS_GP.forEach(([a, b]) => {
+    const ela = $(a);
+    const elb = $(b);
+    if (ela && elb) ela.value = elb.value;
+  });
+  FILTER_SYNC_PAIRS_RF.forEach(([a, b]) => {
     const ela = $(a);
     const elb = $(b);
     if (ela && elb) ela.value = elb.value;
@@ -120,21 +145,34 @@ function loadPersistedEndPage() {
   }
   if ($("endPage")) $("endPage").value = v;
   if ($("endPageGp")) $("endPageGp").value = v;
+  if ($("endPageRf")) $("endPageRf").value = v;
 }
 
 function mirrorEndPageOther(fromUppromote) {
   const src = fromUppromote ? $("endPage") : $("endPageGp");
-  const dst = fromUppromote ? $("endPageGp") : $("endPage");
-  if (src && dst) dst.value = src.value;
+  const dstA = fromUppromote ? $("endPageGp") : $("endPage");
+  const dstB = $("endPageRf");
+  if (src && dstA) dstA.value = src.value;
+  if (src && dstB) dstB.value = src.value;
+}
+
+function mirrorEndPageFromRefersion() {
+  const src = $("endPageRf");
+  const dstA = $("endPage");
+  const dstB = $("endPageGp");
+  if (src && dstA) dstA.value = src.value;
+  if (src && dstB) dstB.value = src.value;
 }
 
 function persistEndPageBoth() {
   const a = ($("endPage")?.value ?? "").trim();
   const b = ($("endPageGp")?.value ?? "").trim();
-  let v = a || b;
+  const c = ($("endPageRf")?.value ?? "").trim();
+  let v = a || b || c;
   if (v !== "" && (!/^\d+$/.test(v) || parseInt(v, 10) < 1)) v = "1";
   if ($("endPage")) $("endPage").value = v;
   if ($("endPageGp")) $("endPageGp").value = v;
+  if ($("endPageRf")) $("endPageRf").value = v;
   localStorage.setItem(LS_END_PAGE, v);
 }
 
@@ -142,6 +180,8 @@ function switchTab(tabId, fromUser = false) {
   if (fromUser) {
     if (tabId === "runGoaffproTab") {
       syncFiltersToGoaffpro();
+    } else if (tabId === "runRefersionTab") {
+      syncFiltersToRefersion();
     } else if (tabId === "runUppromoteTab") {
       syncFiltersToUppromote();
     }
@@ -153,6 +193,56 @@ function switchTab(tabId, fromUser = false) {
   document.querySelectorAll(".tab-panel").forEach((panel) => {
     panel.classList.toggle("active", panel.id === tabId);
   });
+}
+
+const TAB_SOURCE_MAP = {
+  runUppromoteTab: "uppromote",
+  runGoaffproTab: "goaffpro",
+  runRefersionTab: "refersion",
+};
+
+function normalizeAllowedSourcesFromLicense(lic) {
+  const all = ["uppromote", "goaffpro", "refersion"];
+  if (!lic || !lic.licensed) return all;
+  const incoming = Array.isArray(lic.allowed_sources) ? lic.allowed_sources : [];
+  const normalized = Array.from(
+    new Set(
+      incoming
+        .map((v) => String(v || "").trim().toLowerCase())
+        .filter((s) => all.includes(s))
+    )
+  );
+  return normalized.length ? normalized : ["uppromote", "goaffpro"];
+}
+
+function applyLicenseSourceVisibility(lic) {
+  const allowed = new Set(normalizeAllowedSourcesFromLicense(lic));
+  document.querySelectorAll(".tab-btn").forEach((btn) => {
+    const source = TAB_SOURCE_MAP[btn.dataset.tab || ""];
+    if (!source) return;
+    const visible = allowed.has(source);
+    btn.style.display = visible ? "" : "none";
+  });
+  document.querySelectorAll(".tab-panel").forEach((panel) => {
+    const source = TAB_SOURCE_MAP[panel.id || ""];
+    if (!source) return;
+    panel.style.display = allowed.has(source) ? "" : "none";
+  });
+  document.querySelectorAll("[data-settings-source]").forEach((el) => {
+    const source = String(el.getAttribute("data-settings-source") || "").trim().toLowerCase();
+    if (!source) return;
+    el.style.display = allowed.has(source) ? "" : "none";
+  });
+  const activeBtn = document.querySelector(".tab-btn.active");
+  const activeTab = activeBtn ? activeBtn.dataset.tab : null;
+  if (activeTab && TAB_SOURCE_MAP[activeTab] && !allowed.has(TAB_SOURCE_MAP[activeTab])) {
+    const fallback = document.querySelector('.tab-btn[data-tab="settingsTab"]');
+    if (fallback) switchTab("settingsTab");
+  }
+}
+
+function finishLicenseLoadingState() {
+  document.body.classList.remove("license-loading");
 }
 
 async function loadSettings() {
@@ -187,7 +277,7 @@ async function saveSettings() {
 
 /** Ghi log vào DOM rồi chờ khung vẽ (double rAF) trước khi gửi ack — khớp thứ tự với worker. */
 async function appendLogs(lines) {
-  const boxes = [logBox(), logBoxGp()].filter(Boolean);
+  const boxes = [logBox(), logBoxGp(), logBoxRf()].filter(Boolean);
   if (!lines || !lines.length) return;
   await new Promise((resolve) => {
     requestAnimationFrame(() => {
@@ -210,16 +300,24 @@ function logBoxGp() {
   return $("logBoxGp");
 }
 
+function logBoxRf() {
+  return $("logBoxRf");
+}
+
 function setProgress(pct) {
   const v = Math.max(0, Math.min(100, pct || 0));
   const inner = $("progressInner");
   const innerGp = $("progressInnerGp");
+  const innerRf = $("progressInnerRf");
   const tx = $("progressText");
   const txGp = $("progressTextGp");
+  const txRf = $("progressTextRf");
   if (inner) inner.style.width = `${v}%`;
   if (innerGp) innerGp.style.width = `${v}%`;
+  if (innerRf) innerRf.style.width = `${v}%`;
   if (tx) tx.textContent = `${Math.round(v)}%`;
   if (txGp) txGp.textContent = `${Math.round(v)}%`;
+  if (txRf) txRf.textContent = `${Math.round(v)}%`;
 }
 
 async function pollStatus() {
@@ -236,10 +334,11 @@ async function pollStatus() {
     $("statusChip").textContent = st.status || "Sảnh";
     setProgress(st.progress || 0);
 
-    const pauseBtns = [$("pauseBtn"), $("pauseBtnGp")].filter(Boolean);
-    const stopBtns = [$("stopBtn"), $("stopBtnGp")].filter(Boolean);
+    const pauseBtns = [$("pauseBtn"), $("pauseBtnGp"), $("pauseBtnRf")].filter(Boolean);
+    const stopBtns = [$("stopBtn"), $("stopBtnGp"), $("stopBtnRf")].filter(Boolean);
     const runUp = $("runBtnUppromote");
     const runGp = $("runBtnGoaffpro");
+    const runRf = $("runBtnRefersion");
     pauseBtns.forEach((b) => {
       b.disabled = !st.running;
     });
@@ -251,6 +350,7 @@ async function pollStatus() {
     });
     if (runUp) runUp.disabled = st.running;
     if (runGp) runGp.disabled = st.running;
+    if (runRf) runRf.disabled = st.running;
 
     if (lg.logs && lg.logs.length) {
       await appendLogs(lg.logs);
@@ -363,6 +463,16 @@ function collectFilters(source) {
       application_review: $("applicationReviewGp").value.trim(),
     };
   }
+  if (source === "refersion") {
+    return {
+      start_page: $("startPageRf").value.trim(),
+      end_page: $("endPageRf").value.trim(),
+      min_commission: $("minCommissionRf").value.trim(),
+      min_cookie: $("minCookieRf").value.trim(),
+      currency: $("currencyRf").value.trim(),
+      application_review: "",
+    };
+  }
   return {
     start_page: $("startPage").value.trim(),
     end_page: $("endPage").value.trim(),
@@ -378,7 +488,12 @@ function collectFilters(source) {
 }
 
 function minTrafficFor(source) {
-  const v = source === "goaffpro" ? $("minTrafficGp")?.value : $("minTraffic")?.value;
+  const v =
+    source === "goaffpro"
+      ? $("minTrafficGp")?.value
+      : source === "refersion"
+        ? $("minTrafficRf")?.value
+        : $("minTraffic")?.value;
   return Number(v || "9000");
 }
 
@@ -392,7 +507,7 @@ async function runFilter(source) {
   const filters = collectFilters(source);
   const minTraffic = minTrafficFor(source);
 
-  const boxes = [logBox(), logBoxGp()].filter(Boolean);
+  const boxes = [logBox(), logBoxGp(), logBoxRf()].filter(Boolean);
   boxes.forEach((box) => {
     box.textContent = "";
   });
@@ -412,7 +527,7 @@ async function runFilter(source) {
     state.pollTimer = setInterval(pollStatus, POLL_MS);
   }
   await pollStatus();
-  switchTab(source === "goaffpro" ? "runGoaffproTab" : "runUppromoteTab");
+  switchTab(source === "goaffpro" ? "runGoaffproTab" : source === "refersion" ? "runRefersionTab" : "runUppromoteTab");
 }
 
 async function togglePause() {
@@ -516,11 +631,19 @@ async function loadLicense() {
   try {
     const res = await fetch("/api/license", { cache: "no-store" });
     const lic = await res.json();
+    state.currentLicense = lic;
     renderLicenseStatus(lic);
+    applyLicenseSourceVisibility(lic);
+    finishLicenseLoadingState();
     return lic;
   } catch (_) {
     const msg = $("licenseMessage");
     if (msg) msg.textContent = "Không đọc được trạng thái bản quyền.";
+    // Nếu lỗi gọi server, mở full tab để không khóa người dùng.
+    const fallbackLicense = { licensed: false, allowed_sources: ["uppromote", "goaffpro", "refersion"] };
+    state.currentLicense = fallbackLicense;
+    applyLicenseSourceVisibility(fallbackLicense);
+    finishLicenseLoadingState();
   }
   return null;
 }
@@ -610,11 +733,12 @@ function bindEvents() {
   $("saveSettingsBtn").addEventListener("click", saveSettings);
   $("runBtnUppromote").addEventListener("click", () => runFilter("uppromote"));
   $("runBtnGoaffpro").addEventListener("click", () => runFilter("goaffpro"));
-  ["pauseBtn", "pauseBtnGp"].forEach((id) => {
+  $("runBtnRefersion").addEventListener("click", () => runFilter("refersion"));
+  ["pauseBtn", "pauseBtnGp", "pauseBtnRf"].forEach((id) => {
     const el = $(id);
     if (el) el.addEventListener("click", togglePause);
   });
-  ["stopBtn", "stopBtnGp"].forEach((id) => {
+  ["stopBtn", "stopBtnGp", "stopBtnRf"].forEach((id) => {
     const el = $(id);
     if (el) el.addEventListener("click", stopRun);
   });
@@ -625,6 +749,7 @@ function bindEvents() {
   if (deLic) deLic.addEventListener("click", deactivateLicense);
   const ep = $("endPage");
   const egp = $("endPageGp");
+  const erf = $("endPageRf");
   if (ep) {
     ep.addEventListener("input", () => mirrorEndPageOther(true));
     ep.addEventListener("change", persistEndPageBoth);
@@ -632,6 +757,10 @@ function bindEvents() {
   if (egp) {
     egp.addEventListener("input", () => mirrorEndPageOther(false));
     egp.addEventListener("change", persistEndPageBoth);
+  }
+  if (erf) {
+    erf.addEventListener("input", () => mirrorEndPageFromRefersion());
+    erf.addEventListener("change", persistEndPageBoth);
   }
 }
 

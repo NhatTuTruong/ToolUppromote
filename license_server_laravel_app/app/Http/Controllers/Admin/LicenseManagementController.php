@@ -65,6 +65,8 @@ class LicenseManagementController extends Controller
             'license_key' => ['required', 'string', 'max:120'],
             'daily_limit' => ['nullable', 'integer', 'min:1'],
             'max_machines' => ['nullable', 'integer', 'min:1'],
+            'allowed_sources' => ['required', 'array', 'min:1'],
+            'allowed_sources.*' => ['string', 'in:uppromote,goaffpro,refersion'],
             'expires_at' => ['nullable', 'date'],
             'notes' => ['nullable', 'string', 'max:2000'],
         ]);
@@ -75,6 +77,7 @@ class LicenseManagementController extends Controller
         $model->status = $model->status ?: 'active';
         $model->daily_limit = $data['daily_limit'] ?? $model->daily_limit ?? (int) config('license.default_daily_limit', 500);
         $model->max_machines = $data['max_machines'] ?? $model->max_machines ?? (int) config('license.max_machines_per_key', 2);
+        $model->allowed_sources = array_values(array_unique($data['allowed_sources'] ?? LicenseKey::DEFAULT_ALLOWED_SOURCES));
         $model->expires_at = $data['expires_at'] ?? null;
         $model->notes = $data['notes'] ?? null;
         $model->save();
@@ -88,10 +91,13 @@ class LicenseManagementController extends Controller
             'bulk_keys' => ['required', 'string'],
             'daily_limit' => ['nullable', 'integer', 'min:1'],
             'max_machines' => ['nullable', 'integer', 'min:1'],
+            'allowed_sources' => ['required', 'array', 'min:1'],
+            'allowed_sources.*' => ['string', 'in:uppromote,goaffpro,refersion'],
         ]);
 
         $dailyLimit = $data['daily_limit'] ?? (int) config('license.default_daily_limit', 500);
         $maxMachines = $data['max_machines'] ?? (int) config('license.max_machines_per_key', 2);
+        $allowedSources = array_values(array_unique($data['allowed_sources'] ?? LicenseKey::DEFAULT_ALLOWED_SOURCES));
         $created = 0;
         $updated = 0;
 
@@ -107,6 +113,9 @@ class LicenseManagementController extends Controller
             $model->status = $model->status ?: 'active';
             $model->daily_limit = $model->daily_limit ?? $dailyLimit;
             $model->max_machines = $model->max_machines ?? $maxMachines;
+            $model->allowed_sources = is_array($model->allowed_sources) && $model->allowed_sources !== []
+                ? $model->allowed_sources
+                : $allowedSources;
             $model->save();
             if ($isNew) {
                 $created++;
@@ -124,6 +133,8 @@ class LicenseManagementController extends Controller
             'status' => ['required', 'in:active,blocked'],
             'daily_limit' => ['nullable', 'integer', 'min:1'],
             'max_machines' => ['nullable', 'integer', 'min:1'],
+            'allowed_sources' => ['required', 'array', 'min:1'],
+            'allowed_sources.*' => ['string', 'in:uppromote,goaffpro,refersion'],
             'expires_at' => ['nullable', 'date'],
             'notes' => ['nullable', 'string', 'max:2000'],
         ]);
@@ -132,11 +143,21 @@ class LicenseManagementController extends Controller
         $key->status = $data['status'];
         $key->daily_limit = $data['daily_limit'] ?? null;
         $key->max_machines = $data['max_machines'] ?? null;
+        $key->allowed_sources = array_values(array_unique($data['allowed_sources'] ?? []));
         $key->expires_at = $data['expires_at'] ?? null;
         $key->notes = $data['notes'] ?? null;
         $key->save();
 
         return back()->with('success', 'Đã cập nhật key.');
+    }
+
+    public function deleteKey(Request $request, int $id): RedirectResponse
+    {
+        $key = LicenseKey::query()->findOrFail($id);
+        $keyText = (string) $key->license_key;
+        $key->delete();
+
+        return back()->with('success', "Đã xóa key {$keyText}.");
     }
 
     public function revokeActivation(Request $request, int $id): RedirectResponse

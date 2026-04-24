@@ -25,11 +25,35 @@ FREE_TRIAL_UP_LIMIT = 3
 FREE_TRIAL_GP_LIMIT = 3
 DEFAULT_LICENSED_EXPORTS_PER_DAY = 500
 # Chu kỳ quota theo VN: reset đúng 00:00 mỗi ngày lịch.
+SUPPORTED_SOURCES = {"uppromote", "goaffpro", "refersion"}
+ALL_SOURCES = ["uppromote", "goaffpro", "refersion"]
+DEFAULT_LICENSED_SOURCES = ["uppromote", "goaffpro"]
 
 
 def normalize_free_source(source: str) -> str:
     """Nhánh quota dùng thử: uppromote | goaffpro."""
     return "goaffpro" if (source or "").strip().lower() == "goaffpro" else "uppromote"
+
+
+def normalize_source(source: str) -> str:
+    s = (source or "").strip().lower()
+    return s if s in SUPPORTED_SOURCES else "uppromote"
+
+
+def normalize_allowed_sources(raw) -> list[str]:
+    if not isinstance(raw, list):
+        return list(DEFAULT_LICENSED_SOURCES)
+    out: list[str] = []
+    for item in raw:
+        s = normalize_source(str(item))
+        if s in SUPPORTED_SOURCES and s not in out:
+            out.append(s)
+    return out if out else list(DEFAULT_LICENSED_SOURCES)
+
+
+def source_label(source: str) -> str:
+    s = normalize_source(source)
+    return "Goaffpro" if s == "goaffpro" else ("Refersion" if s == "refersion" else "Uppromote")
 
 
 # Giờ Việt Nam cố định UTC+7 (không DST).
@@ -211,6 +235,7 @@ def _activate_via_license_server(norm_key: str) -> tuple[bool, str]:
         "key_hint": hint,
         "machine_fingerprint": mfp,
         "daily_limit": max(1, daily_limit),
+        "allowed_sources": normalize_allowed_sources(data.get("allowed_sources")),
         "expires_at": expires_at,
         "activated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
@@ -295,6 +320,7 @@ def _sync_this_install_from_server() -> tuple[bool, str]:
     st["this_install"] = {
         **inst,
         "daily_limit": max(1, daily_limit),
+        "allowed_sources": normalize_allowed_sources(remote_data.get("allowed_sources") or inst.get("allowed_sources")),
         "expires_at": str(remote_data.get("expires_at") or inst.get("expires_at") or ""),
         "machine_fingerprint": mfp,
     }
@@ -586,6 +612,16 @@ def assert_can_start_pipeline(source: str) -> tuple[bool, str]:
                 f"Đã kích hoạt nhưng đã dùng hết {_effective_daily_limit()} record hôm nay "
                 "(theo giờ Việt Nam UTC+7, reset lúc 00:00). Thử lại sau."
             )
+        st = load_license_state()
+        inst = st.get("this_install") or {}
+        allowed_sources = normalize_allowed_sources(inst.get("allowed_sources"))
+        src = normalize_source(source)
+        if src not in allowed_sources:
+            allowed_text = ", ".join(source_label(s) for s in allowed_sources)
+            return False, (
+                f"Key hiện tại không được cấp quyền chạy {source_label(src)}. "
+                f"Các net được phép: {allowed_text}."
+            )
         return True, ""
     if free_exports_remaining_today(source) <= 0:
         lab = "Goaffpro" if normalize_free_source(source) == "goaffpro" else "Uppromote"
@@ -640,6 +676,7 @@ def license_status_payload() -> dict:
     licensed = is_licensed_on_this_machine()
     st = load_license_state()
     inst = st.get("this_install") or {}
+    allowed_sources = normalize_allowed_sources(inst.get("allowed_sources"))
     srv = bool(license_api_base_url())
     activation_mode = "remote" if licensed else "none"
     rem_up = free_exports_remaining_today("uppromote")
@@ -691,6 +728,7 @@ def license_status_payload() -> dict:
         "licensed_remaining_today": lic_rem,
         "max_machines_per_key": None,
         "activation_id": inst.get("activation_id") if licensed else None,
+        "allowed_sources": allowed_sources if licensed else list(ALL_SOURCES),
         "message": msg,
     }
 

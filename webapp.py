@@ -274,16 +274,86 @@ def fetch_offers_goaffpro(filters: dict) -> list:
     return [core.map_goaffpro_store(s) for s in raw_stores]
 
 
+def fetch_offers_refersion(filters: dict) -> list:
+    base_url = (os.getenv("REFERSION_API_URL") or "").strip()
+    if not base_url:
+        raise RuntimeError("Thiếu REFERSION_API_URL trong cài đặt")
+    core.enforce_fixed_fetch_defaults()
+    max_pages_cap = core.refersion_max_pages_cap()
+    start_page = int(filters.get("start_page") or 1)
+    if start_page < 1:
+        start_page = 1
+    end_raw = filters.get("end_page")
+    if end_raw is None:
+        end_page = 1
+    elif str(end_raw).strip() == "":
+        end_page = None
+    else:
+        end_page = int(end_raw)
+    if end_page is not None and end_page < start_page:
+        end_page = start_page
+    if end_page is not None and max_pages_cap is not None:
+        end_page = min(end_page, max_pages_cap)
+    delay_ms = int(
+        os.getenv("REFERSION_PAGE_DELAY_MS", str(core.DEFAULT_REFERSION_PAGE_DELAY_MS))
+        or str(core.DEFAULT_REFERSION_PAGE_DELAY_MS)
+    )
+
+    raw_offers = []
+    page = start_page
+    while True:
+        STATE.control.wait_if_paused()
+        if STATE.control.should_stop():
+            STATE.add_log("Đã dừng.")
+            return []
+        STATE.add_log(f"Refersion trang {page}: đang tải...")
+        body = core.fetch_refersion_page(base_url, page)
+        payload = body.get("data") or {}
+        offers = payload.get("offers") or []
+        if not isinstance(offers, list):
+            offers = []
+        if not offers:
+            STATE.add_log(f"Refersion trang {page}: hết dữ liệu, dừng phân trang.")
+            break
+        raw_offers.extend(offers)
+        STATE.add_log(f"Refersion trang {page}: +{len(offers)} offer (tổng {len(raw_offers)})")
+        try:
+            total_n = int(payload.get("total_results")) if payload.get("total_results") is not None else None
+        except Exception:
+            total_n = None
+        if total_n is not None and len(raw_offers) >= total_n:
+            STATE.add_log("Refersion: đã lấy hết theo tổng từ API.")
+            break
+        if end_page is not None and page >= end_page:
+            STATE.add_log(f"Refersion: đã tới trang kết thúc đã chọn: {end_page}")
+            break
+        if max_pages_cap is not None and page >= max_pages_cap:
+            STATE.add_log(f"Refersion: đã tới giới hạn trang trong cài đặt: {max_pages_cap}")
+            break
+        page += 1
+        if delay_ms > 0:
+            time.sleep(delay_ms / 1000)
+
+    return [core.map_refersion_offer(o) for o in raw_offers]
+
+
 def run_pipeline(settings: dict, min_traffic: int, filters: dict, source: str = "uppromote"):
     apply_settings_for_run(settings)
     core.enforce_fixed_fetch_defaults()
     os.environ["MIN_VISITS"] = str(min_traffic)
+    STATE.add_log("Đang kiểm tra kết nối Apify...")
+    apify_user = core.check_apify_connection()
+    STATE.add_log(f"Kết nối Apify OK ({apify_user}). Bắt đầu tiến trình lọc.")
 
     src = (source or "uppromote").lower()
     if src == "goaffpro":
         STATE.add_log("Đang tải offer từ Goaffpro...")
         offers = fetch_offers_goaffpro(filters)
         snapshot_path = BASE_DIR / "goaffpro-offers-last.json"
+    elif src == "refersion":
+        STATE.add_log("Đang tải offer từ Refersion...")
+        offers = fetch_offers_refersion(filters)
+        snapshot_path = BASE_DIR / "refersion-offers-last.json"
     else:
         STATE.add_log("Đang tải offer từ Uppromote...")
         offers = fetch_offers_uppromote(filters)
@@ -341,9 +411,14 @@ def run_pipeline(settings: dict, min_traffic: int, filters: dict, source: str = 
         if key:
             by_host[key] = item
 
-    net_prefix = "goaffpro" if src == "goaffpro" else "uppromote"
+    net_prefix = "goaffpro" if src == "goaffpro" else ("refersion" if src == "refersion" else "uppromote")
     xlsx_path = BASE_DIR / f"{net_prefix}_{int(time.time())}.xlsx"
-    header = list(core.GOAFF_CSV_HEADER) if src == "goaffpro" else list(core.UPPROMOTE_CSV_HEADER_VI)
+    if src == "goaffpro":
+        header = list(core.GOAFF_CSV_HEADER)
+    elif src == "refersion":
+        header = list(core.REFERSION_CSV_HEADER)
+    else:
+        header = list(core.UPPROMOTE_CSV_HEADER_VI)
 
     exported_rows = []
     total_offers = len(offers)
@@ -400,6 +475,8 @@ def run_pipeline(settings: dict, min_traffic: int, filters: dict, source: str = 
             status = core.STATUS_TRAFFIC_OK if row_is_dat(offer, filters, src, visits, min_v) else core.STATUS_TRAFFIC_FAIL
             if src == "goaffpro":
                 row = core.build_goaff_csv_row(offer, item, status)
+            elif src == "refersion":
+                row = core.build_refersion_csv_row(offer, item, status)
             else:
                 row = core.build_uppromote_csv_row_vi(offer, item, status)
             exported_rows.append(row)
@@ -517,7 +594,7 @@ def api_run():
     except (TypeError, ValueError):
         min_traffic = 9000.0
     source = (payload.get("source") or "uppromote").strip().lower()
-    if source not in ("uppromote", "goaffpro"):
+    if source not in ("uppromote", "goaffpro", "refersion"):
         source = "uppromote"
 
     core.load_env_file(ENV_PATH)
@@ -614,6 +691,7 @@ def api_results():
         list(BASE_DIR.glob("result-*.xlsx"))
         + list(BASE_DIR.glob("uppromote_*.xlsx"))
         + list(BASE_DIR.glob("goaffpro_*.xlsx"))
+        + list(BASE_DIR.glob("refersion_*.xlsx"))
     )
     for p in sorted(globs, key=lambda x: x.stat().st_mtime, reverse=True):
         if p.name in seen:
@@ -633,7 +711,12 @@ def _allowed_export_basename(name: str) -> bool:
     ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
     if ext != "xlsx":
         return False
-    return name.startswith("result-") or name.startswith("uppromote_") or name.startswith("goaffpro_")
+    return (
+        name.startswith("result-")
+        or name.startswith("uppromote_")
+        or name.startswith("goaffpro_")
+        or name.startswith("refersion_")
+    )
 
 
 def _safe_result_file_path(safe_name: str) -> Path | None:

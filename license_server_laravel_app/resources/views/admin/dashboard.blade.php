@@ -39,6 +39,9 @@
         code { font-size: 12px; background: #f3f7ff; padding: 2px 4px; border-radius: 5px; }
         .search-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
         .search-row input[type="search"] { flex: 1; min-width: 180px; max-width: 420px; }
+        .check-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+        .check-row label { margin: 0; display: inline-flex; gap: 6px; align-items: center; font-size: 13px; font-weight: 600; color: #334155; }
+        .check-row input[type="checkbox"] { width: auto; }
     </style>
 </head>
 <body>
@@ -73,6 +76,14 @@
             </div>
             <div style="margin-top:8px;">
                 <label>Ghi chú</label><input name="notes">
+            </div>
+            <div style="margin-top:8px;">
+                <label>Net được phép (theo key)</label>
+                <div class="check-row">
+                    <label><input type="checkbox" name="allowed_sources[]" value="uppromote" checked> Uppromote</label>
+                    <label><input type="checkbox" name="allowed_sources[]" value="goaffpro" checked> Goaffpro</label>
+                    <label><input type="checkbox" name="allowed_sources[]" value="refersion"> Refersion</label>
+                </div>
             </div>
             <div style="margin-top:10px;"><button type="submit" class="btn btn-primary">Lưu key</button></div>
         </form>
@@ -139,7 +150,7 @@
         <table>
             <thead>
             <tr>
-                <th>ID</th><th>Key</th><th>Trạng thái</th><th>Máy đang active</th><th>Record/ngày</th><th>Số máy tối đa</th><th>Hạn dùng</th><th>Cập nhật</th>
+                <th>ID</th><th>Key</th><th>Trạng thái</th><th>Máy đang active</th><th>Record/ngày</th><th>Số máy tối đa</th><th>Net</th><th>Hạn dùng</th><th>Cập nhật</th>
             </tr>
             </thead>
             <tbody>
@@ -151,10 +162,12 @@
                     <td>{{ $k->active_activations_count }}</td>
                     <td>{{ $k->daily_limit ?? '-' }}</td>
                     <td>{{ $k->max_machines ?? '-' }}</td>
+                    <td>{{ implode(', ', $k->normalizedAllowedSources()) }}</td>
                     <td>{{ $k->expires_at ?? '-' }}</td>
                     <td>
                         <form method="post" action="{{ route('admin.keys.update', ['id' => $k->id]) }}" onsubmit="return confirm('Xác nhận cập nhật key này?');">
                             @csrf
+                            @php($allowed = $k->normalizedAllowedSources())
                             <div class="grid-2">
                                 <select name="status">
                                     <option value="active" @selected($k->status==='active')>hoạt động</option>
@@ -166,8 +179,21 @@
                                 <input name="max_machines" type="number" min="1" value="{{ $k->max_machines }}">
                                 <input name="expires_at" type="datetime-local" value="{{ $k->expires_at ? \Illuminate\Support\Carbon::parse($k->expires_at)->format('Y-m-d\TH:i') : '' }}">
                             </div>
+                            <div style="margin-top:6px;">
+                                <div class="check-row">
+                                    <label><input type="checkbox" name="allowed_sources[]" value="uppromote" @checked(in_array('uppromote', $allowed, true))> Uppromote</label>
+                                    <label><input type="checkbox" name="allowed_sources[]" value="goaffpro" @checked(in_array('goaffpro', $allowed, true))> Goaffpro</label>
+                                    <label><input type="checkbox" name="allowed_sources[]" value="refersion" @checked(in_array('refersion', $allowed, true))> Refersion</label>
+                                </div>
+                            </div>
                             <div style="margin-top:6px;"><input name="notes" value="{{ $k->notes }}"></div>
-                            <div style="margin-top:6px;"><button type="submit" class="btn btn-primary">Cập nhật</button></div>
+                            <div style="margin-top:6px; display:flex; gap:8px; flex-wrap:wrap;">
+                                <button type="submit" class="btn btn-primary">Cập nhật</button>
+                            </div>
+                        </form>
+                        <form method="post" action="{{ route('admin.keys.delete', ['id' => $k->id]) }}" onsubmit="return confirm('Bạn có chắc muốn xóa key {{ $k->license_key }}? Toàn bộ activation và usage liên quan sẽ bị xóa.');" style="margin-top:6px;">
+                            @csrf
+                            <button type="submit" class="btn btn-danger">Xóa</button>
                         </form>
                     </td>
                 </tr>

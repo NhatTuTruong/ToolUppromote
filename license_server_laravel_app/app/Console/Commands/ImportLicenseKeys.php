@@ -41,6 +41,9 @@ class ImportLicenseKeys extends Command
             $model->status = $model->status ?: 'active';
             $model->daily_limit = $model->daily_limit ?: $dailyLimit;
             $model->max_machines = $model->max_machines ?: $maxMachines;
+            $model->allowed_sources = is_array($model->allowed_sources) && $model->allowed_sources !== []
+                ? $model->allowed_sources
+                : LicenseKey::DEFAULT_ALLOWED_SOURCES;
             $model->save();
             if ($isNew) {
                 $created++;

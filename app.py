@@ -48,6 +48,8 @@ ENV_SAVE_KEY_ORDER = [
     "GOAFFPRO_API_URL",
     "GOAFFPRO_BEARER_TOKEN",
     "GOAFFPRO_LIMIT",
+    "REFERSION_API_URL",
+    "REFERSION_TOKEN",
     "AFF_LICENSE_API_BASE_URL",
     "AFF_LICENSE_API_TOKEN",
     "AFF_LICENSE_DAILY_LIMIT",
@@ -55,7 +57,7 @@ ENV_SAVE_KEY_ORDER = [
 ]
 
 SECRET_ENV_KEYS = frozenset(
-    {"APIFY_TOKEN", "UPPROMOTE_BEARER_TOKEN", "GOAFFPRO_BEARER_TOKEN", "AFF_LICENSE_API_TOKEN"}
+    {"APIFY_TOKEN", "UPPROMOTE_BEARER_TOKEN", "GOAFFPRO_BEARER_TOKEN", "REFERSION_TOKEN", "AFF_LICENSE_API_TOKEN"}
 )
 
 # Biến mà tab Cài đặt của webapp có ô nhập (templates/index.html). POST /api/settings chỉ được merge các key này — tránh ghi rỗng đè lên key chỉ chỉnh tay trong .env (AFF_LICENSE_*, HMAC, …).
@@ -68,6 +70,8 @@ WEB_SETTINGS_SAVE_KEYS = frozenset(
         "GOAFFPRO_API_URL",
         "GOAFFPRO_BEARER_TOKEN",
         "GOAFFPRO_LIMIT",
+        "REFERSION_API_URL",
+        "REFERSION_TOKEN",
     }
 )
 
@@ -164,6 +168,8 @@ def load_env_defaults():
         ),
         "GOAFFPRO_BEARER_TOKEN": os.getenv("GOAFFPRO_BEARER_TOKEN", ""),
         "GOAFFPRO_LIMIT": str(core.clamp_offers_per_page(os.getenv("GOAFFPRO_LIMIT"))),
+        "REFERSION_API_URL": os.getenv("REFERSION_API_URL", ""),
+        "REFERSION_TOKEN": os.getenv("REFERSION_TOKEN", ""),
         "AFF_LICENSE_API_BASE_URL": os.getenv("AFF_LICENSE_API_BASE_URL", os.getenv("AFF_LICENSE_SERVER_URL", "")),
         "AFF_LICENSE_API_TOKEN": os.getenv("AFF_LICENSE_API_TOKEN", ""),
         "AFF_LICENSE_DAILY_LIMIT": os.getenv("AFF_LICENSE_DAILY_LIMIT", "500"),
@@ -318,6 +324,9 @@ def run_pipeline(settings: dict, min_traffic: int, filters: dict, log, control: 
     apply_settings_for_run(settings)
     core.enforce_fixed_fetch_defaults()
     os.environ["MIN_VISITS"] = str(min_traffic)
+    log("Checking Apify connection...")
+    apify_user = core.check_apify_connection()
+    log(f"Apify connection OK ({apify_user}). Start filtering pipeline.")
 
     log("Fetching offers from Uppromote...")
     offers = core.fetch_all_uppromote_offers()

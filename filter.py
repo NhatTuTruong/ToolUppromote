@@ -6,7 +6,7 @@ import re
 import sys
 import time
 from pathlib import Path
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 import requests
 
@@ -28,10 +28,15 @@ DEFAULT_APIFY_MAX_DOMAINS_PER_RUN = 50
 DEFAULT_UPPROMOTE_PAGE_DELAY_MS = 250
 DEFAULT_GOAFFPRO_PAGE_DELAY_MS = 250
 DEFAULT_REFERSION_PAGE_DELAY_MS = 250
+DEFAULT_COLLABS_PAGE_DELAY_MS = 50
 DEFAULT_OFFERS_PER_PAGE = 50
 MAX_OFFERS_PER_PAGE = 50
 MIN_OFFERS_PER_PAGE = 10
 OFFERS_PER_PAGE_STEP = 10
+DEFAULT_COLLABS_LIMIT = 48
+MIN_COLLABS_LIMIT = 12
+MAX_COLLABS_LIMIT = 48
+COLLABS_LIMIT_STEP = 12
 
 
 def clamp_offers_per_page(raw) -> int:
@@ -52,6 +57,24 @@ def clamp_offers_per_page(raw) -> int:
     return n
 
 
+def clamp_collabs_limit(raw) -> int:
+    """Số brand/request Collabs: bội số của 12, trong [12, 48]. Rỗng/sai → mặc định."""
+    if raw is None:
+        return DEFAULT_COLLABS_LIMIT
+    s = str(raw).strip()
+    if not s:
+        return DEFAULT_COLLABS_LIMIT
+    try:
+        n = int(float(s))
+    except (TypeError, ValueError):
+        return DEFAULT_COLLABS_LIMIT
+    n = max(MIN_COLLABS_LIMIT, min(MAX_COLLABS_LIMIT, n))
+    n = (n // COLLABS_LIMIT_STEP) * COLLABS_LIMIT_STEP
+    if n < MIN_COLLABS_LIMIT:
+        n = MIN_COLLABS_LIMIT
+    return n
+
+
 def enforce_fixed_fetch_defaults() -> None:
     """Apify 50 domain/lần; Uppromote & Goaffpro trễ 250ms/trang; không giới hạn số trang; offer/trang (Up & Go) theo .env/UI đã chuẩn hóa."""
     os.environ["APIFY_MAX_DOMAINS_PER_RUN"] = str(DEFAULT_APIFY_MAX_DOMAINS_PER_RUN)
@@ -61,8 +84,11 @@ def enforce_fixed_fetch_defaults() -> None:
     os.environ.pop("GOAFFPRO_MAX_PAGES", None)
     os.environ["REFERSION_PAGE_DELAY_MS"] = str(DEFAULT_REFERSION_PAGE_DELAY_MS)
     os.environ.pop("REFERSION_MAX_PAGES", None)
+    os.environ["COLLABS_PAGE_DELAY_MS"] = str(DEFAULT_COLLABS_PAGE_DELAY_MS)
+    os.environ.pop("COLLABS_MAX_PAGES", None)
     os.environ["UPPROMOTE_PER_PAGE"] = str(clamp_offers_per_page(os.getenv("UPPROMOTE_PER_PAGE")))
     os.environ["GOAFFPRO_LIMIT"] = str(clamp_offers_per_page(os.getenv("GOAFFPRO_LIMIT")))
+    os.environ["COLLABS_LIMIT"] = str(clamp_collabs_limit(os.getenv("COLLABS_LIMIT")))
 
 
 def uppromote_max_pages_cap() -> int | None:
@@ -92,6 +118,18 @@ def goaffpro_max_pages_cap() -> int | None:
 def refersion_max_pages_cap() -> int | None:
     """None = không giới hạn trang Refersion."""
     raw = (os.getenv("REFERSION_MAX_PAGES") or "").strip().lower()
+    if not raw or raw in ("0", "unlimited", "none", "no", "inf"):
+        return None
+    try:
+        n = int(raw)
+    except ValueError:
+        return None
+    return n if n > 0 else None
+
+
+def collabs_max_pages_cap() -> int | None:
+    """None = không giới hạn trang Shopify Collabs."""
+    raw = (os.getenv("COLLABS_MAX_PAGES") or "").strip().lower()
     if not raw or raw in ("0", "unlimited", "none", "no", "inf"):
         return None
     try:
@@ -380,6 +418,119 @@ def build_refersion_headers() -> dict:
             "(KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
         ),
     }
+
+
+def build_collabs_headers() -> dict:
+    cookie = (os.getenv("COLLABS_COOKIE") or "").strip()
+    csrf = (os.getenv("COLLABS_CSRF_TOKEN") or "").strip()
+    if not cookie:
+        raise RuntimeError("Thiếu COLLABS_COOKIE trong .env")
+    if not csrf:
+        raise RuntimeError("Thiếu COLLABS_CSRF_TOKEN trong .env")
+    return {
+        "accept": "*/*",
+        "content-type": "application/json",
+        "cookie": cookie,
+        "origin": os.getenv("COLLABS_ORIGIN", "https://collabs.shopify.com"),
+        "referer": os.getenv("COLLABS_REFERER", "https://collabs.shopify.com/"),
+        "x-client-type": os.getenv("COLLABS_CLIENT_TYPE", "web"),
+        "x-csrf-token": csrf,
+        "user-agent": os.getenv(
+            "COLLABS_USER_AGENT",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
+        ),
+    }
+
+
+COLLABS_BRANDS_QUERY = (
+    "query BrandsQuery($first: Int, $last: Int, $after: String, $before: String, "
+    "$brandValues: [BrandValue!], $categories: [ProductCategory!], "
+    "$productCategories: [CreatorProductCategory!], $saved: Boolean, $searchQuery: String) {"
+    " socialAccounts { id __typename }"
+    " brandsNetworkSearch("
+    "   first: $first"
+    "   last: $last"
+    "   after: $after"
+    "   before: $before"
+    "   brandValues: $brandValues"
+    "   categories: $categories"
+    "   productCategories: $productCategories"
+    "   saved: $saved"
+    "   searchQuery: $searchQuery"
+    " ) {"
+    "   totalCount"
+    "   pageInfo { hasNextPage hasPreviousPage endCursor startCursor __typename }"
+    "   nodes {"
+    "     id"
+    "     ... on BrandInterface {"
+    "       name"
+    "       logoUrl"
+    "       images"
+    "       backgroundColor"
+    "       shopifyStore { id shopifyStoreId __typename }"
+    "       saved"
+    "       partnershipStatus"
+    "       productCategory"
+    "       networkCommissionRange"
+    "       partnershipState"
+    "       targetCountries"
+    "       previouslyPurchased"
+    "       __typename"
+    "     }"
+    "     __typename"
+    "   }"
+    "   __typename"
+    " }"
+    "}"
+)
+
+COLLABS_BRAND_PROFILE_QUERY = (
+    "query DiscoverBrandProfileQuery($shopifyStoreId: GID!) {"
+    " socialAccounts { id __typename }"
+    " brand(shopifyStoreId: $shopifyStoreId) {"
+    "   id"
+    "   ... on BrandInterface {"
+    "     name"
+    "     holdingPeriod"
+    "     socialLinks { platform url __typename }"
+    "     shopifyStore { id shopifyStoreId __typename }"
+    "     __typename"
+    "   }"
+    "   __typename"
+    " }"
+    " creator { submittedApplications submittedApplicationsLimit __typename }"
+    "}"
+)
+
+COLLABS_CATEGORY_LABELS = {
+    "WOMENS_CLOTHING": "Women's clothing and accessories",
+    "MENS_CLOTHING": "Men's clothing and accessories",
+    "BEAUTY": "Beauty",
+    "HEALTH_AND_WELLNESS": "Health and wellness",
+    "FOOD_AND_DRINK": "Food and drink",
+    "HOME_GOODS_AND_DECOR": "Home goods and decor",
+    "BABY_AND_TODDLER": "Baby and toddler",
+    "ELECTRONICS": "Electronics",
+    "SPORTS_GOODS": "Sports goods",
+    "ARTS_AND_CRAFTS": "Arts and crafts",
+    "TECH": "Tech",
+    "PHOTOGRAPHY": "Photography",
+    "PET_SUPPLIES_AND_ACCESSORIES": "Pet supplies and accessories",
+    "DIY": "DIY",
+    "AUTOMOTIVE": "Automotive",
+    "GARDENING": "Gardening",
+    "TOBACCO_AND_VAPE": "Tobacco and vape",
+    "MATURE": "Mature",
+    "MUSICAL_INSTRUMENTS_AND_ACCESSORIES": "Musical instruments and accessories",
+}
+
+
+def collabs_category_label(raw_code: str) -> str:
+    code = str(raw_code or "").strip().upper()
+    if not code:
+        return ""
+    return COLLABS_CATEGORY_LABELS.get(code, code)
 
 
 def with_page(url: str, page: int) -> str:
@@ -714,6 +865,298 @@ def map_refersion_offer(offer: dict) -> dict:
     }
 
 
+def _collabs_storefront_url(social_links) -> str:
+    if not isinstance(social_links, list):
+        return ""
+    for item in social_links:
+        if not isinstance(item, dict):
+            continue
+        platform = str(item.get("platform") or "").strip().upper()
+        if platform != "STOREFRONT":
+            continue
+        url = str(item.get("url") or "").strip()
+        if url.startswith("http://") or url.startswith("https://"):
+            return url
+    return ""
+
+
+def _collabs_brand_url(node: dict, detail_brand: dict | None = None) -> str:
+    # Ưu tiên domain storefront từ API detail, vì list query không trả website đầy đủ.
+    if isinstance(detail_brand, dict):
+        storefront_url = _collabs_storefront_url(detail_brand.get("socialLinks"))
+        if storefront_url:
+            return storefront_url
+    # Fallback cũ: map sang myshopify khi chỉ có store id.
+    store = node.get("shopifyStore") if isinstance(node.get("shopifyStore"), dict) else {}
+    sid = str(store.get("shopifyStoreId") or "").strip()
+    if sid and sid.isdigit():
+        return f"https://{sid}.myshopify.com"
+    return ""
+
+
+def map_collabs_brand(node: dict, detail_brand: dict | None = None) -> dict:
+    name = str(node.get("name") or "").strip()
+    commission = node.get("networkCommissionRange")
+    if commission in (None, ""):
+        offer = ""
+    else:
+        offer = f"{commission}%"
+    category_code = str(node.get("productCategory") or "").strip().upper()
+    return {
+        "brand": name,
+        "url": _collabs_brand_url(node, detail_brand),
+        "offer": offer,
+        "cookieDays": "",
+        "client_url": "",
+        "offer_id": node.get("id") or "",
+        "shop_id": (node.get("shopifyStore") or {}).get("id") if isinstance(node.get("shopifyStore"), dict) else "",
+        "program_id": "",
+        "mkp_listing_id": node.get("id") or "",
+        "commission_type": "network_commission_range",
+        "category": collabs_category_label(category_code),
+        "collabs_product_category_code": category_code,
+        "epc": "",
+        "payments": "",
+        "currency": "",
+        "payout_rate": "",
+        "approval_rate": "",
+        "offer_score": "",
+        "recommend_score": "",
+        "application_review": "",
+        "promotion_details": [],
+        "target_audience_customer_channels": [],
+        "target_audience_locations": [],
+        "target_audience_ages": [],
+        "target_audience_genders": [],
+        "can_apply_offer": None,
+        "is_applied_offer": None,
+        "collabs_partnership_status": node.get("partnershipStatus") or "",
+        "collabs_partnership_state": node.get("partnershipState") or "",
+        "collabs_saved": node.get("saved"),
+        "collabs_previously_purchased": node.get("previouslyPurchased"),
+        "collabs_target_countries": join_list(node.get("targetCountries") or []),
+        "collabs_logo_url": node.get("logoUrl") or "",
+        "collabs_images": join_list(node.get("images") or []),
+        "collabs_shopify_store_id": ((node.get("shopifyStore") or {}).get("shopifyStoreId") if isinstance(node.get("shopifyStore"), dict) else ""),
+        "collabs_holding_period": (detail_brand.get("holdingPeriod") if isinstance(detail_brand, dict) else ""),
+    }
+
+
+def collabs_shopify_store_gid(node: dict) -> str:
+    store = node.get("shopifyStore") if isinstance(node.get("shopifyStore"), dict) else {}
+    raw_id = str(store.get("id") or "").strip()
+    if not raw_id:
+        return ""
+    if raw_id.startswith("gid://"):
+        return raw_id
+    return f"gid://dovetale-api/ShopifyStore/{raw_id}"
+
+
+def resolve_redirected_url(url: str, timeout_sec: int = 20) -> str:
+    """
+    Theo dõi redirect để lấy URL đích cuối (brand gốc).
+    Trả về URL ban đầu nếu request lỗi/timeout.
+    """
+    raw = str(url or "").strip()
+    if not raw:
+        return ""
+    if not (raw.startswith("http://") or raw.startswith("https://")):
+        return raw
+    try:
+        res = requests.get(raw, allow_redirects=True, timeout=timeout_sec, stream=True)
+        final_url = str(res.url or "").strip()
+        try:
+            res.close()
+        except Exception:
+            pass
+        return final_url or raw
+    except Exception:
+        return raw
+
+
+def _collabs_page_looks_like_signup(html: str, url: str = "") -> bool:
+    text = (html or "").lower()
+    u = (url or "").lower()
+    title_match = re.search(r"<title[^>]*>(.*?)</title>", html or "", flags=re.I | re.S)
+    title_text = (title_match.group(1).strip().lower() if title_match else "")
+    if "class=\"collabs-page__main\"" in text or "class='collabs-page__main'" in text:
+        return True
+    if "community" in title_text:
+        return True
+    signup_path_hints = (
+        "/pages/collab",
+        "/pages/collabs",
+        "/pages/collabs-signup",
+        "/pages/affiliate",
+        "/pages/affiliates",
+        "/pages/collaborators",
+        "/pages/affiliate-program",
+        "/pages/affiliate-programs",
+        "/pages/ambassadors",
+        "/pages/ambassador-program",
+        "/pages/ambassador-programs",
+        "/pages/collaboration",
+        "/pages/partners",
+        "/pages/partner-program",
+        "/pages/partner-programs",
+        "/pages/collaborations",
+        "/pages/curious-community",
+        "/ambassadors",
+        "/community",
+        "/affiliates",
+        "/affiliate",
+        "/affiliate-program",
+        "/affiliate-programs",
+        "/collab",
+        "/collabs",
+        "/collaborators",
+        "/partners",
+        "/partner",
+        "/partner-program",
+        "/partner-programs",
+        "/collaborations",
+        "/collaboration",
+        "/ambassador-program",
+        "/ambassador-programs",
+        "/curious-community",
+    )
+    if any(p in u for p in signup_path_hints):
+        return True
+    if "apply now" in text or "apply-now" in text:
+        return True
+    score = 0
+    if "collab" in text:
+        score += 1
+    if "affiliate" in text:
+        score += 1
+    if "apply" in text or "application" in text:
+        score += 1
+    return score >= 2
+
+
+def discover_collabs_signup_url(site_url: str, timeout_sec: int = 20) -> str:
+    """
+    Tìm link đăng ký collabs từ domain chính.
+    Ưu tiên /pages/collab; fallback quét homepage để tìm href chứa collab/affiliate.
+    """
+    raw = str(site_url or "").strip()
+    if not raw:
+        return ""
+    parsed = urlparse(raw if "://" in raw else f"https://{raw}")
+    if not parsed.netloc:
+        return ""
+    base = f"{parsed.scheme or 'https'}://{parsed.netloc}"
+
+    def _try_get(candidate_url: str) -> tuple[str, str]:
+        try:
+            res = requests.get(candidate_url, allow_redirects=True, timeout=timeout_sec)
+            final_url = str(res.url or candidate_url).strip()
+            if not res.ok:
+                return "", ""
+            text = res.text or ""
+            return final_url, text
+        except Exception:
+            return "", ""
+
+    preferred_paths = [
+        "/pages/collab",
+        "/pages/collabs",
+        "/pages/collabs-signup",
+        "/pages/affiliate",
+        "/pages/affiliates",
+        "/pages/collaborators",
+        "/pages/affiliate-program",
+        "/pages/affiliate-programs",
+        "/pages/ambassadors",
+        "/pages/ambassador-program",
+        "/pages/ambassador-programs",
+        "/pages/collaboration",
+        "/pages/partners",
+        "/pages/partner-program",
+        "/pages/partner-programs",
+        "/pages/collaborations",
+        "/pages/curious-community",
+        "/ambassadors",
+        "/community",
+        "/affiliates",
+        "/affiliate",
+        "/affiliate-program",
+        "/affiliate-programs",
+        "/ambassadors",
+        "/collab",
+        "/collabs",
+        "/collaborators",
+        "/partners",
+        "/partner",
+        "/partner-program",
+        "/partner-programs",
+        "/partner-programs",
+        "/collaborations",
+        "/collaboration",
+        "/ambassador-program",
+        "/ambassador-programs",
+        "/curious-community",
+    ]
+    for p in preferred_paths:
+        final_url, text = _try_get(f"{base}{p}")
+        if final_url and _collabs_page_looks_like_signup(text, final_url):
+            return final_url
+
+    home_url, home_html = _try_get(base)
+    if not home_url:
+        return ""
+
+    # Quét toàn site (có giới hạn) để tìm page apply.
+    max_scan_pages = int(os.getenv("COLLABS_SIGNUP_SCAN_MAX_PAGES", "25") or "25")
+    if max_scan_pages < 1:
+        max_scan_pages = 1
+
+    def _extract_same_domain_links(page_html: str, page_url: str) -> list[str]:
+        out = []
+        for href in re.findall(r"""href=["']([^"'#]+)["']""", page_html or "", flags=re.I):
+            h = str(href).strip()
+            if not h:
+                continue
+            cand = urljoin(page_url, h)
+            cp = urlparse(cand)
+            if cp.netloc != parsed.netloc:
+                continue
+            path = cp.path or "/"
+            # Bỏ link static/media để không tốn lượt quét.
+            low_path = path.lower()
+            if any(low_path.endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg", ".js", ".css", ".pdf", ".xml")):
+                continue
+            out.append(f"{cp.scheme or 'https'}://{cp.netloc}{path}")
+        return out
+
+    queue = [home_url]
+    seen = set()
+    idx = 0
+    while idx < len(queue) and len(seen) < max_scan_pages:
+        cur = queue[idx]
+        idx += 1
+        if cur in seen:
+            continue
+        seen.add(cur)
+        final_url, text = _try_get(cur)
+        if not final_url:
+            continue
+        if _collabs_page_looks_like_signup(text, final_url):
+            return final_url
+
+        for nxt in _extract_same_domain_links(text, final_url):
+            if nxt in seen:
+                continue
+            low = nxt.lower()
+            # Ưu tiên đường dẫn có tín hiệu collab/apply/affiliate.
+            if any(k in low for k in ("collab", "affiliate", "ambassador", "apply")):
+                queue.insert(idx, nxt)
+            else:
+                queue.append(nxt)
+
+    return ""
+
+
 # Trạng thái traffic so với ngưỡng (CSV + log)
 STATUS_TRAFFIC_OK = "ĐẠT"
 STATUS_TRAFFIC_FAIL = "CHƯA ĐẠT"
@@ -852,6 +1295,30 @@ REFERSION_CSV_HEADER = [
     "Offer ID",
 ]
 
+COLLABS_CSV_HEADER = [
+    "Trạng thái",
+    "Thương hiệu",
+    "Website",
+    "Link Apply",
+    "Hoa hồng mạng lưới",
+    "Thời gian giữ đơn",
+    "Danh mục",
+    "Trạng thái hợp tác",
+    "Tình trạng hợp tác",
+    "Đã lưu",
+    "Đã mua trước đó",
+    "Quốc gia mục tiêu",
+    "Traffic (hiển thị)",
+    "Traffic ước tính/tháng",
+    "Trang/lượt xem",
+    "Tỷ lệ thoát",
+    "Top quốc gia",
+    "Top từ khóa",
+    "Link logo",
+    "Offer ID",
+    "ID Shopify Store",
+]
+
 
 def build_uppromote_csv_row_vi(offer: dict, item: dict, status: str) -> list:
     eng = engagement_from_item(item)
@@ -952,6 +1419,41 @@ def build_refersion_csv_row(offer: dict, item: dict, status: str) -> list:
     ]
 
 
+def build_collabs_csv_row(offer: dict, item: dict, status: str) -> list:
+    eng = engagement_from_item(item)
+    estimated_monthly = estimated_monthly_visits_formatted(item, eng)
+    website = str(offer.get("url", "") or "").strip()
+    apply_url = str(offer.get("client_url", "") or "").strip()
+    if not apply_url and website:
+        p = urlparse(website if "://" in website else f"https://{website}")
+        if p.netloc:
+            base = f"{p.scheme or 'https'}://{p.netloc}"
+            apply_url = f"{base}/pages/collab"
+    return [
+        status,
+        offer.get("brand", ""),
+        website,
+        apply_url,
+        offer.get("offer", ""),
+        offer.get("collabs_holding_period", ""),
+        offer.get("category", ""),
+        offer.get("collabs_partnership_status", ""),
+        offer.get("collabs_partnership_state", ""),
+        fmt_yes_no_bool_like(offer.get("collabs_saved")),
+        fmt_yes_no_bool_like(offer.get("collabs_previously_purchased")),
+        offer.get("collabs_target_countries", ""),
+        eng.get("VisitsFormatted", ""),
+        estimated_monthly,
+        eng.get("PagePerVisit", ""),
+        format_percent_cell(eng.get("BounceRate", "")),
+        top_countries_csv(item.get("TopCountryShares") or []),
+        top_keywords_csv(keyword_shares_from_item(item)),
+        offer.get("collabs_logo_url", ""),
+        offer.get("offer_id", ""),
+        offer.get("collabs_shopify_store_id", ""),
+    ]
+
+
 def write_xlsx_highlight_status(path: Path, header: list, rows: list, status_col: int = 0) -> None:
     """Ghi file Excel: dòng có trạng thái ĐẠT (hoặc GET) được tô nền xanh lá nhạt."""
     from openpyxl import Workbook
@@ -964,7 +1466,7 @@ def write_xlsx_highlight_status(path: Path, header: list, rows: list, status_col
     hyperlink_columns = {
         i + 1
         for i, name in enumerate(header_list)
-        if str(name).strip() in {"Website", "URL apply", "Link đăng ký"}
+        if str(name).strip() in {"Website", "URL apply", "Link đăng ký", "Link Apply"}
     }
     header_fill = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
     green = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
@@ -1022,6 +1524,56 @@ def fetch_refersion_page(base_url: str, page: int) -> dict:
     if str(body.get("status") or "").lower() != "success":
         raise RuntimeError(f"Refersion API lỗi: {text[:300]}")
     return body if isinstance(body, dict) else {}
+
+
+def fetch_collabs_page(base_url: str, first: int, after: str | None = None) -> dict:
+    payload = {
+        "operationName": "BrandsQuery",
+        "query": COLLABS_BRANDS_QUERY,
+        "variables": {
+            "first": int(first),
+            "productCategories": [],
+            "brandValues": [],
+        },
+    }
+    if after:
+        payload["variables"]["after"] = str(after)
+    res = requests.post(base_url, headers=build_collabs_headers(), json=payload, timeout=60)
+    text = res.text
+    try:
+        body = res.json()
+    except Exception as exc:
+        raise RuntimeError(f"Collabs parse JSON lỗi (HTTP {res.status_code}): {text[:180]}") from exc
+    if not res.ok:
+        raise RuntimeError(f"Collabs HTTP {res.status_code}: {text[:300]}")
+    if body.get("errors"):
+        raise RuntimeError(f"Collabs GraphQL lỗi: {json.dumps(body.get('errors'), ensure_ascii=False)[:300]}")
+    return body if isinstance(body, dict) else {}
+
+
+def fetch_collabs_brand_profile(base_url: str, shopify_store_gid: str) -> dict:
+    gid = str(shopify_store_gid or "").strip()
+    if not gid:
+        return {}
+    payload = {
+        "operationName": "DiscoverBrandProfileQuery",
+        "query": COLLABS_BRAND_PROFILE_QUERY,
+        "variables": {
+            "shopifyStoreId": gid,
+        },
+    }
+    res = requests.post(base_url, headers=build_collabs_headers(), json=payload, timeout=60)
+    text = res.text
+    try:
+        body = res.json()
+    except Exception as exc:
+        raise RuntimeError(f"Collabs detail parse JSON lỗi (HTTP {res.status_code}): {text[:180]}") from exc
+    if not res.ok:
+        raise RuntimeError(f"Collabs detail HTTP {res.status_code}: {text[:300]}")
+    if body.get("errors"):
+        raise RuntimeError(f"Collabs detail GraphQL lỗi: {json.dumps(body.get('errors'), ensure_ascii=False)[:300]}")
+    data = body.get("data") if isinstance(body, dict) else {}
+    return data if isinstance(data, dict) else {}
 
 
 def fetch_all_goaffpro_offers() -> list:

@@ -83,6 +83,7 @@
                     <label><input type="checkbox" name="allowed_sources[]" value="uppromote" checked> Uppromote</label>
                     <label><input type="checkbox" name="allowed_sources[]" value="goaffpro" checked> Goaffpro</label>
                     <label><input type="checkbox" name="allowed_sources[]" value="refersion"> Refersion</label>
+                    <label><input type="checkbox" name="allowed_sources[]" value="collabs"> Shopify Collabs</label>
                 </div>
             </div>
             <div style="margin-top:10px;"><button type="submit" class="btn btn-primary">Lưu key</button></div>
@@ -184,6 +185,7 @@
                                     <label><input type="checkbox" name="allowed_sources[]" value="uppromote" @checked(in_array('uppromote', $allowed, true))> Uppromote</label>
                                     <label><input type="checkbox" name="allowed_sources[]" value="goaffpro" @checked(in_array('goaffpro', $allowed, true))> Goaffpro</label>
                                     <label><input type="checkbox" name="allowed_sources[]" value="refersion" @checked(in_array('refersion', $allowed, true))> Refersion</label>
+                                    <label><input type="checkbox" name="allowed_sources[]" value="collabs" @checked(in_array('collabs', $allowed, true))> Shopify Collabs</label>
                                 </div>
                             </div>
                             <div style="margin-top:6px;"><input name="notes" value="{{ $k->notes }}"></div>

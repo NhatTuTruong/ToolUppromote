@@ -10,9 +10,11 @@
     body.license-loading .tab-btn[data-tab="runUppromoteTab"],
     body.license-loading .tab-btn[data-tab="runGoaffproTab"],
     body.license-loading .tab-btn[data-tab="runRefersionTab"],
+    body.license-loading .tab-btn[data-tab="runCollabsTab"],
     body.license-loading #runUppromoteTab,
     body.license-loading #runGoaffproTab,
-    body.license-loading #runRefersionTab {
+    body.license-loading #runRefersionTab,
+    body.license-loading #runCollabsTab {
       display: none !important;
     }
   </style>
@@ -21,7 +23,7 @@
   <div class="app-shell">
     <header class="topbar">
       <div>
-        <h1>Lọc offer affiliate</h1>
+        <h1>Lọc offer affiliate1</h1>
         <p>Bảng điều khiển</p>
       </div>
       <div class="status-chip" id="statusChip">Sảnh</div>
@@ -32,13 +34,14 @@
       <button class="tab-btn" data-tab="runUppromoteTab">Uppromote</button>
       <button class="tab-btn" data-tab="runGoaffproTab">Goaffpro</button>
       <button class="tab-btn" data-tab="runRefersionTab">Refersion</button>
+      <button class="tab-btn" data-tab="runCollabsTab">Shopify Collabs</button>
       <button class="tab-btn" data-tab="resultsTab">Kết quả</button>
     </nav>
 
     <section id="settingsTab" class="tab-panel active">
       <div class="card">
         <h2>Cài đặt môi trường</h2>
-        <p class="muted">Token Apify dùng chung cho cả hai nguồn.</p>
+       
         <div class="form-grid">
           <label class="form-field-label">
             <span class="form-field-caption">Token Apify (APIFY_TOKEN)</span>
@@ -122,6 +125,40 @@
             </div>
           </label>
         </div>
+        <h3 class="settings-sub" data-settings-source="collabs">Shopify Collabs</h3>
+        <div class="form-grid" data-settings-source="collabs">
+          <label class="form-field-label">
+            <span class="form-field-caption">URL API GraphQL (COLLABS_API_URL)</span>
+            <div class="secret-field-row" data-secret-for="COLLABS_API_URL">
+              <button type="button" class="secret-eye-btn" aria-expanded="false" aria-label="Hiện để chỉnh sửa" title="Hiện / ẩn để sửa">
+                <svg class="eye-icon eye-icon--shut" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                <svg class="eye-icon eye-icon--open" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              </button>
+              <input id="COLLABS_API_URL" class="secret-field-input" type="password" spellcheck="false" autocomplete="off" />
+            </div>
+          </label>
+          <label class="form-field-label">
+            <span class="form-field-caption">Cookie request (COLLABS_COOKIE)</span>
+            <div class="secret-field-row" data-secret-for="COLLABS_COOKIE">
+              <button type="button" class="secret-eye-btn" aria-expanded="false" aria-label="Hiện để chỉnh sửa" title="Hiện / ẩn để sửa">
+                <svg class="eye-icon eye-icon--shut" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                <svg class="eye-icon eye-icon--open" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              </button>
+              <input id="COLLABS_COOKIE" class="secret-field-input token-apify" type="password" spellcheck="false" autocomplete="off" />
+            </div>
+          </label>
+          <label class="form-field-label">
+            <span class="form-field-caption">X-CSRF-Token (COLLABS_CSRF_TOKEN)</span>
+            <div class="secret-field-row" data-secret-for="COLLABS_CSRF_TOKEN">
+              <button type="button" class="secret-eye-btn" aria-expanded="false" aria-label="Hiện để chỉnh sửa" title="Hiện / ẩn để sửa">
+                <svg class="eye-icon eye-icon--shut" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                <svg class="eye-icon eye-icon--open" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              </button>
+              <input id="COLLABS_CSRF_TOKEN" class="secret-field-input token-apify" type="password" spellcheck="false" autocomplete="off" />
+            </div>
+          </label>
+          <label>Giới hạn mỗi request (12–48, bước 12)<input id="COLLABS_LIMIT" type="number" min="12" max="48" step="12" value="48" /></label>
+        </div>
         <div class="actions">
           <button class="btn primary" id="saveSettingsBtn">Lưu cài đặt</button>
         </div>
@@ -137,6 +174,62 @@
           <button class="btn primary" id="activateLicenseBtn">Kích hoạt</button>
           <button class="btn danger" type="button" id="deactivateLicenseBtn" disabled>Hủy kích hoạt</button>
         </div>
+      </div>
+    </section>
+
+    <section id="runCollabsTab" class="tab-panel">
+      <div class="card">
+        <h2>Chạy — Shopify Collabs</h2>
+        <div class="form-grid compact">
+          <label>Ngưỡng traffic tối thiểu<input id="minTrafficCb" type="number" value="9000" /></label>
+          <label>Trang bắt đầu<input id="startPageCb" type="number" min="1" value="1" /></label>
+          <label>Trang kết thúc<input id="endPageCb" type="text" inputmode="numeric" autocomplete="off" placeholder="1 — để trống = tới trang cuối API" /></label>
+          <label>Hoa hồng tối thiểu (%)<input id="minCommissionCb" type="number" step="0.01" /></label>
+          <div class="filter-field-full">
+            <label class="form-field-caption">Danh mục</label>
+            <div class="multi-select" data-multi-label="Category Collabs">
+              <button type="button" class="multi-select-btn" aria-expanded="false" aria-haspopup="listbox">
+                <span class="multi-select-btn-text muted-hint">Tất cả</span>
+                <span class="multi-select-chevron" aria-hidden="true">▼</span>
+              </button>
+              <div class="multi-select-panel" id="categoryCollabsGroup" role="listbox" aria-multiselectable="true">
+                <label class="multi-select-option"><input type="checkbox" name="categoryCollabs" value="WOMENS_CLOTHING"><span>Women's clothing and accessories</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryCollabs" value="MENS_CLOTHING"><span>Men's clothing and accessories</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryCollabs" value="BEAUTY"><span>Beauty</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryCollabs" value="HEALTH_AND_WELLNESS"><span>Health and wellness</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryCollabs" value="FOOD_AND_DRINK"><span>Food and drink</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryCollabs" value="HOME_GOODS_AND_DECOR"><span>Home goods and decor</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryCollabs" value="BABY_AND_TODDLER"><span>Baby and toddler</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryCollabs" value="ELECTRONICS"><span>Electronics</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryCollabs" value="SPORTS_GOODS"><span>Sports goods</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryCollabs" value="ARTS_AND_CRAFTS"><span>Arts and crafts</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryCollabs" value="TECH"><span>Tech</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryCollabs" value="PHOTOGRAPHY"><span>Photography</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryCollabs" value="PET_SUPPLIES_AND_ACCESSORIES"><span>Pet supplies and accessories</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryCollabs" value="DIY"><span>DIY</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryCollabs" value="AUTOMOTIVE"><span>Automotive</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryCollabs" value="GARDENING"><span>Gardening</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryCollabs" value="TOBACCO_AND_VAPE"><span>Tobacco and vape</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryCollabs" value="MATURE"><span>Mature</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="categoryCollabs" value="MUSICAL_INSTRUMENTS_AND_ACCESSORIES"><span>Musical instruments and accessories</span></label>
+              </div>
+            </div>
+          </div>
+        </div>
+        <p class="muted">Collabs dùng cookie + x-csrf-token từ phiên đã login trên trình duyệt.</p>
+
+        <div class="actions">
+          <button class="btn primary" id="runBtnCollabs">Lọc &amp; xuất Excel</button>
+          <button class="btn" id="pauseBtnCb" disabled>Tạm dừng</button>
+          <button class="btn danger" id="stopBtnCb" disabled>Dừng</button>
+        </div>
+
+        <div class="progress-wrap">
+          <div class="progress-bar"><div id="progressInnerCb"></div></div>
+          <span id="progressTextCb">0%</span>
+        </div>
+
+        <div class="log-box" id="logBoxCb"></div>
       </div>
     </section>
 
@@ -318,6 +411,98 @@
         </div>
       </div>
     </section>
+  </div>
+
+  <div class="modal-backdrop hidden" id="autoApplyModal">
+    <div class="modal-card">
+      <h3>Auto Apply - Mẫu đăng ký</h3>
+      <div class="form-grid">
+        <label>Họ tên<input id="aa_full_name" type="text" /></label>
+        <label>Email<input id="aa_email" type="email" /></label>
+        <label>Số điện thoại<input id="aa_phone" type="text" /></label>
+        <label>Website<input id="aa_website" type="text" /></label>
+        <label>Instagram<input id="aa_instagram" type="text" /></label>
+        <label>TikTok<input id="aa_tiktok" type="text" /></label>
+        <label>YouTube<input id="aa_youtube" type="text" /></label>
+        <label>Ngày sinh (Date of birth)<input id="aa_dob" type="text" placeholder="MM/DD/YYYY hoặc YYYY-MM-DD" /></label>
+        <label>Địa điểm giao hàng (Shipping location)
+          <select id="aa_shipping_location">
+            <option value="United States">United States</option>
+            <option value="United Kingdom">United Kingdom</option>
+            <option value="Canada">Canada</option>
+            <option value="Australia">Australia</option>
+            <option value="Germany">Germany</option>
+            <option value="France">France</option>
+            <option value="Netherlands">Netherlands</option>
+            <option value="Sweden">Sweden</option>
+            <option value="Italy">Italy</option>
+            <option value="Spain">Spain</option>
+            <option value="United Arab Emirates">United Arab Emirates</option>
+            <option value="Saudi Arabia">Saudi Arabia</option>
+            <option value="Singapore">Singapore</option>
+            <option value="India">India</option>
+            <option value="Japan">Japan</option>
+            <option value="Vietnam">Vietnam</option>
+          </select>
+        </label>
+        <div class="filter-field-full">
+          <label class="form-field-caption">Giới tính (How do you identify?)</label>
+          <div class="multi-select" data-multi-label="Identify">
+            <button type="button" class="multi-select-btn" aria-expanded="false" aria-haspopup="listbox">
+              <span class="multi-select-btn-text muted-hint">Prefer not to say</span>
+              <span class="multi-select-chevron" aria-hidden="true">▼</span>
+            </button>
+            <div class="multi-select-panel" id="aa_identify_group" role="listbox" aria-multiselectable="true">
+              <label class="multi-select-option"><input type="checkbox" name="aa_identify" value="Woman"><span>Woman</span></label>
+              <label class="multi-select-option"><input type="checkbox" name="aa_identify" value="Man"><span>Man</span></label>
+              <label class="multi-select-option"><input type="checkbox" name="aa_identify" value="Non-binary"><span>Non-binary</span></label>
+              <label class="multi-select-option"><input type="checkbox" name="aa_identify" value="Other"><span>Other</span></label>
+              <label class="multi-select-option"><input type="checkbox" name="aa_identify" value="Prefer not to say"><span>Prefer not to say</span></label>
+            </div>
+          </div>
+        </div>
+        <label>Chế độ đăng ký
+          <select id="aa_apply_mode">
+            <option value="only_dat">Chỉ đăng ký record ĐẠT trong file</option>
+            <option value="all">Đăng ký tất cả record có link apply</option>
+          </select>
+        </label>
+        <label>Mẫu riêng: “Have you made a purchase from us before?”
+          <select id="aa_purchase_before_choice">
+            <option value="Yes">Yes</option>
+            <option value="No">No</option>
+            <option value="Not yet, but I plan to!">Not yet, but I plan to!</option>
+          </select>
+        </label>
+        <label>Từ hàng #<input id="aa_row_start" type="number" min="1" step="1" placeholder="1" /></label>
+        <label>Đến hàng #<input id="aa_row_end" type="number" min="1" step="1" placeholder="10 (để trống = tới cuối)" /></label>
+        <label>Mẫu: Loại hình hoạt động<input id="aa_business_type" type="text" placeholder="Content Creator" /></label>
+        <label>Mẫu: Đã hợp tác với brand nào<input id="aa_brands_worked" type="text" placeholder="Brand A, Brand B" /></label>
+        <label>Mẫu: Kinh nghiệm hợp tác thành công<input id="aa_successful_partnership" type="text" /></label>
+        <label>Mẫu: Nội dung nổi bật<input id="aa_content_inspires" type="text" /></label>
+        <label>Mẫu: Mục tiêu hợp tác<input id="aa_hope_gain" type="text" /></label>
+        <label>Mẫu: Nguồn biết đến brand<input id="aa_how_found" type="text" /></label>
+        <label>Mẫu: Nơi sống (City, Country)<input id="aa_city_country" type="text" /></label>
+        <label>Mẫu: Tệp khách hàng/demographic<input id="aa_demographic" type="text" /></label>
+        <label>Mẫu: Chiến lược tăng trưởng<input id="aa_growth_strategy" type="text" /></label>
+        <label>Mẫu: Ý tưởng content cho sản phẩm<input id="aa_content_ideas" type="text" /></label>
+        <label>Mẫu: Vì sao phù hợp với brand<input id="aa_why_fit" type="text" /></label>
+        <label>Mẫu: Trải nghiệm/điều thích ở sản phẩm<input id="aa_purchase_love" type="text" /></label>
+        <label>Mẫu: Lý do muốn tham gia chương trình<input id="aa_why_join" type="text" /></label>
+        <label>Mẫu trả lời ngắn chung<input id="aa_generic_short" type="text" placeholder="I'd love to collaborate and create engaging content for your audience." /></label>
+        <label class="filter-field-full">Mẫu trả lời dài chung
+          <textarea id="aa_generic_long" rows="3" placeholder="I focus on high-quality, authentic content that builds trust and drives conversions. I can deliver consistent posts, clear communication, and measurable performance."></textarea>
+        </label>
+        <label class="filter-field-full">Tin nhắn apply
+          <textarea id="aa_message" rows="4" placeholder="Giới thiệu ngắn gọn về bạn..."></textarea>
+        </label>
+      </div>
+      <div class="actions">
+        <button class="btn" type="button" id="aa_cancel_btn">Hủy</button>
+        <button class="btn" type="button" id="aa_save_btn">Lưu</button>
+        <button class="btn primary" type="button" id="aa_confirm_btn">Bắt đầu Auto Apply</button>
+      </div>
+    </div>
   </div>
   <script src="/static/app.js"></script>
 </body>

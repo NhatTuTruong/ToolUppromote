@@ -66,7 +66,7 @@ class LicenseManagementController extends Controller
             'daily_limit' => ['nullable', 'integer', 'min:1'],
             'max_machines' => ['nullable', 'integer', 'min:1'],
             'allowed_sources' => ['required', 'array', 'min:1'],
-            'allowed_sources.*' => ['string', 'in:uppromote,goaffpro,refersion'],
+            'allowed_sources.*' => ['string', 'in:uppromote,goaffpro,refersion,collabs'],
             'expires_at' => ['nullable', 'date'],
             'notes' => ['nullable', 'string', 'max:2000'],
         ]);
@@ -92,7 +92,7 @@ class LicenseManagementController extends Controller
             'daily_limit' => ['nullable', 'integer', 'min:1'],
             'max_machines' => ['nullable', 'integer', 'min:1'],
             'allowed_sources' => ['required', 'array', 'min:1'],
-            'allowed_sources.*' => ['string', 'in:uppromote,goaffpro,refersion'],
+            'allowed_sources.*' => ['string', 'in:uppromote,goaffpro,refersion,collabs'],
         ]);
 
         $dailyLimit = $data['daily_limit'] ?? (int) config('license.default_daily_limit', 500);
@@ -134,7 +134,7 @@ class LicenseManagementController extends Controller
             'daily_limit' => ['nullable', 'integer', 'min:1'],
             'max_machines' => ['nullable', 'integer', 'min:1'],
             'allowed_sources' => ['required', 'array', 'min:1'],
-            'allowed_sources.*' => ['string', 'in:uppromote,goaffpro,refersion'],
+            'allowed_sources.*' => ['string', 'in:uppromote,goaffpro,refersion,collabs'],
             'expires_at' => ['nullable', 'date'],
             'notes' => ['nullable', 'string', 'max:2000'],
         ]);

@@ -9,7 +9,7 @@ class LicenseKey extends Model
 {
     public const DEFAULT_ALLOWED_SOURCES = ['uppromote', 'goaffpro'];
 
-    public const SUPPORTED_SOURCES = ['uppromote', 'goaffpro', 'refersion'];
+    public const SUPPORTED_SOURCES = ['uppromote', 'goaffpro', 'refersion', 'collabs'];
 
     protected $fillable = [
         'license_key',

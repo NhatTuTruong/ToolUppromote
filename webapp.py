@@ -1,11 +1,17 @@
 import os
-import threading
+import socket
+import subprocess
+import sys
 import time
+from shutil import which
+import threading
+from datetime import datetime
 from pathlib import Path
 
 from flask import Flask, jsonify, render_template, request, send_file
 
 import filter as core
+import auto_apply as auto_apply_core
 from app import (
     ENV_PATH,
     apply_settings_for_run,
@@ -110,6 +116,89 @@ app = Flask(
     static_folder=str(_root / "static"),
 )
 
+def _is_tcp_port_open(host: str, port: int, timeout_sec: float = 0.35) -> bool:
+    try:
+        with socket.create_connection((host, int(port)), timeout=float(timeout_sec)):
+            return True
+    except OSError:
+        return False
+
+
+def _default_edge_paths_windows() -> list[str]:
+    paths = []
+    pf86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+    pf = os.environ.get("ProgramFiles", r"C:\Program Files")
+    paths.append(str(Path(pf86) / "Microsoft" / "Edge" / "Application" / "msedge.exe"))
+    paths.append(str(Path(pf) / "Microsoft" / "Edge" / "Application" / "msedge.exe"))
+    return paths
+
+
+def ensure_edge_cdp_running(
+    port: int = 9222,
+    user_data_dir: str = r"C:\edge-cdp",
+    edge_exe: str | None = None,
+    log: callable | None = None,
+    wait_sec: float = 12.0,
+) -> bool:
+    """
+    Khi bấm Auto Apply:
+    - Nếu CDP port đã mở: coi như Edge đã chạy -> OK.
+    - Nếu chưa mở: tự mở Edge với --remote-debugging-port + --user-data-dir rồi chờ port lên.
+    """
+
+    def _log(msg: str) -> None:
+        if log:
+            try:
+                log(str(msg))
+            except Exception:
+                pass
+
+    host = "127.0.0.1"
+    if _is_tcp_port_open(host, port):
+        _log(f"CDP đã sẵn sàng trên {host}:{port} (Edge đã mở).")
+        return True
+
+    if not sys.platform.startswith("win"):
+        _log("Không phải Windows: không tự mở Edge. Hãy tự mở browser CDP trước.")
+        return False
+
+    exe = (edge_exe or "").strip()
+    if not exe:
+        for p in _default_edge_paths_windows():
+            if Path(p).is_file():
+                exe = p
+                break
+    if not exe:
+        exe = which("msedge") or which("msedge.exe") or ""
+    if not exe:
+        _log("Không tìm thấy msedge.exe để mở Edge CDP.")
+        return False
+
+    args = [
+        exe,
+        f"--remote-debugging-port={int(port)}",
+        f"--user-data-dir={user_data_dir}",
+    ]
+    _log("Đang mở Edge CDP: " + " ".join([f'"{a}"' if " " in a else a for a in args]))
+
+    try:
+        creationflags = 0
+        if sys.platform.startswith("win"):
+            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+        subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=creationflags)
+    except Exception as exc:
+        _log(f"Lỗi mở Edge CDP: {exc}")
+        return False
+
+    deadline = time.monotonic() + float(wait_sec)
+    while time.monotonic() < deadline:
+        if _is_tcp_port_open(host, port):
+            _log(f"Edge CDP đã lên trên {host}:{port}.")
+            return True
+        time.sleep(0.25)
+    _log(f"Timeout chờ Edge CDP trên {host}:{port}.")
+    return False
+
 
 def _refresh_license_env_from_file() -> None:
     """
@@ -125,6 +214,44 @@ def _refresh_license_env_from_file() -> None:
     ):
         if key in disk:
             os.environ[key] = str(disk.get(key) or "").strip()
+
+
+def _resolve_export_page_range(filters: dict, source: str) -> tuple[int, int]:
+    try:
+        start_page = int(filters.get("start_page") or 1)
+    except (TypeError, ValueError):
+        start_page = 1
+    if start_page < 1:
+        start_page = 1
+
+    end_raw = filters.get("end_page")
+    try:
+        if end_raw is None:
+            end_page = start_page
+        elif str(end_raw).strip() == "":
+            end_page = start_page
+        else:
+            end_page = int(end_raw)
+    except (TypeError, ValueError):
+        end_page = start_page
+
+    if end_page < start_page:
+        end_page = start_page
+
+    max_pages_cap = None
+    if source == "goaffpro":
+        max_pages_cap = core.goaffpro_max_pages_cap()
+    elif source == "refersion":
+        max_pages_cap = core.refersion_max_pages_cap()
+    elif source == "collabs":
+        max_pages_cap = core.collabs_max_pages_cap()
+    else:
+        max_pages_cap = core.uppromote_max_pages_cap()
+
+    if max_pages_cap is not None:
+        end_page = min(end_page, max_pages_cap)
+
+    return start_page, end_page
 
 
 def fetch_offers_uppromote(filters: dict) -> list:
@@ -337,6 +464,120 @@ def fetch_offers_refersion(filters: dict) -> list:
     return [core.map_refersion_offer(o) for o in raw_offers]
 
 
+def fetch_offers_collabs(filters: dict) -> list:
+    base_url = (os.getenv("COLLABS_API_URL") or "").strip()
+    if not base_url:
+        raise RuntimeError("Thiếu COLLABS_API_URL trong cài đặt")
+    core.enforce_fixed_fetch_defaults()
+    max_pages_cap = core.collabs_max_pages_cap()
+    page_size = core.clamp_collabs_limit(os.getenv("COLLABS_LIMIT", str(core.DEFAULT_COLLABS_LIMIT)))
+    start_page = int(filters.get("start_page") or 1)
+    if start_page < 1:
+        start_page = 1
+    end_raw = filters.get("end_page")
+    if end_raw is None:
+        end_page = 1
+    elif str(end_raw).strip() == "":
+        end_page = None
+    else:
+        end_page = int(end_raw)
+    if end_page is not None and end_page < start_page:
+        end_page = start_page
+    if end_page is not None and max_pages_cap is not None:
+        end_page = min(end_page, max_pages_cap)
+    delay_ms = int(
+        os.getenv("COLLABS_PAGE_DELAY_MS", str(core.DEFAULT_COLLABS_PAGE_DELAY_MS))
+        or str(core.DEFAULT_COLLABS_PAGE_DELAY_MS)
+    )
+    detail_delay_ms = int(os.getenv("COLLABS_DETAIL_DELAY_MS", "100") or "100")
+
+    raw_nodes = []
+    after = None
+    page = 1
+    while True:
+        STATE.control.wait_if_paused()
+        if STATE.control.should_stop():
+            STATE.add_log("Đã dừng.")
+            return []
+        STATE.add_log(f"Collabs trang {page}: đang tải...")
+        body = core.fetch_collabs_page(base_url, page_size, after=after)
+        data = body.get("data") or {}
+        search = data.get("brandsNetworkSearch") or {}
+        nodes = search.get("nodes") or []
+        if not isinstance(nodes, list):
+            nodes = []
+        if not nodes:
+            STATE.add_log(f"Collabs trang {page}: hết dữ liệu, dừng phân trang.")
+            break
+        if page >= start_page:
+            raw_nodes.extend(nodes)
+            STATE.add_log(f"Collabs trang {page}: +{len(nodes)} brand (tổng {len(raw_nodes)})")
+        else:
+            STATE.add_log(f"Collabs trang {page}: bỏ qua vì trước trang bắt đầu ({start_page})")
+        info = search.get("pageInfo") or {}
+        has_next = bool(info.get("hasNextPage"))
+        after = info.get("endCursor")
+        if end_page is not None and page >= end_page:
+            STATE.add_log(f"Collabs: đã tới trang kết thúc đã chọn: {end_page}")
+            break
+        if not has_next:
+            break
+        if max_pages_cap is not None and page >= max_pages_cap:
+            STATE.add_log(f"Collabs: đã tới giới hạn trang trong cài đặt: {max_pages_cap}")
+            break
+        page += 1
+        if delay_ms > 0:
+            time.sleep(delay_ms / 1000)
+    offers = []
+    total_raw = len(raw_nodes)
+    redirect_timeout_sec = int(os.getenv("COLLABS_REDIRECT_TIMEOUT_SEC", "20") or "20")
+    redirect_delay_ms = int(os.getenv("COLLABS_REDIRECT_DELAY_MS", "50") or "50")
+    signup_timeout_sec = int(os.getenv("COLLABS_SIGNUP_TIMEOUT_SEC", "20") or "20")
+    signup_delay_ms = int(os.getenv("COLLABS_SIGNUP_DELAY_MS", "50") or "50")
+    signup_by_host = {}
+    for idx, node in enumerate(raw_nodes, start=1):
+        STATE.control.wait_if_paused()
+        if STATE.control.should_stop():
+            STATE.add_log("Đã dừng.")
+            return []
+        detail_brand = {}
+        gid = core.collabs_shopify_store_gid(node)
+        if gid:
+            try:
+                detail_data = core.fetch_collabs_brand_profile(base_url, gid)
+                detail_brand = detail_data.get("brand") if isinstance(detail_data.get("brand"), dict) else {}
+            except Exception as exc:
+                STATE.add_log(f"Lỗi detail collabs ({gid}): {exc}")
+        mapped = core.map_collabs_brand(node, detail_brand)
+        before_url = str(mapped.get("url") or "").strip()
+        if before_url:
+            final_url = core.resolve_redirected_url(before_url, timeout_sec=redirect_timeout_sec)
+            if final_url and final_url != before_url:
+                mapped["url"] = final_url
+                STATE.add_log(f"Collabs redirect: {before_url} -> {final_url}")
+        effective_url = str(mapped.get("url") or "").strip()
+        hk = core.host_key(effective_url)
+        signup_url = ""
+        if hk:
+            signup_url = signup_by_host.get(hk, "")
+            if not signup_url:
+                signup_url = core.discover_collabs_signup_url(effective_url, timeout_sec=signup_timeout_sec)
+                signup_by_host[hk] = signup_url
+        if signup_url:
+            mapped["client_url"] = signup_url
+            STATE.add_log(f"Collabs signup: {hk} -> {signup_url}")
+        offers.append(mapped)
+        if idx % 10 == 0 or idx == total_raw:
+            STATE.add_log(f"Collabs detail: {idx}/{total_raw}")
+        if detail_delay_ms > 0:
+            time.sleep(detail_delay_ms / 1000)
+        if redirect_delay_ms > 0:
+            time.sleep(redirect_delay_ms / 1000)
+        if signup_delay_ms > 0:
+            time.sleep(signup_delay_ms / 1000)
+    return offers
+
+
 def run_pipeline(settings: dict, min_traffic: int, filters: dict, source: str = "uppromote"):
     apply_settings_for_run(settings)
     core.enforce_fixed_fetch_defaults()
@@ -354,6 +595,10 @@ def run_pipeline(settings: dict, min_traffic: int, filters: dict, source: str = 
         STATE.add_log("Đang tải offer từ Refersion...")
         offers = fetch_offers_refersion(filters)
         snapshot_path = BASE_DIR / "refersion-offers-last.json"
+    elif src == "collabs":
+        STATE.add_log("Đang tải offer từ Shopify Collabs...")
+        offers = fetch_offers_collabs(filters)
+        snapshot_path = BASE_DIR / "collabs-offers-last.json"
     else:
         STATE.add_log("Đang tải offer từ Uppromote...")
         offers = fetch_offers_uppromote(filters)
@@ -411,12 +656,23 @@ def run_pipeline(settings: dict, min_traffic: int, filters: dict, source: str = 
         if key:
             by_host[key] = item
 
-    net_prefix = "goaffpro" if src == "goaffpro" else ("refersion" if src == "refersion" else "uppromote")
-    xlsx_path = BASE_DIR / f"{net_prefix}_{int(time.time())}.xlsx"
+    net_prefix = (
+        "goaffpro"
+        if src == "goaffpro"
+        else ("refersion" if src == "refersion" else ("collabs" if src == "collabs" else "uppromote"))
+    )
+    export_start_page, export_end_page = _resolve_export_page_range(filters, src)
+    now = datetime.now()
+    date_part = f"{now.day}-{now.month}-{now.year}"
+    time_part = f"{now.hour}-{now.minute:02d}"
+    xlsx_name = f"{net_prefix}_page{export_start_page}-{export_end_page}_{date_part}_{time_part}.xlsx"
+    xlsx_path = BASE_DIR / xlsx_name
     if src == "goaffpro":
         header = list(core.GOAFF_CSV_HEADER)
     elif src == "refersion":
         header = list(core.REFERSION_CSV_HEADER)
+    elif src == "collabs":
+        header = list(core.COLLABS_CSV_HEADER)
     else:
         header = list(core.UPPROMOTE_CSV_HEADER_VI)
 
@@ -477,6 +733,8 @@ def run_pipeline(settings: dict, min_traffic: int, filters: dict, source: str = 
                 row = core.build_goaff_csv_row(offer, item, status)
             elif src == "refersion":
                 row = core.build_refersion_csv_row(offer, item, status)
+            elif src == "collabs":
+                row = core.build_collabs_csv_row(offer, item, status)
             else:
                 row = core.build_uppromote_csv_row_vi(offer, item, status)
             exported_rows.append(row)
@@ -594,7 +852,7 @@ def api_run():
     except (TypeError, ValueError):
         min_traffic = 9000.0
     source = (payload.get("source") or "uppromote").strip().lower()
-    if source not in ("uppromote", "goaffpro", "refersion"):
+    if source not in ("uppromote", "goaffpro", "refersion", "collabs"):
         source = "uppromote"
 
     core.load_env_file(ENV_PATH)
@@ -692,6 +950,7 @@ def api_results():
         + list(BASE_DIR.glob("uppromote_*.xlsx"))
         + list(BASE_DIR.glob("goaffpro_*.xlsx"))
         + list(BASE_DIR.glob("refersion_*.xlsx"))
+        + list(BASE_DIR.glob("collabs_*.xlsx"))
     )
     for p in sorted(globs, key=lambda x: x.stat().st_mtime, reverse=True):
         if p.name in seen:
@@ -716,6 +975,7 @@ def _allowed_export_basename(name: str) -> bool:
         or name.startswith("uppromote_")
         or name.startswith("goaffpro_")
         or name.startswith("refersion_")
+        or name.startswith("collabs_")
     )
 
 
@@ -765,6 +1025,123 @@ def api_delete_result():
     except OSError as exc:
         return jsonify({"ok": False, "error": str(exc)}), 500
     return jsonify({"ok": True})
+
+
+@app.post("/api/auto-apply")
+def api_auto_apply():
+    payload = request.get_json(force=True) or {}
+    name = str(payload.get("name") or "").strip()
+    safe_name = Path(name).name
+    full = _safe_result_file_path(safe_name)
+    if full is None:
+        return jsonify({"ok": False, "error": "Tên file không hợp lệ."}), 400
+    if not full.is_file():
+        return jsonify({"ok": False, "error": "Không tìm thấy file."}), 404
+
+    profile_in = payload.get("profile") or {}
+    profile = {
+        "full_name": str(profile_in.get("full_name") or "").strip(),
+        "first_name": str(profile_in.get("first_name") or "").strip(),
+        "last_name": str(profile_in.get("last_name") or "").strip(),
+        "email": str(profile_in.get("email") or "").strip(),
+        "phone": str(profile_in.get("phone") or "").strip(),
+        "website": str(profile_in.get("website") or "").strip(),
+        "instagram": str(profile_in.get("instagram") or "").strip(),
+        "tiktok": str(profile_in.get("tiktok") or "").strip(),
+        "youtube": str(profile_in.get("youtube") or "").strip(),
+        "message": str(profile_in.get("message") or "").strip(),
+        "business_type": str(profile_in.get("business_type") or "").strip(),
+        "dob": str(profile_in.get("dob") or "").strip(),
+        "shipping_location": str(profile_in.get("shipping_location") or "").strip() or "United States",
+        "purchase_before_choice": str(profile_in.get("purchase_before_choice") or "").strip() or "Yes",
+        "identify": profile_in.get("identify") if isinstance(profile_in.get("identify"), list) else [],
+        "brands_worked": str(profile_in.get("brands_worked") or "").strip(),
+        "successful_partnership": str(profile_in.get("successful_partnership") or "").strip(),
+        "content_inspires": str(profile_in.get("content_inspires") or "").strip(),
+        "hope_gain": str(profile_in.get("hope_gain") or "").strip(),
+        "how_found": str(profile_in.get("how_found") or "").strip(),
+        "city_country": str(profile_in.get("city_country") or "").strip(),
+        "demographic": str(profile_in.get("demographic") or "").strip(),
+        "growth_strategy": str(profile_in.get("growth_strategy") or "").strip(),
+        "children_age": str(profile_in.get("children_age") or "").strip(),
+        "ugc_content": str(profile_in.get("ugc_content") or "").strip(),
+        "content_ideas": str(profile_in.get("content_ideas") or "").strip(),
+        "why_fit": str(profile_in.get("why_fit") or "").strip(),
+        "purchase_love": str(profile_in.get("purchase_love") or "").strip(),
+        "why_join": str(profile_in.get("why_join") or "").strip(),
+        "generic_short": str(profile_in.get("generic_short") or "").strip(),
+        "generic_long": str(profile_in.get("generic_long") or "").strip(),
+    }
+    # chuẩn hóa identify
+    if not isinstance(profile["identify"], list):
+        profile["identify"] = []
+    profile["identify"] = [str(x or "").strip() for x in profile["identify"] if str(x or "").strip()]
+    if not profile["identify"]:
+        profile["identify"] = ["Prefer not to say"]
+    if not profile["full_name"] and not profile["first_name"] and not profile["email"]:
+        return (
+            jsonify({"ok": False, "error": "Cần ít nhất 1 trong các trường: Họ tên, First name hoặc Email."}),
+            400,
+        )
+
+    auto_submit = bool(payload.get("auto_submit"))
+    use_cdp = bool(payload.get("use_cdp"))
+    cdp_url = str(payload.get("cdp_url") or "").strip() or "http://127.0.0.1:9222"
+    if not use_cdp:
+        return (
+            jsonify(
+                {
+                    "ok": False,
+                    "error": (
+                        "Auto Apply hiện chỉ chạy trên trình duyệt thật đã login (CDP). "
+                        "Vui lòng bật tùy chọn dùng trình duyệt đang mở."
+                    ),
+                }
+            ),
+            400,
+        )
+    # Cưỡng chế: luôn bắt buộc login Shopify Collabs trước khi chạy Auto Apply.
+    login_first = True
+    apply_mode = str(payload.get("apply_mode") or "only_dat").strip() or "only_dat"
+    try:
+        row_start = int(payload.get("row_start")) if str(payload.get("row_start") or "").strip() else None
+    except (TypeError, ValueError):
+        row_start = None
+    try:
+        row_end = int(payload.get("row_end")) if str(payload.get("row_end") or "").strip() else None
+    except (TypeError, ValueError):
+        row_end = None
+
+    links = auto_apply_core.extract_apply_links_from_xlsx(
+        full,
+        apply_mode=apply_mode,
+        row_start=row_start,
+        row_end=row_end,
+    )
+    if not links:
+        return jsonify({"ok": False, "error": "Không tìm thấy cột/link apply trong file."}), 400
+
+    logs: list[str] = []
+    try:
+        # Tự mở Edge CDP nếu chưa chạy, theo yêu cầu:
+        # "msedge.exe --remote-debugging-port=9222 --user-data-dir=C:\\edge-cdp"
+        ensure_edge_cdp_running(
+            port=9222,
+            user_data_dir=r"C:\edge-cdp",
+            edge_exe=r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            log=lambda m: logs.append(str(m)),
+        )
+        result = auto_apply_core.run_auto_apply(
+            links=links,
+            profile=profile,
+            auto_submit=auto_submit,
+            cdp_url=cdp_url,
+            login_first=login_first,
+            log=lambda m: logs.append(str(m)),
+        )
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc), "logs": logs}), 500
+    return jsonify({"ok": True, "result": result, "logs": logs})
 
 
 if __name__ == "__main__":

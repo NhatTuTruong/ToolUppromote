@@ -25,8 +25,8 @@ FREE_TRIAL_UP_LIMIT = 3
 FREE_TRIAL_GP_LIMIT = 3
 DEFAULT_LICENSED_EXPORTS_PER_DAY = 500
 # Chu kỳ quota theo VN: reset đúng 00:00 mỗi ngày lịch.
-SUPPORTED_SOURCES = {"uppromote", "goaffpro", "refersion"}
-ALL_SOURCES = ["uppromote", "goaffpro", "refersion"]
+SUPPORTED_SOURCES = {"uppromote", "goaffpro", "refersion", "collabs"}
+ALL_SOURCES = ["uppromote", "goaffpro", "refersion", "collabs"]
 DEFAULT_LICENSED_SOURCES = ["uppromote", "goaffpro"]
 
 
@@ -53,7 +53,11 @@ def normalize_allowed_sources(raw) -> list[str]:
 
 def source_label(source: str) -> str:
     s = normalize_source(source)
-    return "Goaffpro" if s == "goaffpro" else ("Refersion" if s == "refersion" else "Uppromote")
+    return (
+        "Goaffpro"
+        if s == "goaffpro"
+        else ("Refersion" if s == "refersion" else ("Shopify Collabs" if s == "collabs" else "Uppromote"))
+    )
 
 
 # Giờ Việt Nam cố định UTC+7 (không DST).

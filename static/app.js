@@ -4,6 +4,39 @@ const state = {
   currentLicense: null,
 };
 
+const AUTO_APPLY_DEFAULTS = {
+  aa_business_type: "Content Creator",
+  aa_brands_worked: "Shopify and DTC lifestyle brands",
+  aa_successful_partnership:
+    "A successful collaboration starts with clear goals, fast communication, and consistent content quality. I can deliver authentic content on schedule and optimize based on performance.",
+  aa_content_inspires: "Educational product demos, before-after transformations, and real customer-style storytelling.",
+  aa_hope_gain: "Long-term partnership, exclusive offers for my audience, and performance-based growth.",
+  aa_how_found: "I discovered your brand through social media and creator community recommendations.",
+  aa_city_country: "Ho Chi Minh City, Vietnam",
+  aa_demographic: "Women and men aged 18-34 interested in lifestyle, home, and online shopping.",
+  aa_growth_strategy: "Consistent short-form videos, SEO captions, UGC-style content, and weekly A/B tests on hooks.",
+  aa_children_age: "N/A",
+  aa_ugc_content: "Yes, I create UGC content.",
+  aa_content_ideas: "Unboxing, product comparison, problem-solution videos, and creator picks.",
+  aa_why_fit:
+    "I have an audience aligned with your target customers and a strong track record of converting content.",
+  aa_purchase_love: "I love the product quality, design details, and how practical it is in daily use.",
+  aa_why_join:
+    "I would love to join your community to create authentic content, introduce your products to my audience, and build a long-term win-win partnership.",
+  aa_generic_short: "I'd love to collaborate and create engaging content for your audience.",
+  aa_generic_long:
+    "I focus on high-quality, authentic content that builds trust and drives conversions. I can deliver consistent posts, clear communication, and measurable performance.",
+  aa_message:
+    "I am excited to collaborate and create authentic, high-converting content for your brand. I can provide short-form videos, product storytelling, and consistent communication.",
+  aa_dob: "",
+  aa_shipping_location: "United States",
+  aa_identify: "Prefer not to say",
+  aa_apply_mode: "only_dat",
+  aa_purchase_before_choice: "Yes",
+  aa_row_start: "1",
+  aa_row_end: "",
+};
+
 /** Poll nhanh hơn khi đang chạy; server phải threaded=True để /api/logs không bị chặn bởi worker. */
 const POLL_MS = 120;
 
@@ -20,6 +53,10 @@ const settingKeys = [
   "GOAFFPRO_LIMIT",
   "REFERSION_API_URL",
   "REFERSION_TOKEN",
+  "COLLABS_API_URL",
+  "COLLABS_LIMIT",
+  "COLLABS_COOKIE",
+  "COLLABS_CSRF_TOKEN",
 ];
 
 function clampOffersPerPageField(id) {
@@ -31,12 +68,23 @@ function clampOffersPerPageField(id) {
   el.value = String(n);
 }
 
+function clampCollabsLimitField(id) {
+  const el = $(id);
+  if (!el) return;
+  let n = parseInt(String(el.value ?? "").trim(), 10);
+  if (Number.isNaN(n)) n = 48;
+  n = Math.max(12, Math.min(48, Math.floor(n / 12) * 12));
+  el.value = String(n);
+}
+
 /** Không .trim() — giữ nguyên JWT/Bearer (chỉ chuẩn hóa xuống dòng Windows). */
 const SECRET_SETTING_KEYS = new Set([
   "APIFY_TOKEN",
   "UPPROMOTE_BEARER_TOKEN",
   "GOAFFPRO_BEARER_TOKEN",
   "REFERSION_TOKEN",
+  "COLLABS_COOKIE",
+  "COLLABS_CSRF_TOKEN",
   "AFF_LICENSE_API_TOKEN",
 ]);
 
@@ -199,10 +247,11 @@ const TAB_SOURCE_MAP = {
   runUppromoteTab: "uppromote",
   runGoaffproTab: "goaffpro",
   runRefersionTab: "refersion",
+  runCollabsTab: "collabs",
 };
 
 function normalizeAllowedSourcesFromLicense(lic) {
-  const all = ["uppromote", "goaffpro", "refersion"];
+  const all = ["uppromote", "goaffpro", "refersion", "collabs"];
   if (!lic || !lic.licensed) return all;
   const incoming = Array.isArray(lic.allowed_sources) ? lic.allowed_sources : [];
   const normalized = Array.from(
@@ -257,6 +306,7 @@ async function loadSettings() {
 async function saveSettings() {
   clampOffersPerPageField("UPPROMOTE_PER_PAGE");
   clampOffersPerPageField("GOAFFPRO_LIMIT");
+  clampCollabsLimitField("COLLABS_LIMIT");
   const payload = {};
   settingKeys.forEach((k) => {
     if (!$(k)) return;
@@ -277,7 +327,7 @@ async function saveSettings() {
 
 /** Ghi log vào DOM rồi chờ khung vẽ (double rAF) trước khi gửi ack — khớp thứ tự với worker. */
 async function appendLogs(lines) {
-  const boxes = [logBox(), logBoxGp(), logBoxRf()].filter(Boolean);
+  const boxes = [logBox(), logBoxGp(), logBoxRf(), logBoxCb()].filter(Boolean);
   if (!lines || !lines.length) return;
   await new Promise((resolve) => {
     requestAnimationFrame(() => {
@@ -304,20 +354,28 @@ function logBoxRf() {
   return $("logBoxRf");
 }
 
+function logBoxCb() {
+  return $("logBoxCb");
+}
+
 function setProgress(pct) {
   const v = Math.max(0, Math.min(100, pct || 0));
   const inner = $("progressInner");
   const innerGp = $("progressInnerGp");
   const innerRf = $("progressInnerRf");
+  const innerCb = $("progressInnerCb");
   const tx = $("progressText");
   const txGp = $("progressTextGp");
   const txRf = $("progressTextRf");
+  const txCb = $("progressTextCb");
   if (inner) inner.style.width = `${v}%`;
   if (innerGp) innerGp.style.width = `${v}%`;
   if (innerRf) innerRf.style.width = `${v}%`;
+  if (innerCb) innerCb.style.width = `${v}%`;
   if (tx) tx.textContent = `${Math.round(v)}%`;
   if (txGp) txGp.textContent = `${Math.round(v)}%`;
   if (txRf) txRf.textContent = `${Math.round(v)}%`;
+  if (txCb) txCb.textContent = `${Math.round(v)}%`;
 }
 
 async function pollStatus() {
@@ -334,11 +392,12 @@ async function pollStatus() {
     $("statusChip").textContent = st.status || "Sảnh";
     setProgress(st.progress || 0);
 
-    const pauseBtns = [$("pauseBtn"), $("pauseBtnGp"), $("pauseBtnRf")].filter(Boolean);
-    const stopBtns = [$("stopBtn"), $("stopBtnGp"), $("stopBtnRf")].filter(Boolean);
+    const pauseBtns = [$("pauseBtn"), $("pauseBtnGp"), $("pauseBtnRf"), $("pauseBtnCb")].filter(Boolean);
+    const stopBtns = [$("stopBtn"), $("stopBtnGp"), $("stopBtnRf"), $("stopBtnCb")].filter(Boolean);
     const runUp = $("runBtnUppromote");
     const runGp = $("runBtnGoaffpro");
     const runRf = $("runBtnRefersion");
+    const runCb = $("runBtnCollabs");
     pauseBtns.forEach((b) => {
       b.disabled = !st.running;
     });
@@ -351,6 +410,7 @@ async function pollStatus() {
     if (runUp) runUp.disabled = st.running;
     if (runGp) runGp.disabled = st.running;
     if (runRf) runRf.disabled = st.running;
+    if (runCb) runCb.disabled = st.running;
 
     if (lg.logs && lg.logs.length) {
       await appendLogs(lg.logs);
@@ -386,6 +446,15 @@ function collectCheckedValues(groupSelector) {
   return Array.from(root.querySelectorAll('input[type="checkbox"]:checked')).map((c) => c.value);
 }
 
+function setCheckedValues(groupSelector, values) {
+  const root = document.querySelector(groupSelector);
+  if (!root) return;
+  const set = new Set((values || []).map((v) => String(v || "").trim()).filter(Boolean));
+  root.querySelectorAll('input[type="checkbox"]').forEach((c) => {
+    c.checked = set.has(String(c.value || "").trim());
+  });
+}
+
 let multiSelectDocListenersBound = false;
 
 function bindMultiSelectDropdowns() {
@@ -400,7 +469,9 @@ function bindMultiSelectDropdowns() {
       const n = checked.length;
       textEl.classList.toggle("muted-hint", n === 0);
       if (n === 0) {
-        textEl.textContent = "Tất cả";
+        // Nếu đây là dropdown Identify trong Auto Apply, mặc định là "Prefer not to say"
+        const label = String(root.getAttribute("data-multi-label") || "").toLowerCase();
+        textEl.textContent = label.includes("identify") ? "Prefer not to say" : "Tất cả";
         return;
       }
       if (n === 1) {
@@ -473,6 +544,17 @@ function collectFilters(source) {
       application_review: "",
     };
   }
+  if (source === "collabs") {
+    return {
+      start_page: $("startPageCb").value.trim(),
+      end_page: $("endPageCb").value.trim(),
+      min_commission: $("minCommissionCb").value.trim(),
+      min_cookie: "",
+      currency: "",
+      application_review: "",
+      categories: collectCheckedValues("#categoryCollabsGroup"),
+    };
+  }
   return {
     start_page: $("startPage").value.trim(),
     end_page: $("endPage").value.trim(),
@@ -493,6 +575,8 @@ function minTrafficFor(source) {
       ? $("minTrafficGp")?.value
       : source === "refersion"
         ? $("minTrafficRf")?.value
+        : source === "collabs"
+          ? $("minTrafficCb")?.value
         : $("minTraffic")?.value;
   return Number(v || "9000");
 }
@@ -500,6 +584,7 @@ function minTrafficFor(source) {
 async function runFilter(source) {
   clampOffersPerPageField("UPPROMOTE_PER_PAGE");
   clampOffersPerPageField("GOAFFPRO_LIMIT");
+  clampCollabsLimitField("COLLABS_LIMIT");
   const settings = {};
   settingKeys.forEach((k) => {
     settings[k] = settingValueForPayload(k);
@@ -507,7 +592,7 @@ async function runFilter(source) {
   const filters = collectFilters(source);
   const minTraffic = minTrafficFor(source);
 
-  const boxes = [logBox(), logBoxGp(), logBoxRf()].filter(Boolean);
+  const boxes = [logBox(), logBoxGp(), logBoxRf(), logBoxCb()].filter(Boolean);
   boxes.forEach((box) => {
     box.textContent = "";
   });
@@ -527,7 +612,15 @@ async function runFilter(source) {
     state.pollTimer = setInterval(pollStatus, POLL_MS);
   }
   await pollStatus();
-  switchTab(source === "goaffpro" ? "runGoaffproTab" : source === "refersion" ? "runRefersionTab" : "runUppromoteTab");
+  switchTab(
+    source === "goaffpro"
+      ? "runGoaffproTab"
+      : source === "refersion"
+        ? "runRefersionTab"
+        : source === "collabs"
+          ? "runCollabsTab"
+          : "runUppromoteTab"
+  );
 }
 
 async function togglePause() {
@@ -618,6 +711,330 @@ async function deleteResultFile(name) {
   await loadResults();
 }
 
+function collectAutoApplyProfile() {
+  const keep = (k, v) => localStorage.setItem(k, v || "");
+  const read = (k) => {
+    const fromLs = localStorage.getItem(k);
+    if (fromLs != null && String(fromLs).trim() !== "") return fromLs;
+    return AUTO_APPLY_DEFAULTS[k] || "";
+  };
+  const modal = $("autoApplyModal");
+  const fullNameEl = $("aa_full_name");
+  const emailEl = $("aa_email");
+  const phoneEl = $("aa_phone");
+  const websiteEl = $("aa_website");
+  const instagramEl = $("aa_instagram");
+  const tiktokEl = $("aa_tiktok");
+  const youtubeEl = $("aa_youtube");
+  const businessTypeEl = $("aa_business_type");
+  const dobEl = $("aa_dob");
+  const shipEl = $("aa_shipping_location");
+  const applyModeEl = $("aa_apply_mode");
+  const purchaseBeforeChoiceEl = $("aa_purchase_before_choice");
+  const rowStartEl = $("aa_row_start");
+  const rowEndEl = $("aa_row_end");
+  const brandsWorkedEl = $("aa_brands_worked");
+  const successPartnerEl = $("aa_successful_partnership");
+  const contentInspiresEl = $("aa_content_inspires");
+  const hopeGainEl = $("aa_hope_gain");
+  const howFoundEl = $("aa_how_found");
+  const cityCountryEl = $("aa_city_country");
+  const demographicEl = $("aa_demographic");
+  const growthStrategyEl = $("aa_growth_strategy");
+  const contentIdeasEl = $("aa_content_ideas");
+  const whyFitEl = $("aa_why_fit");
+  const purchaseLoveEl = $("aa_purchase_love");
+  const whyJoinEl = $("aa_why_join");
+  const genericShortEl = $("aa_generic_short");
+  const genericLongEl = $("aa_generic_long");
+  const messageEl = $("aa_message");
+  const btnCancel = $("aa_cancel_btn");
+  const btnSave = $("aa_save_btn");
+  const btnConfirm = $("aa_confirm_btn");
+  if (
+    !modal ||
+    !fullNameEl ||
+    !emailEl ||
+    !phoneEl ||
+    !websiteEl ||
+    !instagramEl ||
+    !tiktokEl ||
+    !youtubeEl ||
+    !businessTypeEl ||
+    !dobEl ||
+    !shipEl ||
+    !applyModeEl ||
+    !purchaseBeforeChoiceEl ||
+    !rowStartEl ||
+    !rowEndEl ||
+    !brandsWorkedEl ||
+    !successPartnerEl ||
+    !contentInspiresEl ||
+    !hopeGainEl ||
+    !howFoundEl ||
+    !cityCountryEl ||
+    !demographicEl ||
+    !growthStrategyEl ||
+    !contentIdeasEl ||
+    !whyFitEl ||
+    !purchaseLoveEl ||
+    !whyJoinEl ||
+    !genericShortEl ||
+    !genericLongEl ||
+    !messageEl ||
+    !btnCancel ||
+    !btnSave ||
+    !btnConfirm
+  ) {
+    alert("Thiếu popup Auto Apply trong giao diện.");
+    return Promise.resolve(null);
+  }
+
+  fullNameEl.value = read("aa_full_name");
+  emailEl.value = read("aa_email");
+  phoneEl.value = read("aa_phone");
+  websiteEl.value = read("aa_website");
+  instagramEl.value = read("aa_instagram");
+  tiktokEl.value = read("aa_tiktok");
+  youtubeEl.value = read("aa_youtube");
+  businessTypeEl.value = read("aa_business_type");
+  dobEl.value = read("aa_dob");
+  shipEl.value = read("aa_shipping_location") || "United States";
+  applyModeEl.value = read("aa_apply_mode") || "only_dat";
+  purchaseBeforeChoiceEl.value = read("aa_purchase_before_choice") || "Yes";
+  rowStartEl.value = read("aa_row_start") || "1";
+  rowEndEl.value = read("aa_row_end") || "";
+  const identifyRaw = read("aa_identify");
+  const identifyArr = String(identifyRaw || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  setCheckedValues("#aa_identify_group", identifyArr.length ? identifyArr : ["Prefer not to say"]);
+  brandsWorkedEl.value = read("aa_brands_worked");
+  successPartnerEl.value = read("aa_successful_partnership");
+  contentInspiresEl.value = read("aa_content_inspires");
+  hopeGainEl.value = read("aa_hope_gain");
+  howFoundEl.value = read("aa_how_found");
+  cityCountryEl.value = read("aa_city_country");
+  demographicEl.value = read("aa_demographic");
+  growthStrategyEl.value = read("aa_growth_strategy");
+  contentIdeasEl.value = read("aa_content_ideas");
+  whyFitEl.value = read("aa_why_fit");
+  purchaseLoveEl.value = read("aa_purchase_love");
+  whyJoinEl.value = read("aa_why_join");
+  genericShortEl.value = read("aa_generic_short");
+  genericLongEl.value = read("aa_generic_long");
+  messageEl.value = read("aa_message");
+  modal.classList.remove("hidden");
+  window.setTimeout(() => fullNameEl.focus(), 0);
+
+  return new Promise((resolve) => {
+    let done = false;
+    const cleanup = () => {
+      modal.classList.add("hidden");
+      btnCancel.removeEventListener("click", onCancel);
+      btnSave.removeEventListener("click", onSave);
+      btnConfirm.removeEventListener("click", onConfirm);
+      modal.removeEventListener("click", onBackdrop);
+      document.removeEventListener("keydown", onEsc);
+    };
+    const finish = (val) => {
+      if (done) return;
+      done = true;
+      cleanup();
+      resolve(val);
+    };
+    const onCancel = () => finish(null);
+    const onBackdrop = (e) => {
+      if (e.target === modal) finish(null);
+    };
+    const onEsc = (e) => {
+      if (e.key === "Escape") finish(null);
+    };
+
+    const persistFormToLocalStorage = () => {
+      const full_name = String(fullNameEl.value || "").trim();
+      const email = String(emailEl.value || "").trim();
+      const phone = String(phoneEl.value || "").trim();
+      const website = String(websiteEl.value || "").trim();
+      const instagram = String(instagramEl.value || "").trim();
+      const tiktok = String(tiktokEl.value || "").trim();
+      const youtube = String(youtubeEl.value || "").trim();
+      const business_type = String(businessTypeEl.value || "").trim();
+      const dob = String(dobEl.value || "").trim();
+      const shipping_location = String(shipEl.value || "United States").trim() || "United States";
+      const identify = collectCheckedValues("#aa_identify_group");
+      const apply_mode = String(applyModeEl.value || "only_dat").trim() || "only_dat";
+      const purchase_before_choice = String(purchaseBeforeChoiceEl.value || "Yes").trim() || "Yes";
+      const row_start = String(rowStartEl.value || "").trim();
+      const row_end = String(rowEndEl.value || "").trim();
+      const brands_worked = String(brandsWorkedEl.value || "").trim();
+      const successful_partnership = String(successPartnerEl.value || "").trim();
+      const content_inspires = String(contentInspiresEl.value || "").trim();
+      const hope_gain = String(hopeGainEl.value || "").trim();
+      const how_found = String(howFoundEl.value || "").trim();
+      const city_country = String(cityCountryEl.value || "").trim();
+      const demographic = String(demographicEl.value || "").trim();
+      const growth_strategy = String(growthStrategyEl.value || "").trim();
+      const content_ideas = String(contentIdeasEl.value || "").trim();
+      const why_fit = String(whyFitEl.value || "").trim();
+      const purchase_love = String(purchaseLoveEl.value || "").trim();
+      const why_join = String(whyJoinEl.value || "").trim();
+      const generic_short = String(genericShortEl.value || "").trim();
+      const generic_long = String(genericLongEl.value || "").trim();
+      const message = String(messageEl.value || "").trim();
+
+      keep("aa_full_name", full_name);
+      keep("aa_email", email);
+      keep("aa_phone", phone);
+      keep("aa_website", website);
+      keep("aa_instagram", instagram);
+      keep("aa_tiktok", tiktok);
+      keep("aa_youtube", youtube);
+      keep("aa_business_type", business_type);
+      keep("aa_dob", dob);
+      keep("aa_shipping_location", shipping_location);
+      keep("aa_identify", (identify && identify.length ? identify : ["Prefer not to say"]).join(", "));
+      keep("aa_apply_mode", apply_mode);
+      keep("aa_purchase_before_choice", purchase_before_choice);
+      keep("aa_row_start", row_start || "1");
+      keep("aa_row_end", row_end || "");
+      keep("aa_brands_worked", brands_worked);
+      keep("aa_successful_partnership", successful_partnership);
+      keep("aa_content_inspires", content_inspires);
+      keep("aa_hope_gain", hope_gain);
+      keep("aa_how_found", how_found);
+      keep("aa_city_country", city_country);
+      keep("aa_demographic", demographic);
+      keep("aa_growth_strategy", growth_strategy);
+      keep("aa_content_ideas", content_ideas);
+      keep("aa_why_fit", why_fit);
+      keep("aa_purchase_love", purchase_love);
+      keep("aa_why_join", why_join);
+      keep("aa_generic_short", generic_short);
+      keep("aa_generic_long", generic_long);
+      keep("aa_message", message);
+    };
+
+    const onSave = () => {
+      persistFormToLocalStorage();
+      alert("Đã lưu mẫu đăng ký.");
+    };
+    const onConfirm = () => {
+      const full_name = String(fullNameEl.value || "").trim();
+      const email = String(emailEl.value || "").trim();
+      const phone = String(phoneEl.value || "").trim();
+      const website = String(websiteEl.value || "").trim();
+      const instagram = String(instagramEl.value || "").trim();
+      const tiktok = String(tiktokEl.value || "").trim();
+      const youtube = String(youtubeEl.value || "").trim();
+      const business_type = String(businessTypeEl.value || "").trim();
+      const dob = String(dobEl.value || "").trim();
+      const shipping_location = String(shipEl.value || "United States").trim() || "United States";
+      const identify = collectCheckedValues("#aa_identify_group");
+      const apply_mode = String(applyModeEl.value || "only_dat").trim() || "only_dat";
+      const purchase_before_choice = String(purchaseBeforeChoiceEl.value || "Yes").trim() || "Yes";
+      const row_start = String(rowStartEl.value || "").trim();
+      const row_end = String(rowEndEl.value || "").trim();
+      const brands_worked = String(brandsWorkedEl.value || "").trim();
+      const successful_partnership = String(successPartnerEl.value || "").trim();
+      const content_inspires = String(contentInspiresEl.value || "").trim();
+      const hope_gain = String(hopeGainEl.value || "").trim();
+      const how_found = String(howFoundEl.value || "").trim();
+      const city_country = String(cityCountryEl.value || "").trim();
+      const demographic = String(demographicEl.value || "").trim();
+      const growth_strategy = String(growthStrategyEl.value || "").trim();
+      const content_ideas = String(contentIdeasEl.value || "").trim();
+      const why_fit = String(whyFitEl.value || "").trim();
+      const purchase_love = String(purchaseLoveEl.value || "").trim();
+      const why_join = String(whyJoinEl.value || "").trim();
+      const generic_short = String(genericShortEl.value || "").trim();
+      const generic_long = String(genericLongEl.value || "").trim();
+      const message = String(messageEl.value || "").trim();
+      if (!full_name && !email) {
+        alert("Nhập tối thiểu Họ tên hoặc Email.");
+        return;
+      }
+      persistFormToLocalStorage();
+      finish({
+        profile: {
+          full_name,
+          email,
+          phone,
+          website,
+          instagram,
+          tiktok,
+          youtube,
+          business_type,
+          dob,
+          identify: identify && identify.length ? identify : ["Prefer not to say"],
+          shipping_location,
+          brands_worked,
+          successful_partnership,
+          content_inspires,
+          hope_gain,
+          how_found,
+          city_country,
+          demographic,
+          growth_strategy,
+          content_ideas,
+          why_fit,
+          purchase_love,
+          why_join,
+          generic_short,
+          generic_long,
+          message,
+          purchase_before_choice,
+        },
+        apply_mode,
+        row_start,
+        row_end,
+      });
+    };
+
+    btnCancel.addEventListener("click", onCancel);
+    btnSave.addEventListener("click", onSave);
+    btnConfirm.addEventListener("click", onConfirm);
+    modal.addEventListener("click", onBackdrop);
+    document.addEventListener("keydown", onEsc);
+  });
+}
+
+async function autoApplyFromResultFile(name) {
+  const form = await collectAutoApplyProfile();
+  if (!form) return;
+  const res = await fetch("/api/auto-apply", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      name,
+      profile: form.profile,
+      apply_mode: form.apply_mode,
+      row_start: form.row_start,
+      row_end: form.row_end,
+      auto_submit: false,
+      use_cdp: true,
+      cdp_url: "http://127.0.0.1:9222",
+      login_first: true,
+    }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.ok) {
+    alert(data.error || "Auto Apply thất bại.");
+    if (Array.isArray(data.logs) && data.logs.length) {
+      console.log("[AUTO APPLY LOGS]\n" + data.logs.join("\n"));
+    }
+    return;
+  }
+  const r = data.result || {};
+  alert(
+    `Auto Apply xong.\nTổng link: ${r.total || 0}\nĐã điền form: ${r.filled || 0}\nĐã submit: ${r.submitted || 0}`
+  );
+  if (Array.isArray(data.logs) && data.logs.length) {
+    console.log("[AUTO APPLY LOGS]\n" + data.logs.join("\n"));
+  }
+}
+
 function renderLicenseStatus(lic) {
   const msg = $("licenseMessage");
   const mid = $("machineIdBox");
@@ -705,7 +1122,13 @@ async function loadResults() {
     btnDel.className = "btn sm danger";
     btnDel.textContent = "Xóa";
     btnDel.addEventListener("click", () => deleteResultFile(f.name));
+    const btnAutoApply = document.createElement("button");
+    btnAutoApply.type = "button";
+    btnAutoApply.className = "btn sm";
+    btnAutoApply.textContent = "Auto Apply";
+    btnAutoApply.addEventListener("click", () => autoApplyFromResultFile(f.name));
     actions.appendChild(btnDl);
+    actions.appendChild(btnAutoApply);
     actions.appendChild(btnDel);
     const nameEl = document.createElement("div");
     nameEl.textContent = f.name;
@@ -734,11 +1157,12 @@ function bindEvents() {
   $("runBtnUppromote").addEventListener("click", () => runFilter("uppromote"));
   $("runBtnGoaffpro").addEventListener("click", () => runFilter("goaffpro"));
   $("runBtnRefersion").addEventListener("click", () => runFilter("refersion"));
-  ["pauseBtn", "pauseBtnGp", "pauseBtnRf"].forEach((id) => {
+  $("runBtnCollabs").addEventListener("click", () => runFilter("collabs"));
+  ["pauseBtn", "pauseBtnGp", "pauseBtnRf", "pauseBtnCb"].forEach((id) => {
     const el = $(id);
     if (el) el.addEventListener("click", togglePause);
   });
-  ["stopBtn", "stopBtnGp", "stopBtnRf"].forEach((id) => {
+  ["stopBtn", "stopBtnGp", "stopBtnRf", "stopBtnCb"].forEach((id) => {
     const el = $(id);
     if (el) el.addEventListener("click", stopRun);
   });

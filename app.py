@@ -50,6 +50,10 @@ ENV_SAVE_KEY_ORDER = [
     "GOAFFPRO_LIMIT",
     "REFERSION_API_URL",
     "REFERSION_TOKEN",
+    "COLLABS_API_URL",
+    "COLLABS_LIMIT",
+    "COLLABS_COOKIE",
+    "COLLABS_CSRF_TOKEN",
     "AFF_LICENSE_API_BASE_URL",
     "AFF_LICENSE_API_TOKEN",
     "AFF_LICENSE_DAILY_LIMIT",
@@ -57,7 +61,15 @@ ENV_SAVE_KEY_ORDER = [
 ]
 
 SECRET_ENV_KEYS = frozenset(
-    {"APIFY_TOKEN", "UPPROMOTE_BEARER_TOKEN", "GOAFFPRO_BEARER_TOKEN", "REFERSION_TOKEN", "AFF_LICENSE_API_TOKEN"}
+    {
+        "APIFY_TOKEN",
+        "UPPROMOTE_BEARER_TOKEN",
+        "GOAFFPRO_BEARER_TOKEN",
+        "REFERSION_TOKEN",
+        "COLLABS_COOKIE",
+        "COLLABS_CSRF_TOKEN",
+        "AFF_LICENSE_API_TOKEN",
+    }
 )
 
 # Biến mà tab Cài đặt của webapp có ô nhập (templates/index.html). POST /api/settings chỉ được merge các key này — tránh ghi rỗng đè lên key chỉ chỉnh tay trong .env (AFF_LICENSE_*, HMAC, …).
@@ -72,6 +84,10 @@ WEB_SETTINGS_SAVE_KEYS = frozenset(
         "GOAFFPRO_LIMIT",
         "REFERSION_API_URL",
         "REFERSION_TOKEN",
+        "COLLABS_API_URL",
+        "COLLABS_LIMIT",
+        "COLLABS_COOKIE",
+        "COLLABS_CSRF_TOKEN",
     }
 )
 
@@ -124,6 +140,8 @@ def save_env(values: dict):
     for _pg in ("UPPROMOTE_PER_PAGE", "GOAFFPRO_LIMIT"):
         if _pg in merged:
             merged[_pg] = str(core.clamp_offers_per_page(merged[_pg]))
+    if "COLLABS_LIMIT" in merged:
+        merged["COLLABS_LIMIT"] = str(core.clamp_collabs_limit(merged["COLLABS_LIMIT"]))
     keys_out = [k for k in ENV_SAVE_KEY_ORDER if k in merged]
     for k in sorted(merged.keys()):
         if k not in keys_out:
@@ -170,6 +188,10 @@ def load_env_defaults():
         "GOAFFPRO_LIMIT": str(core.clamp_offers_per_page(os.getenv("GOAFFPRO_LIMIT"))),
         "REFERSION_API_URL": os.getenv("REFERSION_API_URL", ""),
         "REFERSION_TOKEN": os.getenv("REFERSION_TOKEN", ""),
+        "COLLABS_API_URL": os.getenv("COLLABS_API_URL", "https://api.collabs.shopify.com/creator/graphql"),
+        "COLLABS_LIMIT": str(core.clamp_collabs_limit(os.getenv("COLLABS_LIMIT"))),
+        "COLLABS_COOKIE": os.getenv("COLLABS_COOKIE", ""),
+        "COLLABS_CSRF_TOKEN": os.getenv("COLLABS_CSRF_TOKEN", ""),
         "AFF_LICENSE_API_BASE_URL": os.getenv("AFF_LICENSE_API_BASE_URL", os.getenv("AFF_LICENSE_SERVER_URL", "")),
         "AFF_LICENSE_API_TOKEN": os.getenv("AFF_LICENSE_API_TOKEN", ""),
         "AFF_LICENSE_DAILY_LIMIT": os.getenv("AFF_LICENSE_DAILY_LIMIT", "500"),
@@ -278,6 +300,7 @@ def offer_passes_filters(offer: dict, filters: dict, source: str = "uppromote") 
     if not payment_methods:
         payment_methods = _norm_filter_str_list(filters.get("payment_method"))
     is_goaff = (source or "").lower() == "goaffpro"
+    is_collabs = (source or "").lower() == "collabs"
 
     if min_commission is not None:
         c = extract_commission_percent(offer.get("offer"))
@@ -299,7 +322,11 @@ def offer_passes_filters(offer: dict, filters: dict, source: str = "uppromote") 
         if review != app_review:
             return False
     if not is_goaff and categories:
-        offer_category = str(offer.get("category") or "").strip().lower()
+        offer_category = (
+            str(offer.get("collabs_product_category_code") or "").strip().lower()
+            if is_collabs
+            else str(offer.get("category") or "").strip().lower()
+        )
         if offer_category not in set(categories):
             return False
     if not is_goaff and payment_methods:

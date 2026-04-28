@@ -33,10 +33,7 @@ DEFAULT_OFFERS_PER_PAGE = 50
 MAX_OFFERS_PER_PAGE = 50
 MIN_OFFERS_PER_PAGE = 10
 OFFERS_PER_PAGE_STEP = 10
-DEFAULT_COLLABS_LIMIT = 48
-MIN_COLLABS_LIMIT = 12
-MAX_COLLABS_LIMIT = 48
-COLLABS_LIMIT_STEP = 12
+DEFAULT_COLLABS_LIMIT = 12
 
 
 def clamp_offers_per_page(raw) -> int:
@@ -58,21 +55,8 @@ def clamp_offers_per_page(raw) -> int:
 
 
 def clamp_collabs_limit(raw) -> int:
-    """Số brand/request Collabs: bội số của 12, trong [12, 48]. Rỗng/sai → mặc định."""
-    if raw is None:
-        return DEFAULT_COLLABS_LIMIT
-    s = str(raw).strip()
-    if not s:
-        return DEFAULT_COLLABS_LIMIT
-    try:
-        n = int(float(s))
-    except (TypeError, ValueError):
-        return DEFAULT_COLLABS_LIMIT
-    n = max(MIN_COLLABS_LIMIT, min(MAX_COLLABS_LIMIT, n))
-    n = (n // COLLABS_LIMIT_STEP) * COLLABS_LIMIT_STEP
-    if n < MIN_COLLABS_LIMIT:
-        n = MIN_COLLABS_LIMIT
-    return n
+    """Collabs cố định 12 brand/request (giữ hàm để tương thích call-site cũ)."""
+    return DEFAULT_COLLABS_LIMIT
 
 
 def enforce_fixed_fetch_defaults() -> None:
@@ -504,6 +488,7 @@ COLLABS_BRAND_PROFILE_QUERY = (
 )
 
 COLLABS_CATEGORY_LABELS = {
+    "CLOTHING_AND_ACCESSORIES": "Clothing and accessories",
     "WOMENS_CLOTHING": "Women's clothing and accessories",
     "MENS_CLOTHING": "Men's clothing and accessories",
     "BEAUTY": "Beauty",
@@ -531,6 +516,25 @@ def collabs_category_label(raw_code: str) -> str:
     if not code:
         return ""
     return COLLABS_CATEGORY_LABELS.get(code, code)
+
+
+def format_collabs_holding_period(raw) -> str:
+    """Chuẩn hóa holding period: số -> thêm ' day'."""
+    if raw is None:
+        return ""
+    s = str(raw).strip()
+    if not s:
+        return ""
+    low = s.lower()
+    if "day" in low:
+        return s
+    try:
+        n = float(s.replace(",", ""))
+    except ValueError:
+        return s
+    if abs(n - round(n)) < 1e-9:
+        return f"{int(round(n))} day"
+    return f"{n:g} day"
 
 
 def with_page(url: str, page: int) -> str:
@@ -987,6 +991,8 @@ def _collabs_page_looks_like_signup(html: str, url: str = "") -> bool:
         "/pages/collab",
         "/pages/collabs",
         "/pages/collabs-signup",
+        "/pages/partnerships",
+        "/pages/ambassador",
         "/pages/affiliate",
         "/pages/affiliates",
         "/pages/collaborators",
@@ -1001,7 +1007,9 @@ def _collabs_page_looks_like_signup(html: str, url: str = "") -> bool:
         "/pages/partner-programs",
         "/pages/collaborations",
         "/pages/curious-community",
+        "/pages/shopify-collabs",
         "/ambassadors",
+        "/ambassador",
         "/community",
         "/affiliates",
         "/affiliate",
@@ -1010,6 +1018,7 @@ def _collabs_page_looks_like_signup(html: str, url: str = "") -> bool:
         "/collab",
         "/collabs",
         "/collaborators",
+        "/partnerships",
         "/partners",
         "/partner",
         "/partner-program",
@@ -1019,6 +1028,27 @@ def _collabs_page_looks_like_signup(html: str, url: str = "") -> bool:
         "/ambassador-program",
         "/ambassador-programs",
         "/curious-community",
+        "-com",
+        "ambassadors",
+        "ambassador",
+        "community",
+        "affiliates",
+        "affiliate",
+        "affiliate-program",
+        "affiliate-programs",
+        "collab",
+        "collabs",
+        "collaborators",
+        "partnerships",
+        "partners",
+        "partner",
+        "partner-program",
+        "partner-programs",
+        "collaborations",
+        "collaboration",
+        "ambassador-program",
+        "ambassador-programs",
+        "curious-community"
     )
     if any(p in u for p in signup_path_hints):
         return True
@@ -1034,6 +1064,22 @@ def _collabs_page_looks_like_signup(html: str, url: str = "") -> bool:
     return score >= 2
 
 
+def _collabs_page_has_signup_cta(html: str) -> bool:
+    """
+    Tiêu chí đúng cho trang đăng ký Collabs:
+    page phải có element: <div class="collabs-page__cta ..."> (hoặc single-quote).
+    """
+    h = html or ""
+    # Bắt buộc là div.collabs-page__cta để tránh false-positive từ script/css hoặc element khác.
+    return bool(
+        re.search(
+            r"""<div[^>]*\bclass\s*=\s*["'][^"']*\bcollabs-page__cta\b[^"']*["'][^>]*>""",
+            h,
+            flags=re.I,
+        )
+    )
+
+
 def discover_collabs_signup_url(site_url: str, timeout_sec: int = 20) -> str:
     """
     Tìm link đăng ký collabs từ domain chính.
@@ -1046,22 +1092,80 @@ def discover_collabs_signup_url(site_url: str, timeout_sec: int = 20) -> str:
     if not parsed.netloc:
         return ""
     base = f"{parsed.scheme or 'https'}://{parsed.netloc}"
+    default_signup = f"{base}/pages/collab"
+
+    # Tổng thời gian tìm kiếm cho 1 domain (giây). Quá thời gian -> trả default và nhảy domain khác.
+    # Yêu cầu mới: tối đa 30 giây (có thể override bằng env).
+    max_domain_search_sec = int(os.getenv("COLLABS_SIGNUP_MAX_DOMAIN_SECONDS", "30") or "30")
+    if max_domain_search_sec < 5:
+        max_domain_search_sec = 5
+    deadline = time.monotonic() + float(max_domain_search_sec)
+
+    def _remaining_sec() -> float:
+        return max(0.0, deadline - time.monotonic())
 
     def _try_get(candidate_url: str) -> tuple[str, str]:
+        if _remaining_sec() <= 0:
+            return "", ""
         try:
-            res = requests.get(candidate_url, allow_redirects=True, timeout=timeout_sec)
+            # Mỗi request dùng timeout theo phần thời gian còn lại (không vượt quá timeout_sec).
+            req_timeout = min(float(timeout_sec), max(0.5, _remaining_sec()))
+            res = requests.get(candidate_url, allow_redirects=True, timeout=req_timeout)
             final_url = str(res.url or candidate_url).strip()
             if not res.ok:
+                return "", ""
+            ctype = str(res.headers.get("content-type") or "").lower()
+            # Tránh tải nhầm file/binary; ưu tiên HTML.
+            if ctype and ("text/html" not in ctype) and ("application/xhtml" not in ctype):
                 return "", ""
             text = res.text or ""
             return final_url, text
         except Exception:
             return "", ""
 
+    def _bases_to_try() -> list[str]:
+        # Dù input là http/https, thử cả hai để giảm bỏ sót.
+        return [f"https://{parsed.netloc}", f"http://{parsed.netloc}"]
+
+    # 0) Quét nhanh homepage trước khi brute-force preferred paths
+    # để bắt các slug tùy biến như /pages/westoncommunity.
+    home_url, home_html = _try_get(base)
+    if home_url:
+        quick_keywords = ("community", "-com", "collab", "affiliate", "ambassador", "partner", "apply", "creator", "influencer", "ambassadors", "ambassador", "community", "affiliates", "affiliate", "affiliate-program", "affiliate-programs", "collab", "collabs", "collaborators", "partnerships", "partners", "partner", "partner-program", "partner-programs", "collaborations", "collaboration", "ambassador-program", "ambassador-programs", "curious-community")
+        quick_links = []
+        for href in re.findall(r"""href=["']([^"'#]+)["']""", home_html or "", flags=re.I):
+            h = str(href or "").strip()
+            if not h:
+                continue
+            low_h = h.lower()
+            if low_h.startswith(("mailto:", "tel:", "javascript:", "data:")):
+                continue
+            cand = urljoin(home_url, h)
+            cp = urlparse(cand)
+            if cp.netloc != parsed.netloc:
+                continue
+            normalized = f"{cp.scheme or 'https'}://{cp.netloc}{cp.path or '/'}"
+            low = normalized.lower()
+            if any(k in low for k in quick_keywords):
+                quick_links.append(normalized)
+        # Ưu tiên community trước, sau đó collab/affiliate.
+        quick_links = sorted(
+            set(quick_links),
+            key=lambda u: (0 if "community" in u.lower() else (1 if "collab" in u.lower() else 2)),
+        )
+        for cand in quick_links[:60]:
+            if _remaining_sec() <= 0:
+                break
+            final_url, html = _try_get(cand)
+            if final_url and _collabs_page_has_signup_cta(html):
+                return final_url
+
     preferred_paths = [
         "/pages/collab",
         "/pages/collabs",
         "/pages/collabs-signup",
+        "/pages/partnerships",
+        "/pages/ambassador",
         "/pages/affiliate",
         "/pages/affiliates",
         "/pages/collaborators",
@@ -1076,46 +1180,170 @@ def discover_collabs_signup_url(site_url: str, timeout_sec: int = 20) -> str:
         "/pages/partner-programs",
         "/pages/collaborations",
         "/pages/curious-community",
+        "/pages/shopify-collabs",
         "/ambassadors",
+        "/ambassador",
         "/community",
         "/affiliates",
         "/affiliate",
         "/affiliate-program",
         "/affiliate-programs",
-        "/ambassadors",
         "/collab",
         "/collabs",
         "/collaborators",
+        "/partnerships",
         "/partners",
         "/partner",
         "/partner-program",
-        "/partner-programs",
         "/partner-programs",
         "/collaborations",
         "/collaboration",
         "/ambassador-program",
         "/ambassador-programs",
         "/curious-community",
+        "-com",
     ]
-    for p in preferred_paths:
-        final_url, text = _try_get(f"{base}{p}")
-        if final_url and _collabs_page_looks_like_signup(text, final_url):
+    # 1) Thử các path phổ biến trên cả https/http base. Tìm thấy là trả ngay.
+    for b in _bases_to_try():
+        for p in preferred_paths:
+            if _remaining_sec() <= 0:
+                return default_signup
+            final_url, text = _try_get(f"{b}{p}")
+            if final_url and _collabs_page_has_signup_cta(text):
+                return final_url
+
+    # 2) Nếu homepage chưa có từ bước quét nhanh thì lấy lại.
+    if not home_url:
+        home_url, home_html = _try_get(base)
+    if not home_url:
+        return default_signup
+
+    # 2.05) Quick-hit từ homepage: thử ngay các link nội bộ có tín hiệu cộng đồng/collab
+    # để tránh rơi fallback /pages/collab khi site dùng slug tùy biến như /pages/westoncommunity.
+    def _extract_same_domain_links_quick(page_html: str, page_url: str) -> list[str]:
+        out = []
+        for href in re.findall(r"""href=["']([^"'#]+)["']""", page_html or "", flags=re.I):
+            h = str(href).strip()
+            if not h:
+                continue
+            low_h = h.lower()
+            if low_h.startswith(("mailto:", "tel:", "javascript:", "data:")):
+                continue
+            cand = urljoin(page_url, h)
+            cp = urlparse(cand)
+            if cp.netloc != parsed.netloc:
+                continue
+            path = cp.path or "/"
+            low_path = path.lower()
+            if any(
+                low_path.endswith(ext)
+                for ext in (".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg", ".js", ".css", ".pdf", ".xml")
+            ):
+                continue
+            out.append(f"{cp.scheme or 'https'}://{cp.netloc}{path}")
+        return out
+
+    quick_candidates = _extract_same_domain_links_quick(home_html, home_url)
+    # Ưu tiên community/collab trước để tăng độ chính xác cho Shopify Collabs page.
+    quick_candidates.sort(
+        key=lambda u: (
+            0
+            if "community" in u.lower()
+            else (1 if "collab" in u.lower() else (2 if "affiliate" in u.lower() else 3))
+        )
+    )
+    for cand in quick_candidates:
+        if _remaining_sec() <= 0:
+            break
+        low = cand.lower()
+        if not any(k in low for k in ("community", "collab", "affiliate", "ambassador", "partner", "apply")):
+            continue
+        final_url, html = _try_get(cand)
+        if final_url and _collabs_page_has_signup_cta(html):
             return final_url
 
-    home_url, home_html = _try_get(base)
-    if not home_url:
+    # 2.1) Thử lấy thêm candidate từ sitemap để bắt các slug tùy biến
+    # kiểu /pages/westoncommunity (không nằm trong preferred_paths).
+    def _try_sitemap_candidates() -> str:
+        if _remaining_sec() <= 0:
+            return ""
+        sitemap_urls = [f"{base}/sitemap.xml", f"{base}/sitemap_index.xml"]
+        keywords = ("collab", "affiliate", "ambassador", "community", "partner", "creator", "influencer", "apply", "-com", "collaborations", "collaboration", "collaborator", "collaborators", "partnerships", "partnership", "partners", "partner", "partner-program", "partner-programs", "ambassadors", "ambassador", "ambassador-program", "ambassador-programs", "curious-community")
+        seen_sitemaps = set()
+
+        def _iter_locs_from_sitemap(sm_url: str, depth: int = 0) -> list[str]:
+            if _remaining_sec() <= 0:
+                return []
+            s = str(sm_url or "").strip()
+            if not s or s in seen_sitemaps:
+                return []
+            seen_sitemaps.add(s)
+            try:
+                req_timeout = min(float(timeout_sec), max(0.5, _remaining_sec()))
+                res = requests.get(s, allow_redirects=True, timeout=req_timeout)
+                if not res.ok:
+                    return []
+                text = res.text or ""
+            except Exception:
+                return []
+            locs = [str(x or "").strip() for x in re.findall(r"<loc>(.*?)</loc>", text, flags=re.I | re.S)]
+            out: list[str] = []
+            for loc in locs:
+                if not loc:
+                    continue
+                cp = urlparse(loc)
+                if cp.netloc != parsed.netloc:
+                    continue
+                low = loc.lower()
+                # sitemap index -> đi sâu thêm 1 cấp vào sitemap con
+                if low.endswith(".xml"):
+                    if depth < 1:
+                        out.extend(_iter_locs_from_sitemap(loc, depth=depth + 1))
+                    continue
+                out.append(loc)
+            return out
+
+        for sm in sitemap_urls:
+            if _remaining_sec() <= 0:
+                return ""
+            for loc in _iter_locs_from_sitemap(sm):
+                if _remaining_sec() <= 0:
+                    return ""
+                cand = str(loc or "").strip()
+                if not cand:
+                    continue
+                cp = urlparse(cand)
+                if cp.netloc != parsed.netloc:
+                    continue
+                low = cand.lower()
+                if not any(k in low for k in keywords):
+                    continue
+                final_url, html = _try_get(cand)
+                if final_url and _collabs_page_has_signup_cta(html):
+                    return final_url
         return ""
 
+    sm_url = _try_sitemap_candidates()
+    if sm_url:
+        return sm_url
+
     # Quét toàn site (có giới hạn) để tìm page apply.
-    max_scan_pages = int(os.getenv("COLLABS_SIGNUP_SCAN_MAX_PAGES", "25") or "25")
-    if max_scan_pages < 1:
-        max_scan_pages = 1
+    # Mặc định nâng lên để giảm bỏ sót; có thể chỉnh bằng env.
+    # Đặt <=0 để "không giới hạn" nhưng vẫn bị chặn bởi hard cap an toàn.
+    max_scan_pages = int(os.getenv("COLLABS_SIGNUP_SCAN_MAX_PAGES", "500") or "500")
+    hard_cap = int(os.getenv("COLLABS_SIGNUP_SCAN_HARD_CAP", "5000") or "5000")
+    if hard_cap < 50:
+        hard_cap = 50
 
     def _extract_same_domain_links(page_html: str, page_url: str) -> list[str]:
         out = []
         for href in re.findall(r"""href=["']([^"'#]+)["']""", page_html or "", flags=re.I):
             h = str(href).strip()
             if not h:
+                continue
+            # Bỏ các scheme không phải http(s)
+            low_h = h.lower()
+            if low_h.startswith(("mailto:", "tel:", "javascript:", "data:")):
                 continue
             cand = urljoin(page_url, h)
             cp = urlparse(cand)
@@ -1126,13 +1354,23 @@ def discover_collabs_signup_url(site_url: str, timeout_sec: int = 20) -> str:
             low_path = path.lower()
             if any(low_path.endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg", ".js", ".css", ".pdf", ".xml")):
                 continue
+            # Chuẩn hóa bỏ query/fragment để tránh trùng lặp vô hạn.
             out.append(f"{cp.scheme or 'https'}://{cp.netloc}{path}")
         return out
 
     queue = [home_url]
     seen = set()
     idx = 0
-    while idx < len(queue) and len(seen) < max_scan_pages:
+    def _can_scan_more() -> bool:
+        if len(seen) >= hard_cap:
+            return False
+        if max_scan_pages <= 0:
+            return True
+        return len(seen) < max_scan_pages
+
+    while idx < len(queue) and _can_scan_more():
+        if _remaining_sec() <= 0:
+            return default_signup
         cur = queue[idx]
         idx += 1
         if cur in seen:
@@ -1141,20 +1379,22 @@ def discover_collabs_signup_url(site_url: str, timeout_sec: int = 20) -> str:
         final_url, text = _try_get(cur)
         if not final_url:
             continue
-        if _collabs_page_looks_like_signup(text, final_url):
+        # Chỉ coi là trang đăng ký nếu có CTA thật.
+        if _collabs_page_has_signup_cta(text):
             return final_url
 
         for nxt in _extract_same_domain_links(text, final_url):
             if nxt in seen:
                 continue
             low = nxt.lower()
-            # Ưu tiên đường dẫn có tín hiệu collab/apply/affiliate.
-            if any(k in low for k in ("collab", "affiliate", "ambassador", "apply")):
+            # Ưu tiên đường dẫn có tín hiệu collab/apply/affiliate/community/-com/partnership.
+            if any(k in low for k in ("collab", "affiliate", "ambassador", "apply", "community", "-com", "partnership")):
                 queue.insert(idx, nxt)
             else:
                 queue.append(nxt)
 
-    return ""
+    # Không tìm thấy CTA trong ngân sách thời gian / số trang -> fallback default.
+    return default_signup
 
 
 # Trạng thái traffic so với ngưỡng (CSV + log)
@@ -1306,7 +1546,6 @@ COLLABS_CSV_HEADER = [
     "Trạng thái hợp tác",
     "Tình trạng hợp tác",
     "Đã lưu",
-    "Đã mua trước đó",
     "Quốc gia mục tiêu",
     "Traffic (hiển thị)",
     "Traffic ước tính/tháng",
@@ -1435,12 +1674,11 @@ def build_collabs_csv_row(offer: dict, item: dict, status: str) -> list:
         website,
         apply_url,
         offer.get("offer", ""),
-        offer.get("collabs_holding_period", ""),
+        format_collabs_holding_period(offer.get("collabs_holding_period", "")),
         offer.get("category", ""),
         offer.get("collabs_partnership_status", ""),
         offer.get("collabs_partnership_state", ""),
         fmt_yes_no_bool_like(offer.get("collabs_saved")),
-        fmt_yes_no_bool_like(offer.get("collabs_previously_purchased")),
         offer.get("collabs_target_countries", ""),
         eng.get("VisitsFormatted", ""),
         estimated_monthly,
@@ -1958,9 +2196,35 @@ def apify_call_actor(domains: list) -> str:
     if not token:
         raise RuntimeError("Thiếu APIFY_TOKEN trong .env")
     wait_secs = int(os.getenv("APIFY_WAIT_FOR_FINISH_SECS", "240") or "240")
+    http_retries = int(os.getenv("APIFY_HTTP_RETRIES", "3") or "3")
+    if http_retries < 1:
+        http_retries = 1
+    connect_timeout_sec = float(os.getenv("APIFY_CONNECT_TIMEOUT_SECS", "20") or "20")
+    if connect_timeout_sec < 3:
+        connect_timeout_sec = 3.0
+
+    def _request_with_retry(method: str, req_url: str, *, json_payload=None, read_timeout_sec: float = 60.0):
+        last_exc: Exception | None = None
+        for attempt in range(1, http_retries + 1):
+            try:
+                return requests.request(
+                    method=method,
+                    url=req_url,
+                    json=json_payload,
+                    timeout=(connect_timeout_sec, max(5.0, float(read_timeout_sec))),
+                )
+            except requests.RequestException as exc:
+                last_exc = exc
+                if attempt >= http_retries:
+                    break
+                sleep_sec = min(6.0, 1.2 * attempt)
+                print(f"Apify request retry {attempt}/{http_retries} sau lỗi: {exc}")
+                time.sleep(sleep_sec)
+        raise RuntimeError(f"Apify request thất bại sau {http_retries} lần thử: {last_exc}")
+
     url = f"https://api.apify.com/v2/acts/{ACTOR_ID}/runs?token={token}&waitForFinish={wait_secs}"
     run_input = {"domains": domains, "proxyConfiguration": {"useApifyProxy": False}}
-    res = requests.post(url, json=run_input, timeout=wait_secs + 30)
+    res = _request_with_retry("POST", url, json_payload=run_input, read_timeout_sec=wait_secs + 30)
     if not res.ok:
         raise RuntimeError(f"Apify call actor lỗi HTTP {res.status_code}: {res.text[:300]}")
     body = res.json()
@@ -1978,7 +2242,7 @@ def apify_call_actor(domains: list) -> str:
         if poll_idx > max_polls:
             raise RuntimeError(f"Apify run chưa hoàn tất sau {max_polls} lần poll (status={status})")
         poll_url = f"https://api.apify.com/v2/actor-runs/{run_id}?token={token}&waitForFinish={wait_poll_secs}"
-        poll_res = requests.get(poll_url, timeout=wait_poll_secs + 30)
+        poll_res = _request_with_retry("GET", poll_url, read_timeout_sec=wait_poll_secs + 30)
         if not poll_res.ok:
             raise RuntimeError(f"Apify poll lỗi HTTP {poll_res.status_code}: {poll_res.text[:300]}")
         data = (poll_res.json() or {}).get("data") or data
@@ -2022,12 +2286,31 @@ def check_apify_connection() -> str:
 
 def apify_list_items(dataset_id: str) -> list:
     token = (os.getenv("APIFY_TOKEN") or "").strip()
+    http_retries = int(os.getenv("APIFY_HTTP_RETRIES", "3") or "3")
+    if http_retries < 1:
+        http_retries = 1
+    connect_timeout_sec = float(os.getenv("APIFY_CONNECT_TIMEOUT_SECS", "20") or "20")
+    if connect_timeout_sec < 3:
+        connect_timeout_sec = 3.0
+
+    def _get_with_retry(req_url: str, read_timeout_sec: float):
+        last_exc: Exception | None = None
+        for attempt in range(1, http_retries + 1):
+            try:
+                return requests.get(req_url, timeout=(connect_timeout_sec, max(5.0, float(read_timeout_sec))))
+            except requests.RequestException as exc:
+                last_exc = exc
+                if attempt >= http_retries:
+                    break
+                time.sleep(min(6.0, 1.2 * attempt))
+        raise RuntimeError(f"Apify list items request thất bại sau {http_retries} lần thử: {last_exc}")
+
     items = []
     offset = 0
     limit = 1000
     while True:
         url = f"https://api.apify.com/v2/datasets/{dataset_id}/items?token={token}&offset={offset}&limit={limit}&clean=true"
-        res = requests.get(url, timeout=120)
+        res = _get_with_retry(url, read_timeout_sec=120)
         if not res.ok:
             raise RuntimeError(f"Apify list items lỗi HTTP {res.status_code}: {res.text[:300]}")
         chunk = res.json()

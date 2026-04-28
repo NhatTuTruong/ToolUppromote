@@ -3,7 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable
 import re
+import time
 from datetime import datetime
+from urllib.parse import urlparse
 
 from openpyxl import load_workbook
 
@@ -84,7 +86,9 @@ def run_auto_apply(
     cdp_url: str | None = None,
     login_first: bool = True,
     login_timeout_sec: int = 300,
+    should_stop: Callable[[], bool] | None = None,
     log: Callable[[str], None] | None = None,
+    brand_timeout_sec: int = 60,
 ) -> dict:
     try:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -97,6 +101,15 @@ def run_auto_apply(
     def _log(msg: str) -> None:
         if log:
             log(msg)
+
+    def _check_stop(where: str = "") -> None:
+        if should_stop and should_stop():
+            suffix = f" ({where})" if where else ""
+            _log(f"Đã nhận lệnh hủy{suffix}.")
+            raise RuntimeError("Đã hủy Auto Apply.")
+
+    class _SkipBrand(Exception):
+        pass
 
     INPUT_FILL_DELAY_MS = 2000
 
@@ -122,15 +135,103 @@ def run_auto_apply(
         User rule: nếu link đăng ký không có CTA dẫn tới Collabs apply form => bỏ qua brand ngay.
         Chấp nhận các CTA phổ biến: Apply/Apply now/Collab with us/Sign me up/Sign up/Affiliate...
         """
+        # Ưu tiên cao nhất: CTA nằm trong vùng `div.collabs-page__cta`.
+        for ctx in _contexts(page):
+            try:
+                clicked_in_cta = bool(
+                    ctx.evaluate(
+                        """() => {
+                          const norm = (s) => (s || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+                          const isVisible = (el) => {
+                            if (!el) return false;
+                            const r = el.getBoundingClientRect();
+                            const st = getComputedStyle(el);
+                            return r.width > 0 && r.height > 0 && st.visibility !== 'hidden' && st.display !== 'none';
+                          };
+                          const ctaRoots = Array.from(document.querySelectorAll('div.collabs-page__cta'));
+                          if (!ctaRoots.length) return false;
+                          const textHints = [
+                            "click here to set up shopify collabs",
+                            "apply",
+                            "join",
+                            "sign up",
+                            "set up shopify collabs",
+                            "shopify collabs",
+                          ];
+                          let best = null;
+                          let bestScore = -1;
+                          for (const root of ctaRoots) {
+                            const clickable = Array.from(
+                              root.querySelectorAll('a,button,[role="button"],input[type="button"],input[type="submit"]')
+                            ).filter((el) => isVisible(el) && !el.disabled);
+                            for (const el of clickable) {
+                              const txt = norm(
+                                [
+                                  el.innerText || el.textContent || "",
+                                  el.getAttribute("aria-label") || "",
+                                  el.getAttribute("title") || "",
+                                  el.getAttribute("value") || "",
+                                ].join(" ")
+                              );
+                              let score = 1;
+                              for (const h of textHints) if (txt.includes(h)) score += 10;
+                              if (score > bestScore) {
+                                best = el;
+                                bestScore = score;
+                              }
+                            }
+                          }
+                          if (!best) return false;
+                          try { best.click(); return true; } catch (_) {}
+                          return false;
+                        }"""
+                    )
+                )
+                if clicked_in_cta:
+                    page.wait_for_timeout(900)
+                    return True
+            except Exception:
+                pass
+
         selectors = [
+            'button:has-text("Click Here to Set Up Shopify Collabs")',
+            'a:has-text("Click Here to Set Up Shopify Collabs")',
             'button:has-text("Apply now")',
             'a:has-text("Apply now")',
             'button:has-text("Apply Now")',
             'a:has-text("Apply Now")',
+            'button:has-text("Apply today")',
+            'a:has-text("Apply today")',
             'button:has-text("Apply")',
             'a:has-text("Apply")',
+            'button:has-text("Apply here")',
+            'a:has-text("Apply here")',
+            'button:has-text("Apply Here")',
+            'a:has-text("Apply Here")',
+            'button:has-text("Apply to join")',
+            'a:has-text("Apply to join")',
+            'button:has-text("Apply to Join")',
+            'a:has-text("Apply to Join")',
             'button:has-text("Collab with us")',
             'a:has-text("Collab with us")',
+            'button:has-text("Collaborate with us")',
+            'a:has-text("Collaborate with us")',
+            'button:has-text("Collaborate")',
+            'a:has-text("Collaborate")',
+            'button:has-text("Work with us")',
+            'a:has-text("Work with us")',
+            'button:has-text("Work With Us")',
+            'a:has-text("Work With Us")',
+            'button:has-text("Join the community")',
+            'a:has-text("Join the community")',
+            'button:has-text("Join Community")',
+            'a:has-text("Join Community")',
+            'button:has-text("Join")',
+            'a:has-text("Join")',
+            'button:has-text("Join now")',
+            'a:has-text("Join now")',
+            'button:has-text("Join our community")',
+            'a:has-text("Join our community")',
             'button:has-text("Sign Me Up")',
             'a:has-text("Sign Me Up")',
             'button:has-text("Sign me up")',
@@ -141,6 +242,41 @@ def run_auto_apply(
             'a:has-text("Sign Up")',
             'button:has-text("Affiliate")',
             'a:has-text("Affiliate")',
+            'button:has-text("Affiliate program")',
+            'a:has-text("Affiliate program")',
+            'button:has-text("Affiliate Program")',
+            'a:has-text("Affiliate Program")',
+            'button:has-text("Become an affiliate")',
+            'a:has-text("Become an affiliate")',
+            'button:has-text("Ambassador")',
+            'a:has-text("Ambassador")',
+            'button:has-text("Ambassador program")',
+            'a:has-text("Ambassador program")',
+            'button:has-text("Creator")',
+            'a:has-text("Creator")',
+            'button:has-text("Creator program")',
+            'a:has-text("Creator program")',
+            'button:has-text("Become a creator")',
+            'a:has-text("Become a creator")',
+            'button:has-text("Become an ambassador")',
+            'a:has-text("Become an ambassador")',
+            'button:has-text("Partner With Us")',
+            'a:has-text("Partner With Us")',
+            'button:has-text("Partner with us")',
+            'a:has-text("Partner with us")',
+            'button:has-text("Become a partner")',
+            'a:has-text("Become a partner")',
+            'button:has-text("Get Started")',
+            'a:has-text("Get Started")',
+            'button:has-text("Get started")',
+            'a:has-text("Get started")',
+            # Một số site dùng tiếng Việt
+            'button:has-text("Đăng ký")',
+            'a:has-text("Đăng ký")',
+            'button:has-text("Ứng tuyển")',
+            'a:has-text("Ứng tuyển")',
+            'button:has-text("Hợp tác")',
+            'a:has-text("Hợp tác")',
         ]
         for ctx in _contexts(page):
             for sel in selectors:
@@ -165,28 +301,135 @@ def run_auto_apply(
                             return r.width > 0 && r.height > 0 && st.visibility !== 'hidden' && st.display !== 'none';
                           };
                           const keywords = [
+                            "click here to set up shopify collabs",
+                            "set up shopify collabs",
+                            "shopify collabs",
+                            // Apply
                             "apply now",
+                            "apply today",
                             "apply",
+                            "application",
+                            "apply here",
+                            "apply to join",
+                            "start application",
+                            "submit application",
+                            // Collab/partner/community
                             "collab with us",
-                            "sign me up",
-                            "sign up",
+                            "collaborate with us",
+                            "collab",
+                            "collabs",
+                            "collaborate",
+                            "collaboration",
+                            "partner with us",
+                            "work with us",
+                            "join our community",
+                            "join the community",
+                            "join community",
+                            "join now",
+                            "join",
+                            // Affiliate/Ambassador/Creator
+                            "affiliate program",
                             "affiliate",
+                            "ambassador program",
+                            "ambassador",
+                            "creator program",
+                            "creator",
+                            "become a creator",
+                            "become an affiliate",
+                            "become an ambassador",
+                            "influencer",
+                            "become an influencer",
+                            // VN
+                            "đăng ký",
+                            "ứng tuyển",
+                            "hợp tác",
                           ];
                           const bad = [
                             "sign in",
                             "log in",
                             "login",
+                            "subscribe",
+                            "newsletter",
+                            "account",
                           ];
-                          const candidates = Array.from(document.querySelectorAll('a,button,[role="button"]'))
+                          const candidates = Array.from(document.querySelectorAll('a,button,[role="button"],input[type="button"],input[type="submit"]'))
                             .filter((el) => isVisible(el) && !el.disabled);
-                          for (const el of candidates) {
-                            const t = norm(el.innerText || el.textContent || "");
-                            if (!t) continue;
-                            if (bad.some((b) => t.includes(b))) continue;
-                            if (keywords.some((k) => t.includes(k))) {
-                              el.click();
-                              return true;
+
+                          const attrText = (el) => {
+                            const parts = [];
+                            try { parts.push(el.innerText || el.textContent || ""); } catch (_) {}
+                            try { parts.push(el.getAttribute("aria-label") || ""); } catch (_) {}
+                            try { parts.push(el.getAttribute("title") || ""); } catch (_) {}
+                            try { parts.push(el.getAttribute("value") || ""); } catch (_) {}
+                            return norm(parts.filter(Boolean).join(" "));
+                          };
+
+                          const hrefText = (el) => {
+                            try {
+                              const h = (el.getAttribute && el.getAttribute("href")) ? String(el.getAttribute("href") || "") : "";
+                              return norm(h);
+                            } catch (_) {
+                              return "";
                             }
+                          };
+
+                          const hasBad = (s) => bad.some((b) => s.includes(b));
+                          const hrefSignals = [
+                            "pages/collab",
+                            "pages/collabs",
+                            "pages/collabor",
+                            "pages/collaborators",
+                            "pages/creator",
+                            "pages/creators",
+                            "pages/influencer",
+                            "pages/influencers",
+                            "pages/ambassador",
+                            "pages/ambassadors",
+                            "pages/affiliate-program",
+                            "pages/affiliates",
+                            "pages/partner",
+                            "pages/partners",
+                            "collabs",
+                            "collab",
+                            "affiliate",
+                            "ambassador",
+                            "creator",
+                            "influencer",
+                            "partner",
+                            "partnership",
+                            "community",
+                          ];
+
+                          const scoreEl = (el) => {
+                            const t = attrText(el);
+                            const h = hrefText(el);
+                            if (hasBad(t)) return -1;
+                            let s = 0;
+                            for (const k of keywords) if (t.includes(k)) s += 10;
+                            for (const sig of hrefSignals) if (h.includes(sig)) s += 6;
+                            // Bonus: nếu là <a> có href rõ ràng
+                            try {
+                              if (String(el.tagName || "").toLowerCase() === "a" && h) s += 2;
+                            } catch (_) {}
+                            // Bonus: element trong vùng CTA thường là button
+                            try {
+                              const tag = String(el.tagName || "").toLowerCase();
+                              if (tag === "button") s += 1;
+                            } catch (_) {}
+                            return s;
+                          };
+
+                          let best = null;
+                          let bestScore = 0;
+                          for (const el of candidates) {
+                            const sc = scoreEl(el);
+                            if (sc > bestScore) {
+                              bestScore = sc;
+                              best = el;
+                            }
+                          }
+                          if (best && bestScore >= 10) {
+                            try { best.click(); return true; } catch (_) {}
                           }
                           return false;
                         }"""
@@ -277,6 +520,43 @@ def run_auto_apply(
                 return ""
             return s
 
+        # Một số trường hợp cần điền câu trả lời "chỉ định" theo label.
+        raw_label = str(label or "").strip()
+        low_label = raw_label.lower()
+        if low_label:
+            # Phone: luôn ưu tiên mẫu số điện thoại nếu label có chữ "phone"
+            if "phone" in low_label:
+                ph = str(profile.get("phone") or "").strip()
+                if ph:
+                    return ph
+            # 1) Social / affiliate link: ưu tiên Instagram rồi TikTok
+            if ("social" in low_label) or ("share your affiliate link" in low_label):
+                insta = str(profile.get("instagram") or "").strip()
+                tt = str(profile.get("tiktok") or "").strip()
+                if insta:
+                    return insta
+                if tt:
+                    return tt
+            # 2) Website
+            if "website" in low_label:
+                site = str(profile.get("website") or "").strip()
+                if site:
+                    return site
+            # 2.5) Product / products -> mẫu trải nghiệm sản phẩm
+            if ("product" in low_label) or ("products" in low_label):
+                purchase_love = str(profile.get("purchase_love") or "").strip()
+                if purchase_love:
+                    return purchase_love
+            # 3) Why -> dùng mẫu "lý do muốn tham gia"
+            if "why" in low_label:
+                why_join = str(profile.get("why_join") or "").strip()
+                if why_join:
+                    return why_join
+            # 4) Followers / how many / how much -> mẫu chỉ định mới
+            if ("followers" in low_label) or ("how many" in low_label) or ("how much" in low_label):
+                fe = str(profile.get("followers_engagement") or "").strip()
+                return fe or "Bạn có bao nhiêu người theo dõi và bạn nhận được bao nhiêu tương tác trên các bài đăng riêng lẻ?"
+
         mapping: list[tuple[list[str], str]] = [
             (["date of birth", "dob", "birthdate"], profile.get("dob", "")),
             (["shipping location", "shipping country", "country"], profile.get("shipping_location", "")),
@@ -362,8 +642,8 @@ def run_auto_apply(
             return "N/A"
         if generic_short:
             return generic_short
-        # Keep this non-empty to avoid leaving free-text blanks.
-        return profile.get("message", "").strip() or "I would love to collaborate and create high-converting content for your brand."
+        # Không ép câu trả lời mặc định cứng; nếu thiếu mẫu thì để trống.
+        return str(profile.get("message") or "").strip()
 
     def _fill_date_of_birth(page) -> bool:
         dob_raw = str(profile.get("dob") or "").strip()
@@ -389,8 +669,7 @@ def run_auto_apply(
 
         iso = _to_iso_date(dob_raw)
 
-        # Ưu tiên đúng field Polaris theo HTML:
-        # input#PolarisTextField2[aria-labelledby="PolarisTextField2Label"][type="date"]
+        # Ưu tiên field date kiểu Polaris theo HTML thực tế (ID có thể đổi: PolarisTextField1/2/...).
         if iso:
             for ctx in _contexts(page):
                 try:
@@ -409,12 +688,44 @@ def run_auto_apply(
                                 try { el.dispatchEvent(new Event('change', { bubbles: true })); } catch (_) {}
                                 try { el.dispatchEvent(new Event('blur', { bubbles: true })); } catch (_) {}
                               };
+                              const lockDobValue = (inp, lockedIso) => {
+                                if (!inp || !lockedIso) return;
+                                try {
+                                  inp.dataset.lockDobIso = String(lockedIso);
+                                } catch (_) {}
+                                const enforce = () => {
+                                  try {
+                                    if ((inp.value || '') !== lockedIso) {
+                                      inp.value = lockedIso;
+                                      fire(inp);
+                                    }
+                                  } catch (_) {}
+                                };
+                                try {
+                                  inp.addEventListener('input', enforce, true);
+                                  inp.addEventListener('change', enforce, true);
+                                  inp.addEventListener('blur', enforce, true);
+                                  inp.addEventListener('focus', enforce, true);
+                                } catch (_) {}
+                                try {
+                                  const prev = Number(inp.dataset.lockDobTimerId || 0);
+                                  if (prev) clearInterval(prev);
+                                } catch (_) {}
+                                try {
+                                  const timerId = setInterval(enforce, 180);
+                                  inp.dataset.lockDobTimerId = String(timerId);
+                                  setTimeout(() => {
+                                    try { clearInterval(timerId); } catch (_) {}
+                                  }, 7000);
+                                } catch (_) {}
+                                enforce();
+                              };
                               const candidates = Array.from(document.querySelectorAll('input[type="date"]'))
                                 .filter((i) => isVisible(i) && !i.disabled);
                               let inp = candidates.find((i) => {
                                 const id = (i.id || '').toLowerCase();
                                 const aria = norm(i.getAttribute('aria-labelledby') || '');
-                                return id === 'polaristextfield2' || aria.includes('polaristextfield2label');
+                                return id.startsWith('polaristextfield') || aria.includes('polaristextfield');
                               }) || null;
                               if (!inp) {
                                 inp = candidates.find((i) => {
@@ -423,11 +734,22 @@ def run_auto_apply(
                                     const first = aria.split(/\\s+/).filter(Boolean)[0];
                                     const lb = first ? document.getElementById(first) : null;
                                     const txt = norm((lb && lb.innerText) || '');
-                                    return txt.includes("what’s your date of birth") || txt.includes("what's your date of birth") || txt.includes("date of birth");
+                                    return (
+                                      txt.includes("what’s your date of birth") ||
+                                      txt.includes("what's your date of birth") ||
+                                      txt.includes("date of birth") ||
+                                      txt.includes("birthdate") ||
+                                      txt.includes("birth date") ||
+                                      txt.includes("dob") ||
+                                      txt.includes("ngày sinh") ||
+                                      txt.includes("ngay sinh")
+                                    );
                                   }
                                   return false;
                                 }) || null;
                               }
+                              // Nếu trang chỉ có 1 input[type=date] thì chọn trực tiếp để giảm miss.
+                              if (!inp && candidates.length === 1) inp = candidates[0];
                               if (!inp) return false;
                               try {
                                 inp.setAttribute('autocomplete', 'off');
@@ -436,6 +758,7 @@ def run_auto_apply(
                                 try { inp.valueAsDate = new Date(iso + 'T00:00:00'); } catch (_) {}
                                 inp.value = iso;
                                 fire(inp);
+                                lockDobValue(inp, iso);
                                 return (inp.value || '') === iso;
                               } catch (_) {
                                 return false;
@@ -486,16 +809,52 @@ def run_auto_apply(
                             try { el.dispatchEvent(new Event('input', { bubbles: true })); } catch (_) {}
                             try { el.dispatchEvent(new Event('change', { bubbles: true })); } catch (_) {}
                           };
+                          const lockDobValue = (inp, lockedIso) => {
+                            if (!inp || !lockedIso) return;
+                            try {
+                              inp.dataset.lockDobIso = String(lockedIso);
+                            } catch (_) {}
+                            const enforce = () => {
+                              try {
+                                if ((inp.value || '') !== lockedIso) {
+                                  inp.value = lockedIso;
+                                  fire(inp);
+                                }
+                              } catch (_) {}
+                            };
+                            try {
+                              inp.addEventListener('input', enforce, true);
+                              inp.addEventListener('change', enforce, true);
+                              inp.addEventListener('blur', enforce, true);
+                              inp.addEventListener('focus', enforce, true);
+                            } catch (_) {}
+                            try {
+                              const prev = Number(inp.dataset.lockDobTimerId || 0);
+                              if (prev) clearInterval(prev);
+                            } catch (_) {}
+                            try {
+                              const timerId = setInterval(enforce, 180);
+                              inp.dataset.lockDobTimerId = String(timerId);
+                              setTimeout(() => {
+                                try { clearInterval(timerId); } catch (_) {}
+                              }, 7000);
+                            } catch (_) {}
+                            enforce();
+                          };
                           const setDateValue = (inp, isoValue, rawValue) => {
                             const typ = norm(inp.getAttribute('type') || '');
                             const val = (typ === 'date' && isoValue) ? isoValue : rawValue;
                             try {
                               inp.setAttribute('autocomplete', 'off');
+                                  inp.setAttribute('autocorrect', 'off');
+                                  inp.setAttribute('data-form-type', 'other');
+                                  inp.setAttribute('data-lpignore', 'true');
                               inp.value = '';
                               fire(inp);
                               if (typ === 'date' && isoValue) {
                                 try { inp.valueAsDate = new Date(isoValue + 'T00:00:00'); } catch (_) {}
                                 inp.value = isoValue;
+                                lockDobValue(inp, isoValue);
                               } else {
                                 inp.value = String(val || '');
                               }
@@ -512,13 +871,34 @@ def run_auto_apply(
                             .filter((i) => isVisible(i) && !i.disabled);
                           for (const inp of dateInputs) {
                             const lt = labelTextFor(inp);
-                            if (lt.includes("what’s your date of birth") || lt.includes("what's your date of birth") || lt.includes("date of birth")) {
+                            if (
+                              lt.includes("what’s your date of birth") ||
+                              lt.includes("what's your date of birth") ||
+                              lt.includes("date of birth") ||
+                              lt.includes("birthdate") ||
+                              lt.includes("birth date") ||
+                              lt.includes("dob") ||
+                              lt.includes("ngày sinh") ||
+                              lt.includes("ngay sinh")
+                            ) {
                               return setDateValue(inp, iso, raw);
                             }
                           }
+                          if (dateInputs.length === 1) {
+                            return setDateValue(dateInputs[0], iso, raw);
+                          }
                           for (const b of blocks) {
                             const text = norm(b.innerText || '');
-                            if (!text.includes("what’s your date of birth") && !text.includes("what's your date of birth") && !text.includes("date of birth")) continue;
+                            if (
+                              !text.includes("what’s your date of birth") &&
+                              !text.includes("what's your date of birth") &&
+                              !text.includes("date of birth") &&
+                              !text.includes("birthdate") &&
+                              !text.includes("birth date") &&
+                              !text.includes("dob") &&
+                              !text.includes("ngày sinh") &&
+                              !text.includes("ngay sinh")
+                            ) continue;
                             const inp = Array.from(b.querySelectorAll('input')).find((i) => isVisible(i) && !i.disabled);
                             if (!inp) return false;
                             return setDateValue(inp, iso, raw);
@@ -536,9 +916,12 @@ def run_auto_apply(
 
         # Fallback: thử fill theo selectors (cho trường hợp input text thường)
         selectors = [
+            'input[type="date"]',
             'input[aria-label*="date of birth" i]',
             'input[placeholder*="date of birth" i]',
             'input[placeholder*="MM" i][placeholder*="DD" i][placeholder*="YYYY" i]',
+            'input[aria-label*="ngày sinh" i]',
+            'input[placeholder*="ngày sinh" i]',
             'input[name*="birth" i]',
             'input[id*="birth" i]',
             'input[name*="dob" i]',
@@ -1165,9 +1548,35 @@ def run_auto_apply(
                     continue
         return False
 
-    def _wait_shopify_login_if_needed(page) -> bool:
+    # (moved) _wait_shopify_login_if_needed is implemented later with max_wait_sec support.
+
+    def _url_path(url: str) -> str:
+        try:
+            p = urlparse(url)
+            return (p.path or "/").lower()
+        except Exception:
+            return "/"
+
+    def _is_shopify_accounts(page) -> bool:
+        try:
+            u = (page.url or "").lower()
+        except Exception:
+            return False
+        return "accounts.shopify.com" in u
+
+    def _is_shopify_signup(page) -> bool:
+        try:
+            u = (page.url or "").lower()
+        except Exception:
+            return False
+        if "accounts.shopify.com" not in u:
+            return False
+        # Match /signup, /signup/, /signup?... (bỏ query)
+        return _url_path(u).startswith("/signup")
+
+    def _wait_shopify_login_if_needed(page, max_wait_sec: float | None = None) -> bool:
         """
-        Nếu bị chuyển về accounts.shopify.com (login/signup), chờ user đăng nhập thủ công rồi mới tiếp tục.
+        Chờ user login thủ công nhưng không vượt quá max_wait_sec (nếu có).
         Trả về True nếu đã thoát khỏi accounts.shopify.com, False nếu timeout.
         """
         try:
@@ -1176,12 +1585,14 @@ def run_auto_apply(
             u = ""
         if "accounts.shopify.com" not in u:
             return True
+        limit = float(max_wait_sec) if max_wait_sec is not None else float(login_timeout_sec)
+        limit = max(1.0, limit)
         _log(
             "Đang ở trang Shopify Accounts (chưa login). "
-            f"Vui lòng đăng nhập trong cửa sổ vừa mở. Tối đa {login_timeout_sec}s…"
+            f"Vui lòng đăng nhập trong cửa sổ vừa mở. Tối đa {int(limit)}s…"
         )
-        deadline = __import__("time").monotonic() + float(login_timeout_sec)
-        while __import__("time").monotonic() < deadline:
+        deadline = time.monotonic() + float(limit)
+        while time.monotonic() < deadline:
             page.wait_for_timeout(600)
             try:
                 cur = page.url or ""
@@ -1193,28 +1604,27 @@ def run_auto_apply(
         _log("Timeout chờ login Shopify.")
         return False
 
-    def _is_shopify_accounts(page) -> bool:
-        try:
-            u = (page.url or "").lower()
-        except Exception:
-            return False
-        return "accounts.shopify.com" in u
-
-    def _block_until_logged_in_or_fail(page, reason: str = "") -> None:
+    def _block_until_logged_in_or_fail(page, reason: str = "", brand_deadline: float | None = None) -> None:
         """
         Nếu đang ở Shopify Accounts thì chặn cứng tại đây, chờ user login xong mới cho chạy tiếp.
         Không được chuyển sang link khác trong lúc chờ.
         """
         if not _is_shopify_accounts(page):
             return
+        # Rule mới:
+        # - Nếu bị chuyển sang accounts.shopify.com/signup => phải chờ user login để tiếp tục.
+        # - Nếu chưa login được thì tối đa 200s sẽ bỏ brand và nhảy sang brand khác.
+        # Lưu ý: không ràng buộc vào brand_deadline (vì per-brand timeout thường chỉ ~30s).
+        max_wait = 200.0
         suffix = f" ({reason})" if reason else ""
         _log(
             "Phát hiện chưa login Shopify. Đang tạm dừng Auto Apply"
             f"{suffix}. Vui lòng login trong cửa sổ này..."
         )
-        ok = _wait_shopify_login_if_needed(page)
+        ok = _wait_shopify_login_if_needed(page, max_wait_sec=max_wait)
         if not ok:
-            raise RuntimeError("Chưa login Shopify Collabs (timeout chờ đăng nhập).")
+            # Không treo: quá ngân sách brand thì nhảy brand khác.
+            raise _SkipBrand("login-timeout")
         # Sau khi login xong, chờ thêm chút để redirect ổn định.
         page.wait_for_timeout(800)
 
@@ -1256,6 +1666,53 @@ def run_auto_apply(
     total = len(links)
     ok_count = 0
     submit_count = 0
+    submitted_items: list[dict] = []
+    attempted_items: list[dict] = []
+
+    def _domain_from_link(raw_link: str) -> str:
+        try:
+            u = str(raw_link or "").strip()
+            if not u:
+                return ""
+            p = urlparse(u)
+            host = (p.netloc or "").strip().lower()
+            if host.startswith("www."):
+                host = host[4:]
+            return host
+        except Exception:
+            return ""
+
+    def _brand_name_from_page_or_link(p, raw_link: str) -> str:
+        name = ""
+        try:
+            if p and hasattr(p, "title"):
+                name = str(p.title() or "").strip()
+        except Exception:
+            name = ""
+        if name.strip().lower() in ("shopify collabs", "collabs", "shopify"):
+            name = ""
+        if not name:
+            try:
+                up = urlparse(str(raw_link or "").strip())
+                host = (up.netloc or "").strip().lower()
+                if host.startswith("www."):
+                    host = host[4:]
+                name = host or str(raw_link or "").strip()
+            except Exception:
+                name = str(raw_link or "").strip()
+        return name or str(raw_link or "").strip()
+
+    def _record_attempt(*, p=None, link: str, submitted: bool, note: str = "") -> None:
+        attempted_items.append(
+            {
+                "brand": _brand_name_from_page_or_link(p, link),
+                "domain": _domain_from_link(link),
+                "email": str(profile.get("email") or "").strip(),
+                "link": str(link or "").strip(),
+                "submitted": bool(submitted),
+                "note": str(note or "").strip(),
+            }
+        )
     with sync_playwright() as p:
         browser = None
         context = None
@@ -1276,12 +1733,17 @@ def run_auto_apply(
             # Bắt buộc check login trước khi chạy bất kỳ link nào.
             # Không chạy song song trong lúc user đang đăng nhập.
             if login_first:
+                _check_stop("trước khi kiểm tra login")
                 _ensure_logged_in_before_run(page)
 
             for i, link in enumerate(links, start=1):
+                _check_stop(f"trước khi mở link {i}/{total}")
                 _log(f"[{i}/{total}] Mở: {link}")
                 brand_page = context.new_page()
+                # Timeout tối đa cho 1 brand: quá thời gian -> đóng tab và nhảy brand khác.
+                per_brand_deadline = time.monotonic() + float(max(20, int(brand_timeout_sec or 120)))
                 try:
+                    _check_stop(f"trước khi goto link {i}/{total}")
                     brand_page.goto(link, wait_until="domcontentloaded", timeout=45000)
                     # Link đầu tiên thường load chậm widget form -> đợi ổn định thêm.
                     if i == 1:
@@ -1291,6 +1753,7 @@ def run_auto_apply(
                             brand_page.wait_for_timeout(1200)
                 except PlaywrightTimeoutError:
                     _log("  - Timeout mở trang, bỏ qua.")
+                    _record_attempt(link=link, submitted=False, note="timeout_open_page")
                     try:
                         brand_page.close()
                     except Exception:
@@ -1298,14 +1761,38 @@ def run_auto_apply(
                     continue
                 except Exception as exc:
                     _log(f"  - Lỗi mở trang: {exc}")
+                    _record_attempt(link=link, submitted=False, note=f"error_open_page: {exc}")
+                    try:
+                        brand_page.close()
+                    except Exception:
+                        pass
+                    continue
+                # Nếu ngay sau goto bị redirect sang signup thì bỏ brand.
+                try:
+                    _block_until_logged_in_or_fail(
+                        brand_page, reason="sau khi mở link apply", brand_deadline=per_brand_deadline
+                    )
+                except _SkipBrand:
+                    _record_attempt(p=brand_page, link=link, submitted=False, note="login_or_signup_blocked")
                     try:
                         brand_page.close()
                     except Exception:
                         pass
                     continue
                 # Redirect login có thể xảy ra chậm sau khi goto.
+                _check_stop("sau khi mở trang")
                 brand_page.wait_for_timeout(900)
-                _block_until_logged_in_or_fail(brand_page, reason="sau khi mở link apply")
+                try:
+                    _block_until_logged_in_or_fail(
+                        brand_page, reason="sau khi mở link apply", brand_deadline=per_brand_deadline
+                    )
+                except _SkipBrand:
+                    _record_attempt(p=brand_page, link=link, submitted=False, note="login_or_signup_blocked")
+                    try:
+                        brand_page.close()
+                    except Exception:
+                        pass
+                    continue
                 # Chỉ điền trên collabs.shopify.com. Nếu link ngoài collabs thì phải có Apply now.
                 if not _is_collabs_page(brand_page):
                     pages_before_apply = set()
@@ -1316,12 +1803,14 @@ def run_auto_apply(
                     clicked = _click_apply_now_only(brand_page)
                     if not clicked:
                         _log("  - Không tìm thấy nút Apply now, đóng tab và bỏ qua brand.")
+                        _record_attempt(p=brand_page, link=link, submitted=False, note="no_apply_cta")
                         try:
                             brand_page.close()
                         except Exception:
                             pass
                         continue
                     _log("  - Đã bấm Apply now.")
+                    _check_stop("sau khi bấm Apply now")
                     brand_page.wait_for_timeout(900)
                     # Nếu mở tab mới thì chuyển sang tab collabs mới đó.
                     target_page = _resolve_collabs_page_after_apply(context, brand_page)
@@ -1350,19 +1839,32 @@ def run_auto_apply(
                                         break
                         except Exception:
                             pass
-                    _block_until_logged_in_or_fail(brand_page, reason="sau khi bấm Apply now")
+                    try:
+                        _block_until_logged_in_or_fail(
+                            brand_page, reason="sau khi bấm Apply now", brand_deadline=per_brand_deadline
+                        )
+                    except _SkipBrand:
+                        _record_attempt(p=brand_page, link=link, submitted=False, note="login_or_signup_blocked")
+                        try:
+                            brand_page.close()
+                        except Exception:
+                            pass
+                        continue
                 if not _is_collabs_page(brand_page):
                     _log("  - Sau Apply now vẫn không vào collabs.shopify.com, bỏ qua brand.")
+                    _record_attempt(p=brand_page, link=link, submitted=False, note="not_in_collabs_after_apply")
                     try:
                         brand_page.close()
                     except Exception:
                         pass
                     continue
+                _check_stop("trước khi bắt đầu điền form")
                 brand_page.wait_for_timeout(700)
 
                 # Yêu cầu: phải mở được collabs.shopify.com mới bắt đầu điền.
                 if not _can_open_collabs(context):
                     _log("  - Không mở được collabs.shopify.com sau khi Apply, bỏ qua brand này.")
+                    _record_attempt(p=brand_page, link=link, submitted=False, note="cannot_open_collabs")
                     try:
                         brand_page.close()
                     except Exception:
@@ -1372,8 +1874,32 @@ def run_auto_apply(
                 # Multi-step apply: fill page -> click Next (if any) -> repeat -> send application.
                 total_filled = 0
                 sent = False
+                timed_out = False
+                skip_brand = False
                 for step in range(1, 8):
-                    _block_until_logged_in_or_fail(brand_page, reason=f"trước bước form {step}")
+                    # Per-brand hard timeout: không treo quá 2 phút
+                    if time.monotonic() > per_brand_deadline:
+                        _log("  - Quá 2 phút cho brand này => đóng tab và nhảy sang brand khác.")
+                        timed_out = True
+                        try:
+                            brand_page.close()
+                        except Exception:
+                            pass
+                        break
+                    _check_stop(f"trong form step {step} ({i}/{total})")
+                    try:
+                        _block_until_logged_in_or_fail(
+                            brand_page, reason=f"trước bước form {step}", brand_deadline=per_brand_deadline
+                        )
+                    except _SkipBrand:
+                        _log("  - Bị chuyển sang Shopify signup => bỏ qua brand này.")
+                        _record_attempt(p=brand_page, link=link, submitted=False, note="login_or_signup_blocked")
+                        try:
+                            brand_page.close()
+                        except Exception:
+                            pass
+                        skip_brand = True
+                        break
                     _stable_page_before_actions(brand_page)
                     _fill_date_of_birth(brand_page)
                     _select_shipping_location(brand_page)
@@ -1391,6 +1917,7 @@ def run_auto_apply(
                     )
 
                     # Điền xong + chọn xong mới bấm Next/Submit
+                    _check_stop("trước khi bấm Next/Send")
                     brand_page.wait_for_timeout(500)
 
                     if _click_send_application(brand_page):
@@ -1406,6 +1933,11 @@ def run_auto_apply(
                         _log("  - Đã bấm submit/apply (fallback) nhưng chưa chắc là 'Send application'.")
                     break
 
+                if timed_out or skip_brand:
+                    if timed_out:
+                        _record_attempt(p=brand_page, link=link, submitted=False, note="brand_timeout")
+                    continue
+
                 if total_filled <= 0:
                     if i == 1:
                         # Link đầu tiên hay render chậm, thử 1 lần bổ sung trước khi bỏ.
@@ -1417,6 +1949,7 @@ def run_auto_apply(
                         _log(f"  - Retry link đầu: điền thêm {retry_filled} ô.")
                     if total_filled <= 0:
                         _log("  - Không nhận diện được ô để điền (có thể do custom widget/frame lạ).")
+                        _record_attempt(p=brand_page, link=link, submitted=False, note="no_fields_detected")
                         try:
                             brand_page.close()
                         except Exception:
@@ -1428,12 +1961,49 @@ def run_auto_apply(
                 # - Chỉ đóng tab khi bấm được "Send application"/"Submit application" (sent=True)
                 # - Nếu chưa hoàn thành thì giữ tab mở, chuyển sang link khác để apply tiếp
                 if sent:
+                    # Lưu lịch sử submit thành công cho từng brand/link.
+                    brand_name = ""
+                    try:
+                        brand_name = (
+                            (brand_page.title() or "").strip()
+                            if brand_page and hasattr(brand_page, "title")
+                            else ""
+                        )
+                    except Exception:
+                        brand_name = ""
+                    # Title "Shopify Collabs" là tên chung, không phải tên brand thực.
+                    # Khi gặp title chung thì fallback sang domain từ link gốc.
+                    if brand_name.strip().lower() in (
+                        "shopify collabs",
+                        "collabs",
+                        "shopify",
+                    ):
+                        brand_name = ""
+                    if not brand_name:
+                        try:
+                            p = urlparse(str(link or "").strip())
+                            host = (p.netloc or "").strip().lower()
+                            if host.startswith("www."):
+                                host = host[4:]
+                            brand_name = host or str(link or "").strip()
+                        except Exception:
+                            brand_name = str(link or "").strip()
+                    submitted_items.append(
+                        {
+                            "brand": brand_name,
+                            "email": str(profile.get("email") or "").strip(),
+                            "link": str(link or "").strip(),
+                        }
+                    )
+                    _record_attempt(p=brand_page, link=link, submitted=True, note="submitted")
                     try:
                         brand_page.close()
                     except Exception:
                         pass
                 else:
                     _log("  - Chưa bấm được 'Send application' => GIỮ tab này mở và chuyển sang brand tiếp theo.")
+                    _record_attempt(p=brand_page, link=link, submitted=False, note="not_submitted_kept_open")
+            # end for link
         finally:
             try:
                 if page:
@@ -1458,5 +2028,11 @@ def run_auto_apply(
                         browser.close()
                 except Exception:
                     pass
-    return {"total": total, "filled": ok_count, "submitted": submit_count}
+    return {
+        "total": total,
+        "filled": ok_count,
+        "submitted": submit_count,
+        "submitted_items": submitted_items,
+        "attempted_items": attempted_items,
+    }
 

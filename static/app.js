@@ -2,32 +2,58 @@ const state = {
   logCursor: 0,
   pollTimer: null,
   currentLicense: null,
+  autoApply: {
+    lastRunning: false,
+    lastFile: "",
+    lastResultSig: "",
+    runToken: "",
+    notifiedToken: "",
+  },
 };
+
+function isAutoApplyCollabsEnabled() {
+  try {
+    const v = document.body?.dataset?.autoApplyCollabsEnabled;
+    if (v == null || String(v).trim() === "") return true;
+    return String(v).trim() === "1";
+  } catch (_) {
+    return true;
+  }
+}
 
 const AUTO_APPLY_DEFAULTS = {
   aa_business_type: "Content Creator",
-  aa_brands_worked: "Shopify and DTC lifestyle brands",
+  aa_brands_worked: "Shopify DTC brands in beauty, wellness, home, and lifestyle.",
   aa_successful_partnership:
-    "A successful collaboration starts with clear goals, fast communication, and consistent content quality. I can deliver authentic content on schedule and optimize based on performance.",
-  aa_content_inspires: "Educational product demos, before-after transformations, and real customer-style storytelling.",
-  aa_hope_gain: "Long-term partnership, exclusive offers for my audience, and performance-based growth.",
-  aa_how_found: "I discovered your brand through social media and creator community recommendations.",
-  aa_city_country: "Ho Chi Minh City, Vietnam",
-  aa_demographic: "Women and men aged 18-34 interested in lifestyle, home, and online shopping.",
-  aa_growth_strategy: "Consistent short-form videos, SEO captions, UGC-style content, and weekly A/B tests on hooks.",
+    "A successful partnership combines clear KPIs, fast communication, and consistent creative execution. I usually deliver 2-4 high-quality assets per campaign and optimize hooks/CTA based on performance.",
+  aa_content_inspires:
+    "Authentic product storytelling, clear problem-solution demos, before-after proof, and conversion-focused UGC with strong hooks.",
+  aa_hope_gain:
+    "A long-term partnership with clear performance goals, exclusive offers for my audience, and scalable monthly campaigns.",
+  aa_how_found:
+    "I found your brand through creator community recommendations and your product content on social media.",
+  aa_city_country: "United States",
+  aa_demographic:
+    "Women and men aged 18-34 in US/UK/CA interested in lifestyle, beauty, home, wellness, and online shopping.",
+  aa_growth_strategy:
+    "I post consistently, test new hooks weekly, improve retention with tighter edits, and scale winning formats using data from saves, shares, and watch time.",
   aa_children_age: "N/A",
-  aa_ugc_content: "Yes, I create UGC content.",
-  aa_content_ideas: "Unboxing, product comparison, problem-solution videos, and creator picks.",
+  aa_ugc_content: "Yes. I create UGC videos, product photography, and ad-style creatives for paid and organic use.",
+  aa_content_ideas:
+    "UGC review, unboxing, problem-solution demo, before-after comparison, and a creator recommendation video with clear CTA.",
+  aa_followers_engagement:
+    "I have a growing audience across Instagram and TikTok, and my posts typically receive consistent engagement through comments, saves, and shares. I focus on quality audience fit and conversion intent.",
   aa_why_fit:
-    "I have an audience aligned with your target customers and a strong track record of converting content.",
-  aa_purchase_love: "I love the product quality, design details, and how practical it is in daily use.",
+    "My audience matches your target customer profile, and my content style is built to drive trust, clicks, and conversions while keeping the brand voice authentic.",
+  aa_purchase_love:
+    "I really like your product quality, practical value, and thoughtful design. It is easy to present naturally in daily-use content and gives strong social proof opportunities.",
   aa_why_join:
-    "I would love to join your community to create authentic content, introduce your products to my audience, and build a long-term win-win partnership.",
-  aa_generic_short: "I'd love to collaborate and create engaging content for your audience.",
+    "I want to join your program to build a long-term, performance-focused partnership. I can deliver authentic content consistently, communicate quickly, and optimize each campaign for better conversion.",
+  aa_generic_short:
+    "I would love to collaborate and create high-converting, authentic content for your brand.",
   aa_generic_long:
-    "I focus on high-quality, authentic content that builds trust and drives conversions. I can deliver consistent posts, clear communication, and measurable performance.",
-  aa_message:
-    "I am excited to collaborate and create authentic, high-converting content for your brand. I can provide short-form videos, product storytelling, and consistent communication.",
+    "I create authentic, conversion-focused content that builds trust and helps audiences take action. I can provide consistent deliverables, fast communication, and data-informed optimization to improve campaign performance over time.",
+  aa_message: "",
   aa_dob: "",
   aa_shipping_location: "United States",
   aa_identify: "Prefer not to say",
@@ -36,6 +62,7 @@ const AUTO_APPLY_DEFAULTS = {
   aa_row_start: "1",
   aa_row_end: "",
 };
+const LS_AUTO_APPLY_HISTORY = "aff_auto_apply_history_v1";
 
 /** Poll nhanh hơn khi đang chạy; server phải threaded=True để /api/logs không bị chặn bởi worker. */
 const POLL_MS = 120;
@@ -54,7 +81,6 @@ const settingKeys = [
   "REFERSION_API_URL",
   "REFERSION_TOKEN",
   "COLLABS_API_URL",
-  "COLLABS_LIMIT",
   "COLLABS_COOKIE",
   "COLLABS_CSRF_TOKEN",
 ];
@@ -65,15 +91,6 @@ function clampOffersPerPageField(id) {
   let n = parseInt(String(el.value ?? "").trim(), 10);
   if (Number.isNaN(n)) n = 50;
   n = Math.max(10, Math.min(50, Math.floor(n / 10) * 10));
-  el.value = String(n);
-}
-
-function clampCollabsLimitField(id) {
-  const el = $(id);
-  if (!el) return;
-  let n = parseInt(String(el.value ?? "").trim(), 10);
-  if (Number.isNaN(n)) n = 48;
-  n = Math.max(12, Math.min(48, Math.floor(n / 12) * 12));
   el.value = String(n);
 }
 
@@ -306,7 +323,6 @@ async function loadSettings() {
 async function saveSettings() {
   clampOffersPerPageField("UPPROMOTE_PER_PAGE");
   clampOffersPerPageField("GOAFFPRO_LIMIT");
-  clampCollabsLimitField("COLLABS_LIMIT");
   const payload = {};
   settingKeys.forEach((k) => {
     if (!$(k)) return;
@@ -382,9 +398,11 @@ async function pollStatus() {
   if (pollStatusBusy) return;
   pollStatusBusy = true;
   try {
-    const [stRes, lgRes] = await Promise.all([
+    const aaReq = isAutoApplyCollabsEnabled() ? fetchAutoApplyStatus().catch(() => ({})) : Promise.resolve({});
+    const [stRes, lgRes, aa] = await Promise.all([
       fetch("/api/status", { cache: "no-store" }),
       fetch(`/api/logs?since=${state.logCursor}`, { cache: "no-store" }),
+      aaReq,
     ]);
     const st = await stRes.json();
     const lg = await lgRes.json();
@@ -429,7 +447,46 @@ async function pollStatus() {
       }
     }
 
-    if (!st.running && state.pollTimer) {
+    if (isAutoApplyCollabsEnabled()) {
+      // Popup thông báo khi Auto Apply chạy nền hoàn tất / lỗi.
+      const aaRunning = !!aa?.running;
+      const aaFile = String(aa?.file || "");
+      const aaStatus = String(aa?.status || "");
+      const r = aa?.result || null;
+      const err = String(aa?.error || "");
+      const sig = JSON.stringify({ aaFile, aaStatus, r, err });
+      state.autoApply.lastRunning = aaRunning;
+      state.autoApply.lastFile = aaFile;
+      const finished = !aaRunning && (aaStatus === "Done" || aaStatus === "Error" || !!r || !!err);
+      const hasRunToken = !!state.autoApply.runToken;
+      const shouldNotifyByToken = hasRunToken && state.autoApply.notifiedToken !== state.autoApply.runToken;
+      const shouldNotifyBySig = !hasRunToken && state.autoApply.lastResultSig !== sig;
+      if (finished && (shouldNotifyByToken || shouldNotifyBySig)) {
+        state.autoApply.lastResultSig = sig;
+        if (hasRunToken) state.autoApply.notifiedToken = state.autoApply.runToken;
+        if (r && typeof r === "object") {
+          appendLocalApplyHistory({
+            file: aaFile,
+            started_at_display: new Date().toLocaleString("vi-VN"),
+            email: "",
+            submitted_items: Array.isArray(r.submitted_items) ? r.submitted_items : [],
+          });
+          alert(
+            `Auto Apply xong.\nFile: ${aaFile}\nTổng link: ${r.total || 0}\nĐã điền form: ${r.filled || 0}\nĐã submit: ${r.submitted || 0}`
+          );
+        } else if (err) {
+          alert(`Auto Apply dừng/lỗi.\nFile: ${aaFile}\nLỗi: ${err}`);
+        } else {
+          alert(`Auto Apply đã dừng.\nFile: ${aaFile}`);
+        }
+        // refresh lại list để nút Hủy -> Auto Apply
+        await loadResults();
+      }
+    }
+
+    // Chỉ dừng polling khi cả pipeline và auto-apply (nếu bật) đều đã dừng.
+    const aaRunningForStop = isAutoApplyCollabsEnabled() ? !!aa?.running : false;
+    if (!st.running && !aaRunningForStop && state.pollTimer) {
       clearInterval(state.pollTimer);
       state.pollTimer = null;
       await loadResults();
@@ -584,7 +641,6 @@ function minTrafficFor(source) {
 async function runFilter(source) {
   clampOffersPerPageField("UPPROMOTE_PER_PAGE");
   clampOffersPerPageField("GOAFFPRO_LIMIT");
-  clampCollabsLimitField("COLLABS_LIMIT");
   const settings = {};
   settingKeys.forEach((k) => {
     settings[k] = settingValueForPayload(k);
@@ -711,6 +767,22 @@ async function deleteResultFile(name) {
   await loadResults();
 }
 
+async function openEdgeForAutoApply() {
+  try {
+    const res = await fetch("/api/edge-cdp/start", { method: "POST" });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) {
+      const detail = Array.isArray(data.logs) && data.logs.length ? `\n\nLog:\n${data.logs.join("\n")}` : "";
+      alert((data.error || "Không mở được Edge CDP.") + detail);
+      return;
+    }
+    const detail = Array.isArray(data.logs) && data.logs.length ? `\n\nLog:\n${data.logs.join("\n")}` : "";
+    alert(`Edge đã sẵn sàng cho Auto Apply.\nCDP: ${data.cdp_url || "http://127.0.0.1:9222"}` + detail);
+  } catch (e) {
+    alert(String(e?.message || e || "Lỗi mở Edge CDP."));
+  }
+}
+
 function collectAutoApplyProfile() {
   const keep = (k, v) => localStorage.setItem(k, v || "");
   const read = (k) => {
@@ -742,6 +814,7 @@ function collectAutoApplyProfile() {
   const demographicEl = $("aa_demographic");
   const growthStrategyEl = $("aa_growth_strategy");
   const contentIdeasEl = $("aa_content_ideas");
+  const followersEngagementEl = $("aa_followers_engagement");
   const whyFitEl = $("aa_why_fit");
   const purchaseLoveEl = $("aa_purchase_love");
   const whyJoinEl = $("aa_why_join");
@@ -776,6 +849,7 @@ function collectAutoApplyProfile() {
     !demographicEl ||
     !growthStrategyEl ||
     !contentIdeasEl ||
+    !followersEngagementEl ||
     !whyFitEl ||
     !purchaseLoveEl ||
     !whyJoinEl ||
@@ -819,6 +893,7 @@ function collectAutoApplyProfile() {
   demographicEl.value = read("aa_demographic");
   growthStrategyEl.value = read("aa_growth_strategy");
   contentIdeasEl.value = read("aa_content_ideas");
+  followersEngagementEl.value = read("aa_followers_engagement");
   whyFitEl.value = read("aa_why_fit");
   purchaseLoveEl.value = read("aa_purchase_love");
   whyJoinEl.value = read("aa_why_join");
@@ -835,8 +910,6 @@ function collectAutoApplyProfile() {
       btnCancel.removeEventListener("click", onCancel);
       btnSave.removeEventListener("click", onSave);
       btnConfirm.removeEventListener("click", onConfirm);
-      modal.removeEventListener("click", onBackdrop);
-      document.removeEventListener("keydown", onEsc);
     };
     const finish = (val) => {
       if (done) return;
@@ -845,12 +918,6 @@ function collectAutoApplyProfile() {
       resolve(val);
     };
     const onCancel = () => finish(null);
-    const onBackdrop = (e) => {
-      if (e.target === modal) finish(null);
-    };
-    const onEsc = (e) => {
-      if (e.key === "Escape") finish(null);
-    };
 
     const persistFormToLocalStorage = () => {
       const full_name = String(fullNameEl.value || "").trim();
@@ -877,6 +944,7 @@ function collectAutoApplyProfile() {
       const demographic = String(demographicEl.value || "").trim();
       const growth_strategy = String(growthStrategyEl.value || "").trim();
       const content_ideas = String(contentIdeasEl.value || "").trim();
+      const followers_engagement = String(followersEngagementEl.value || "").trim();
       const why_fit = String(whyFitEl.value || "").trim();
       const purchase_love = String(purchaseLoveEl.value || "").trim();
       const why_join = String(whyJoinEl.value || "").trim();
@@ -908,6 +976,7 @@ function collectAutoApplyProfile() {
       keep("aa_demographic", demographic);
       keep("aa_growth_strategy", growth_strategy);
       keep("aa_content_ideas", content_ideas);
+      keep("aa_followers_engagement", followers_engagement);
       keep("aa_why_fit", why_fit);
       keep("aa_purchase_love", purchase_love);
       keep("aa_why_join", why_join);
@@ -945,6 +1014,7 @@ function collectAutoApplyProfile() {
       const demographic = String(demographicEl.value || "").trim();
       const growth_strategy = String(growthStrategyEl.value || "").trim();
       const content_ideas = String(contentIdeasEl.value || "").trim();
+      const followers_engagement = String(followersEngagementEl.value || "").trim();
       const why_fit = String(whyFitEl.value || "").trim();
       const purchase_love = String(purchaseLoveEl.value || "").trim();
       const why_join = String(whyJoinEl.value || "").trim();
@@ -978,6 +1048,7 @@ function collectAutoApplyProfile() {
           demographic,
           growth_strategy,
           content_ideas,
+          followers_engagement,
           why_fit,
           purchase_love,
           why_join,
@@ -995,15 +1066,17 @@ function collectAutoApplyProfile() {
     btnCancel.addEventListener("click", onCancel);
     btnSave.addEventListener("click", onSave);
     btnConfirm.addEventListener("click", onConfirm);
-    modal.addEventListener("click", onBackdrop);
-    document.addEventListener("keydown", onEsc);
   });
 }
 
 async function autoApplyFromResultFile(name) {
+  if (!isAutoApplyCollabsEnabled()) {
+    alert("Auto Apply Collabs đang tắt trên server.");
+    return;
+  }
   const form = await collectAutoApplyProfile();
   if (!form) return;
-  const res = await fetch("/api/auto-apply", {
+  const res = await fetch("/api/auto-apply/start", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -1015,24 +1088,239 @@ async function autoApplyFromResultFile(name) {
       auto_submit: false,
       use_cdp: true,
       cdp_url: "http://127.0.0.1:9222",
-      login_first: true,
     }),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok || !data.ok) {
-    alert(data.error || "Auto Apply thất bại.");
-    if (Array.isArray(data.logs) && data.logs.length) {
-      console.log("[AUTO APPLY LOGS]\n" + data.logs.join("\n"));
-    }
+    alert(data.error || "Không thể bắt đầu Auto Apply.");
     return;
   }
-  const r = data.result || {};
-  alert(
-    `Auto Apply xong.\nTổng link: ${r.total || 0}\nĐã điền form: ${r.filled || 0}\nĐã submit: ${r.submitted || 0}`
-  );
-  if (Array.isArray(data.logs) && data.logs.length) {
-    console.log("[AUTO APPLY LOGS]\n" + data.logs.join("\n"));
+  // Bật poll để theo dõi kết thúc auto-apply (popup + đổi nút Hủy về Auto Apply).
+  if (!state.pollTimer) {
+    state.pollTimer = setInterval(pollStatus, POLL_MS);
   }
+  state.autoApply.runToken = `${Date.now()}-${String(name || "")}`;
+  state.autoApply.notifiedToken = "";
+  state.autoApply.lastResultSig = "";
+  // Đánh dấu trạng thái bắt đầu chạy để detect cạnh running -> done.
+  state.autoApply.lastRunning = true;
+  state.autoApply.lastFile = String(name || "");
+  // UI sẽ tự đổi nút Auto Apply -> Hủy trong danh sách file.
+  await loadResults();
+  await pollStatus();
+}
+
+async function stopAutoApply() {
+  if (!isAutoApplyCollabsEnabled()) {
+    alert("Auto Apply Collabs đang tắt trên server.");
+    return;
+  }
+  const res = await fetch("/api/auto-apply/stop", { method: "POST" });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.ok) {
+    alert(data.error || "Không hủy được Auto Apply.");
+    return;
+  }
+  await loadResults();
+}
+
+async function fetchAutoApplyStatus() {
+  if (!isAutoApplyCollabsEnabled()) return {};
+  const res = await fetch("/api/auto-apply/status", { cache: "no-store" });
+  return await res.json().catch(() => ({}));
+}
+
+function readLocalApplyHistory() {
+  try {
+    const raw = localStorage.getItem(LS_AUTO_APPLY_HISTORY);
+    const arr = JSON.parse(raw || "[]");
+    return Array.isArray(arr) ? arr : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function appendLocalApplyHistory(entry) {
+  const items = readLocalApplyHistory();
+  items.unshift(entry);
+  localStorage.setItem(LS_AUTO_APPLY_HISTORY, JSON.stringify(items.slice(0, 200)));
+}
+
+async function openApplyHistory(name) {
+  if (!isAutoApplyCollabsEnabled()) {
+    alert("Auto Apply Collabs đang tắt trên server.");
+    return;
+  }
+  let modal = $("applyHistoryModal");
+  let box = $("applyHistoryBox");
+  let closeBtn = $("applyHistoryCloseBtn");
+  if (!modal || !box || !closeBtn) {
+    modal = document.createElement("div");
+    modal.className = "modal-backdrop hidden";
+    modal.id = "applyHistoryModal";
+    modal.innerHTML = `
+      <div class="modal-card">
+        <h3>Lịch sử Apply</h3>
+        <div class="log-box" id="applyHistoryBox"></div>
+        <div class="actions">
+          <button class="btn" type="button" id="applyHistoryCloseBtn">Đóng</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+    box = $("applyHistoryBox");
+    closeBtn = $("applyHistoryCloseBtn");
+  }
+  if (!modal || !box || !closeBtn) return;
+  let items = [];
+  let apiOk = false;
+  try {
+    const res = await fetch(`/api/auto-apply/history?name=${encodeURIComponent(name || "")}`, { cache: "no-store" });
+    if (res.ok) {
+      const data = await res.json().catch(() => ({}));
+      items = Array.isArray(data.items) ? data.items : [];
+      apiOk = true;
+    }
+  } catch (_) {}
+  if (!apiOk) {
+    const local = readLocalApplyHistory();
+    items = local.filter((it) => String((it || {}).file || "") === String(name || ""));
+  }
+  box.innerHTML = "";
+  if (!items.length) {
+    box.textContent = "Chưa có lịch sử apply cho file này.";
+  } else {
+    items.forEach((entry) => {
+      const title = String(entry.started_at_display || entry.started_at || "").trim() || "(không rõ thời gian)";
+      const wrap = document.createElement("div");
+      wrap.style.marginBottom = "16px";
+      wrap.style.paddingBottom = "10px";
+      wrap.style.borderBottom = "1px solid #22314f";
+
+      const head = document.createElement("div");
+      head.textContent = title;
+      head.style.fontSize = "18px";
+      head.style.fontWeight = "700";
+      head.style.marginBottom = "8px";
+      wrap.appendChild(head);
+
+      const attempted = Array.isArray(entry.attempted_items) ? entry.attempted_items : [];
+      const submitted = Array.isArray(entry.submitted_items) ? entry.submitted_items : [];
+      const submittedFromAttempted = attempted.filter((it) => !!it && !!it.submitted);
+      const notSubmittedFromAttempted = attempted.filter((it) => !!it && !it.submitted);
+
+      const vnErrorFromNote = (noteRaw) => {
+        const note = String(noteRaw || "").trim();
+        if (!note) return "Không rõ lý do";
+        if (note === "timeout_open_page") return "Timeout mở trang";
+        if (note.startsWith("error_open_page:")) return `Lỗi mở trang: ${note.replace(/^error_open_page:\s*/i, "")}`.trim();
+        if (note === "login_or_signup_blocked") return "Chưa đăng nhập Shopify (quá 200s) hoặc bị chặn đăng nhập";
+        if (note === "no_apply_cta") return "Không tìm thấy nút Apply";
+        if (note === "not_in_collabs_after_apply") return "Đã bấm Apply nhưng không vào được trang Collabs";
+        if (note === "cannot_open_collabs") return "Không mở được Collabs sau khi Apply";
+        if (note === "brand_timeout") return "Quá thời gian xử lý brand";
+        if (note === "no_fields_detected") return "Không nhận diện được ô để điền hoặc đã apply thành công";
+        if (note === "not_submitted_kept_open") return "Chưa bấm được nút “Send application”";
+        if (note === "submitted") return "Đã submit";
+        return note; // fallback: show raw
+      };
+
+      const domainFromLink = (link) => {
+        try {
+          const u = new URL(String(link || ""));
+          let h = String(u.host || "").toLowerCase();
+          if (h.startsWith("www.")) h = h.slice(4);
+          return h;
+        } catch (_) {
+          return "";
+        }
+      };
+
+      const section = (label) => {
+        const t = document.createElement("div");
+        t.textContent = label;
+        t.style.fontWeight = "700";
+        t.style.margin = "10px 0 6px";
+        t.style.color = "#cbd5e1";
+        return t;
+      };
+
+      // 1) Đã submit
+      wrap.appendChild(section(`Đã submit (${(submittedFromAttempted.length || submitted.length || 0)})`));
+      const listSubmitted = submittedFromAttempted.length ? submittedFromAttempted : submitted;
+      if (!listSubmitted.length) {
+        const empty = document.createElement("div");
+        empty.textContent = "Không có brand submit thành công.";
+        empty.style.color = "#9aa7bd";
+        wrap.appendChild(empty);
+      } else {
+        const ul = document.createElement("ul");
+        ul.style.margin = "0";
+        ul.style.paddingLeft = "18px";
+        listSubmitted.forEach((it) => {
+          const li = document.createElement("li");
+          const brand = String(it.brand || "").trim() || "(không rõ brand)";
+          const email = String(it.email || entry.email || "").trim() || "(không rõ email)";
+          li.textContent = `${brand} | ${email}`;
+          ul.appendChild(li);
+        });
+        wrap.appendChild(ul);
+      }
+
+      // 2) Chưa submit
+      wrap.appendChild(section(`Chưa submit (${notSubmittedFromAttempted.length})`));
+      if (!attempted.length) {
+        const note = document.createElement("div");
+        note.textContent = "Chưa có dữ liệu brand chưa submit (phiên cũ).";
+        note.style.color = "#9aa7bd";
+        wrap.appendChild(note);
+      } else if (!notSubmittedFromAttempted.length) {
+        const ok = document.createElement("div");
+        ok.textContent = "Tất cả brand trong phiên này đã submit.";
+        ok.style.color = "#9aa7bd";
+        wrap.appendChild(ok);
+      } else {
+        const ul = document.createElement("ul");
+        ul.style.margin = "0";
+        ul.style.paddingLeft = "18px";
+        notSubmittedFromAttempted.forEach((it) => {
+          const li = document.createElement("li");
+          const email = String(it.email || entry.email || "").trim() || "(không rõ email)";
+          const domain = String(it.domain || "").trim() || domainFromLink(it.link) || String(it.brand || "").trim() || "(không rõ domain)";
+          const errVi = vnErrorFromNote(it.note);
+          li.textContent = `${domain} | ${email} | ${errVi}`;
+          ul.appendChild(li);
+        });
+        wrap.appendChild(ul);
+      }
+      box.appendChild(wrap);
+    });
+  }
+  if (!apiOk) {
+    const note = document.createElement("div");
+    note.style.marginTop = "8px";
+    note.style.color = "#9aa7bd";
+    note.textContent = "Đang dùng lịch sử local (backend history API chưa sẵn sàng).";
+    box.appendChild(note);
+  }
+  modal.classList.remove("hidden");
+
+  const close = () => {
+    modal.classList.add("hidden");
+    closeBtn.removeEventListener("click", onClose);
+    modal.removeEventListener("click", onBackdrop);
+    document.removeEventListener("keydown", onEsc);
+  };
+  const onClose = () => close();
+  const onBackdrop = (e) => {
+    if (e.target === modal) close();
+  };
+  const onEsc = (e) => {
+    if (e.key === "Escape") close();
+  };
+  closeBtn.addEventListener("click", onClose);
+  modal.addEventListener("click", onBackdrop);
+  document.addEventListener("keydown", onEsc);
 }
 
 function renderLicenseStatus(lic) {
@@ -1049,6 +1337,12 @@ async function loadLicense() {
     const res = await fetch("/api/license", { cache: "no-store" });
     const lic = await res.json();
     state.currentLicense = lic;
+    try {
+      const enabled = lic && typeof lic.auto_apply_collabs_enabled !== "undefined" ? !!lic.auto_apply_collabs_enabled : true;
+      document.body.dataset.autoApplyCollabsEnabled = enabled ? "1" : "0";
+    } catch (_) {
+      /* ignore */
+    }
     renderLicenseStatus(lic);
     applyLicenseSourceVisibility(lic);
     finishLicenseLoadingState();
@@ -1103,7 +1397,12 @@ async function deactivateLicense() {
 }
 
 async function loadResults() {
-  const res = await fetch("/api/results");
+  const [res, aa] = await Promise.all([
+    fetch("/api/results"),
+    isAutoApplyCollabsEnabled() ? fetchAutoApplyStatus() : Promise.resolve({}),
+  ]);
+  state.autoApply.lastRunning = isAutoApplyCollabsEnabled() ? !!aa?.running : false;
+  state.autoApply.lastFile = isAutoApplyCollabsEnabled() ? String(aa?.file || "") : "";
   const data = await res.json();
   const list = $("resultFileList");
   list.innerHTML = "";
@@ -1122,13 +1421,30 @@ async function loadResults() {
     btnDel.className = "btn sm danger";
     btnDel.textContent = "Xóa";
     btnDel.addEventListener("click", () => deleteResultFile(f.name));
-    const btnAutoApply = document.createElement("button");
-    btnAutoApply.type = "button";
-    btnAutoApply.className = "btn sm";
-    btnAutoApply.textContent = "Auto Apply";
-    btnAutoApply.addEventListener("click", () => autoApplyFromResultFile(f.name));
+    const isRunning = !!aa?.running;
+    const sameFile = String(aa?.file || "") === String(f.name || "");
+    const btnHistory = document.createElement("button");
+    btnHistory.type = "button";
+    btnHistory.className = "btn sm";
+    btnHistory.textContent = "Lịch sử Apply";
+    btnHistory.addEventListener("click", () => openApplyHistory(f.name));
     actions.appendChild(btnDl);
-    actions.appendChild(btnAutoApply);
+    if (isAutoApplyCollabsEnabled()) {
+      const btnAutoApply = document.createElement("button");
+      btnAutoApply.type = "button";
+      btnAutoApply.className = "btn sm";
+      if (isRunning && sameFile) {
+        btnAutoApply.textContent = "Hủy";
+        btnAutoApply.className = "btn sm danger";
+        btnAutoApply.addEventListener("click", () => stopAutoApply());
+      } else {
+        btnAutoApply.textContent = "Auto Apply";
+        btnAutoApply.addEventListener("click", () => autoApplyFromResultFile(f.name));
+      }
+      btnAutoApply.disabled = isRunning && !sameFile;
+      actions.appendChild(btnAutoApply);
+      actions.appendChild(btnHistory);
+    }
     actions.appendChild(btnDel);
     const nameEl = document.createElement("div");
     nameEl.textContent = f.name;
@@ -1166,7 +1482,23 @@ function bindEvents() {
     const el = $(id);
     if (el) el.addEventListener("click", stopRun);
   });
-  $("refreshResultsBtn").addEventListener("click", loadResults);
+  $("refreshResultsBtn").addEventListener("click", (e) => {
+    try {
+      e.preventDefault();
+      e.stopPropagation();
+    } catch (_) {}
+    loadResults();
+  });
+  const edgeBtn = $("openEdgeCdpBtn");
+  if (edgeBtn) {
+    edgeBtn.addEventListener("click", (e) => {
+      try {
+        e.preventDefault();
+        e.stopPropagation();
+      } catch (_) {}
+      openEdgeForAutoApply();
+    });
+  }
   const actLic = $("activateLicenseBtn");
   if (actLic) actLic.addEventListener("click", activateLicense);
   const deLic = $("deactivateLicenseBtn");

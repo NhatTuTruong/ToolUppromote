@@ -3,10 +3,12 @@ import socket
 import subprocess
 import sys
 import time
+import json
 from shutil import which
 import threading
 from datetime import datetime
 from pathlib import Path
+from typing import Callable, Optional
 
 from flask import Flask, jsonify, render_template, request, send_file
 
@@ -28,6 +30,28 @@ from runtime_paths import app_dir, bundle_dir
 
 BASE_DIR = app_dir()
 license_guard.set_paths(BASE_DIR)
+
+
+def _env_flag(name: str, default: bool = True) -> bool:
+    raw = str(os.getenv(name, "")).strip().lower()
+    if raw == "":
+        return bool(default)
+    if raw in {"1", "true", "yes", "y", "on", "enable", "enabled"}:
+        return True
+    if raw in {"0", "false", "no", "n", "off", "disable", "disabled"}:
+        return False
+    return bool(default)
+
+
+def auto_apply_collabs_enabled() -> bool:
+    # Feature flag: bật/tắt Auto Apply Collabs trên server + theo license key.
+    if not _env_flag("ENABLE_AUTO_APPLY_COLLABS", True):
+        return False
+    try:
+        lic = license_guard.license_status_payload()
+        return bool(lic.get("auto_apply_collabs_enabled", True))
+    except Exception:
+        return True
 
 
 class RunControl:
@@ -109,6 +133,71 @@ class AppState:
 
 
 STATE = AppState()
+
+
+class AutoApplyState:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.running = False
+        self.status = "Idle"
+        self.logs: list[str] = []
+        self.result: dict | None = None
+        self.error: str = ""
+        self.stop_event = threading.Event()
+        self.worker: threading.Thread | None = None
+        self.current_file: str = ""
+
+    def reset(self):
+        self.running = False
+        self.status = "Idle"
+        self.logs = []
+        self.result = None
+        self.error = ""
+        self.stop_event = threading.Event()
+        self.worker = None
+        self.current_file = ""
+
+    def add_log(self, msg: str):
+        with self.lock:
+            self.logs.append(str(msg))
+
+
+AUTO_APPLY_STATE = AutoApplyState()
+AUTO_APPLY_HISTORY_PATH = BASE_DIR / "auto-apply-history.json"
+AUTO_APPLY_HISTORY_LOCK = threading.Lock()
+
+
+def _load_auto_apply_history() -> list[dict]:
+    if not AUTO_APPLY_HISTORY_PATH.exists():
+        return []
+    try:
+        raw = AUTO_APPLY_HISTORY_PATH.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    try:
+        data = json.loads(raw or "[]")
+    except Exception:
+        return []
+    return data if isinstance(data, list) else []
+
+
+def _save_auto_apply_history(items: list[dict]) -> None:
+    try:
+        AUTO_APPLY_HISTORY_PATH.write_text(
+            json.dumps(items, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
+def _append_auto_apply_history(entry: dict) -> None:
+    with AUTO_APPLY_HISTORY_LOCK:
+        items = _load_auto_apply_history()
+        items.insert(0, entry)
+        # Giữ tối đa 200 phiên để file không phình to.
+        items = items[:200]
+        _save_auto_apply_history(items)
 _root = bundle_dir()
 app = Flask(
     __name__,
@@ -137,7 +226,7 @@ def ensure_edge_cdp_running(
     port: int = 9222,
     user_data_dir: str = r"C:\edge-cdp",
     edge_exe: str | None = None,
-    log: callable | None = None,
+    log: Optional[Callable[[str], None]] = None,
     wait_sec: float = 12.0,
 ) -> bool:
     """
@@ -179,7 +268,6 @@ def ensure_edge_cdp_running(
         f"--remote-debugging-port={int(port)}",
         f"--user-data-dir={user_data_dir}",
     ]
-    _log("Đang mở Edge CDP: " + " ".join([f'"{a}"' if " " in a else a for a in args]))
 
     try:
         creationflags = 0
@@ -470,7 +558,7 @@ def fetch_offers_collabs(filters: dict) -> list:
         raise RuntimeError("Thiếu COLLABS_API_URL trong cài đặt")
     core.enforce_fixed_fetch_defaults()
     max_pages_cap = core.collabs_max_pages_cap()
-    page_size = core.clamp_collabs_limit(os.getenv("COLLABS_LIMIT", str(core.DEFAULT_COLLABS_LIMIT)))
+    page_size = core.DEFAULT_COLLABS_LIMIT
     start_page = int(filters.get("start_page") or 1)
     if start_page < 1:
         start_page = 1
@@ -490,16 +578,30 @@ def fetch_offers_collabs(filters: dict) -> list:
         or str(core.DEFAULT_COLLABS_PAGE_DELAY_MS)
     )
     detail_delay_ms = int(os.getenv("COLLABS_DETAIL_DELAY_MS", "100") or "100")
+    progress_floor = 0.0
+
+    def _set_progress_floor(v: float) -> None:
+        nonlocal progress_floor
+        try:
+            progress_floor = max(progress_floor, float(v))
+        except Exception:
+            return
+        with STATE.lock:
+            if progress_floor > STATE.progress:
+                STATE.progress = progress_floor
 
     raw_nodes = []
     after = None
     page = 1
+    if start_page > 1:
+        STATE.add_log(f"Collabs: bắt đầu từ trang {start_page}")
     while True:
         STATE.control.wait_if_paused()
         if STATE.control.should_stop():
             STATE.add_log("Đã dừng.")
             return []
-        STATE.add_log(f"Collabs trang {page}: đang tải...")
+        if page >= start_page:
+            STATE.add_log(f"Collabs trang {page}: đang tải...")
         body = core.fetch_collabs_page(base_url, page_size, after=after)
         data = body.get("data") or {}
         search = data.get("brandsNetworkSearch") or {}
@@ -507,13 +609,15 @@ def fetch_offers_collabs(filters: dict) -> list:
         if not isinstance(nodes, list):
             nodes = []
         if not nodes:
-            STATE.add_log(f"Collabs trang {page}: hết dữ liệu, dừng phân trang.")
+            if page >= start_page:
+                STATE.add_log(f"Collabs trang {page}: hết dữ liệu, dừng phân trang.")
             break
         if page >= start_page:
             raw_nodes.extend(nodes)
             STATE.add_log(f"Collabs trang {page}: +{len(nodes)} brand (tổng {len(raw_nodes)})")
-        else:
-            STATE.add_log(f"Collabs trang {page}: bỏ qua vì trước trang bắt đầu ({start_page})")
+            # Hiển thị tiến trình ngay trong pha crawl trang Collabs (0-25%).
+            seen_pages = max(1, page - start_page + 1)
+            _set_progress_floor(min(25.0, 5.0 + (seen_pages * 2.0)))
         info = search.get("pageInfo") or {}
         has_next = bool(info.get("hasNextPage"))
         after = info.get("endCursor")
@@ -569,6 +673,9 @@ def fetch_offers_collabs(filters: dict) -> list:
         offers.append(mapped)
         if idx % 10 == 0 or idx == total_raw:
             STATE.add_log(f"Collabs detail: {idx}/{total_raw}")
+        if total_raw > 0:
+            # Pha detail Collabs: 25% -> 55%
+            _set_progress_floor(25.0 + (idx / total_raw) * 30.0)
         if detail_delay_ms > 0:
             time.sleep(detail_delay_ms / 1000)
         if redirect_delay_ms > 0:
@@ -606,6 +713,10 @@ def run_pipeline(settings: dict, min_traffic: int, filters: dict, source: str = 
 
     if STATE.control.should_stop():
         STATE.add_log("Đã dừng.")
+        return
+
+    if not offers:
+        STATE.add_log("Không có offer trong phạm vi trang đã chọn.")
         return
 
     cap = license_guard.export_offer_cap(len(offers), src)
@@ -756,7 +867,8 @@ def run_pipeline(settings: dict, min_traffic: int, filters: dict, source: str = 
             )
             STATE.add_log(block)
             with STATE.lock:
-                STATE.progress = (idx / total_offers) * 100
+                # Không cho tiến trình tụt lùi nếu trước đó đã cập nhật từ pha fetch/detail.
+                STATE.progress = max(STATE.progress, (idx / total_offers) * 100)
             _w = STATE.wait_log_displayed(STATE.log_count())
             if _w == "stop":
                 STATE.add_log("Đã nhận lệnh dừng — lưu các dòng đã xử lý ra file…")
@@ -793,7 +905,7 @@ def _worker(settings: dict, min_traffic: int, filters: dict, source: str = "uppr
 
 @app.get("/")
 def index():
-    return render_template("index.html")
+    return render_template("index.html", auto_apply_collabs_enabled=auto_apply_collabs_enabled())
 
 
 @app.get("/api/settings")
@@ -899,6 +1011,51 @@ def api_stop():
         STATE.status = "Đang dừng"
     STATE.add_log("Đang dừng...")
     return jsonify({"ok": True})
+
+@app.post("/api/edge-cdp/start")
+def api_edge_cdp_start():
+    """
+    Mở Edge ở chế độ CDP để sẵn sàng Auto Apply.
+    - Nếu port đã mở: trả ok (Edge đã chạy).
+    - Nếu chưa: tự mở Edge với user-data-dir cố định rồi chờ lên.
+    """
+    logs: list[str] = []
+    ok = ensure_edge_cdp_running(
+        port=9222,
+        user_data_dir=r"C:\edge-cdp",
+        edge_exe=r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        log=lambda m: logs.append(str(m)),
+        wait_sec=12.0,
+    )
+    if not ok:
+        return _no_cache_json({"ok": False, "error": "Không mở được Edge CDP.", "logs": logs}), 500
+    cdp_url = "http://127.0.0.1:9222"
+    # Mở sẵn tab Collabs để user login/ready cho Auto Apply.
+    try:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            browser = p.chromium.connect_over_cdp(cdp_url)
+            try:
+                context = browser.contexts[0] if browser.contexts else browser.new_context()
+                page = context.new_page()
+                try:
+                    page.goto("https://collabs.shopify.com/", wait_until="domcontentloaded", timeout=45000)
+                    logs.append("Đã mở tab: https://collabs.shopify.com/")
+                except Exception as exc:
+                    logs.append(f"[Cảnh báo] Không mở được tab Collabs: {exc}")
+                try:
+                    page.close()
+                except Exception:
+                    pass
+            finally:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+    except Exception as exc:
+        logs.append(f"[Cảnh báo] Không thể kết nối CDP để mở tab Collabs: {exc}")
+    return _no_cache_json({"ok": True, "cdp_url": cdp_url, "logs": logs})
 
 
 def _no_cache_json(data):
@@ -1029,6 +1186,8 @@ def api_delete_result():
 
 @app.post("/api/auto-apply")
 def api_auto_apply():
+    if not auto_apply_collabs_enabled():
+        return jsonify({"ok": False, "error": "Auto Apply Collabs đang tắt trên server."}), 403
     payload = request.get_json(force=True) or {}
     name = str(payload.get("name") or "").strip()
     safe_name = Path(name).name
@@ -1121,10 +1280,9 @@ def api_auto_apply():
     if not links:
         return jsonify({"ok": False, "error": "Không tìm thấy cột/link apply trong file."}), 400
 
+    # Giữ endpoint cũ để tương thích: chạy dạng blocking (không có nút Hủy).
     logs: list[str] = []
     try:
-        # Tự mở Edge CDP nếu chưa chạy, theo yêu cầu:
-        # "msedge.exe --remote-debugging-port=9222 --user-data-dir=C:\\edge-cdp"
         ensure_edge_cdp_running(
             port=9222,
             user_data_dir=r"C:\edge-cdp",
@@ -1142,6 +1300,193 @@ def api_auto_apply():
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc), "logs": logs}), 500
     return jsonify({"ok": True, "result": result, "logs": logs})
+
+
+def _auto_apply_worker(
+    *,
+    links: list[str],
+    profile: dict,
+    auto_submit: bool,
+    cdp_url: str,
+    login_first: bool,
+    file_name: str,
+):
+    st = AUTO_APPLY_STATE
+    started_local = datetime.now()
+    try:
+        st.add_log("Đang kiểm tra/mở Edge CDP...")
+        ensure_edge_cdp_running(
+            port=9222,
+            user_data_dir=r"C:\edge-cdp",
+            edge_exe=r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            log=st.add_log,
+        )
+        st.add_log("Bắt đầu Auto Apply...")
+        result = auto_apply_core.run_auto_apply(
+            links=links,
+            profile=profile,
+            auto_submit=auto_submit,
+            cdp_url=cdp_url,
+            login_first=login_first,
+            should_stop=lambda: st.stop_event.is_set(),
+            log=st.add_log,
+        )
+        with st.lock:
+            st.result = result
+            st.status = "Done"
+        submitted_items = result.get("submitted_items") if isinstance(result, dict) else []
+        if not isinstance(submitted_items, list):
+            submitted_items = []
+        attempted_items = result.get("attempted_items") if isinstance(result, dict) else []
+        if not isinstance(attempted_items, list):
+            attempted_items = []
+        _append_auto_apply_history(
+            {
+                "file": str(file_name or ""),
+                "started_at": started_local.isoformat(timespec="seconds"),
+                "started_at_display": started_local.strftime("%d/%m/%Y %H:%M:%S"),
+                "email": str(profile.get("email") or "").strip(),
+                "submitted_count": int(result.get("submitted") or 0) if isinstance(result, dict) else 0,
+                "submitted_items": [
+                    {
+                        "brand": str((it or {}).get("brand") or "").strip(),
+                        "email": str((it or {}).get("email") or "").strip() or str(profile.get("email") or "").strip(),
+                        "link": str((it or {}).get("link") or "").strip(),
+                    }
+                    for it in submitted_items
+                    if isinstance(it, dict)
+                ],
+                "attempted_items": [
+                    {
+                        "brand": str((it or {}).get("brand") or "").strip(),
+                        "domain": str((it or {}).get("domain") or "").strip(),
+                        "email": str((it or {}).get("email") or "").strip() or str(profile.get("email") or "").strip(),
+                        "link": str((it or {}).get("link") or "").strip(),
+                        "submitted": bool((it or {}).get("submitted")),
+                        "note": str((it or {}).get("note") or "").strip(),
+                    }
+                    for it in attempted_items
+                    if isinstance(it, dict)
+                ],
+            }
+        )
+    except Exception as exc:
+        with st.lock:
+            st.error = str(exc)
+            st.status = "Error"
+        st.add_log(f"LỖI: {exc}")
+    finally:
+        with st.lock:
+            st.running = False
+
+
+@app.post("/api/auto-apply/start")
+def api_auto_apply_start():
+    if not auto_apply_collabs_enabled():
+        return jsonify({"ok": False, "error": "Auto Apply Collabs đang tắt trên server."}), 403
+    payload = request.get_json(force=True) or {}
+    name = str(payload.get("name") or "").strip()
+    safe_name = Path(name).name
+    full = _safe_result_file_path(safe_name)
+    if full is None:
+        return jsonify({"ok": False, "error": "Tên file không hợp lệ."}), 400
+    if not full.is_file():
+        return jsonify({"ok": False, "error": "Không tìm thấy file."}), 404
+
+    profile_in = payload.get("profile") or {}
+    profile = profile_in if isinstance(profile_in, dict) else {}
+    auto_submit = bool(payload.get("auto_submit"))
+    use_cdp = bool(payload.get("use_cdp"))
+    cdp_url = str(payload.get("cdp_url") or "").strip() or "http://127.0.0.1:9222"
+    if not use_cdp:
+        return jsonify({"ok": False, "error": "Auto Apply hiện chỉ chạy qua CDP (trình duyệt đang mở)."}), 400
+    login_first = True
+    apply_mode = str(payload.get("apply_mode") or "only_dat").strip() or "only_dat"
+    try:
+        row_start = int(payload.get("row_start")) if str(payload.get("row_start") or "").strip() else None
+    except (TypeError, ValueError):
+        row_start = None
+    try:
+        row_end = int(payload.get("row_end")) if str(payload.get("row_end") or "").strip() else None
+    except (TypeError, ValueError):
+        row_end = None
+
+    links = auto_apply_core.extract_apply_links_from_xlsx(
+        full,
+        apply_mode=apply_mode,
+        row_start=row_start,
+        row_end=row_end,
+    )
+    if not links:
+        return jsonify({"ok": False, "error": "Không tìm thấy cột/link apply trong file."}), 400
+
+    st = AUTO_APPLY_STATE
+    with st.lock:
+        if st.running:
+            return jsonify({"ok": False, "error": "Auto Apply đang chạy sẵn."}), 400
+        st.reset()
+        st.running = True
+        st.status = "Running"
+        st.current_file = safe_name
+        st.worker = threading.Thread(
+            target=_auto_apply_worker,
+            kwargs={
+                "links": links,
+                "profile": profile,
+                "auto_submit": auto_submit,
+                "cdp_url": cdp_url,
+                "login_first": login_first,
+                "file_name": safe_name,
+            },
+            daemon=True,
+        )
+        st.worker.start()
+    return jsonify({"ok": True, "total_links": len(links)})
+
+
+@app.post("/api/auto-apply/stop")
+def api_auto_apply_stop():
+    if not auto_apply_collabs_enabled():
+        return jsonify({"ok": False, "error": "Auto Apply Collabs đang tắt trên server."}), 403
+    st = AUTO_APPLY_STATE
+    with st.lock:
+        if not st.running:
+            return jsonify({"ok": False, "error": "Auto Apply không đang chạy."}), 400
+        st.stop_event.set()
+        st.status = "Stopping"
+    st.add_log("Đang hủy Auto Apply...")
+    return jsonify({"ok": True})
+
+
+@app.get("/api/auto-apply/status")
+def api_auto_apply_status():
+    if not auto_apply_collabs_enabled():
+        return _no_cache_json({"running": False, "status": "Disabled", "file": "", "logs": [], "result": None, "error": ""})
+    st = AUTO_APPLY_STATE
+    with st.lock:
+        return _no_cache_json(
+            {
+                "running": st.running,
+                "status": st.status,
+                "file": st.current_file,
+                "logs": list(st.logs[-200:]),
+                "result": st.result,
+                "error": st.error,
+            }
+        )
+
+
+@app.get("/api/auto-apply/history")
+def api_auto_apply_history():
+    if not auto_apply_collabs_enabled():
+        return _no_cache_json({"items": []})
+    file_name = str(request.args.get("name") or "").strip()
+    safe_name = Path(file_name).name if file_name else ""
+    with AUTO_APPLY_HISTORY_LOCK:
+        items = _load_auto_apply_history()
+    if safe_name:
+        items = [it for it in items if str((it or {}).get("file") or "") == safe_name]
+    return _no_cache_json({"items": items[:100]})
 
 
 if __name__ == "__main__":

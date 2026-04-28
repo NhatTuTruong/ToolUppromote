@@ -51,7 +51,6 @@ ENV_SAVE_KEY_ORDER = [
     "REFERSION_API_URL",
     "REFERSION_TOKEN",
     "COLLABS_API_URL",
-    "COLLABS_LIMIT",
     "COLLABS_COOKIE",
     "COLLABS_CSRF_TOKEN",
     "AFF_LICENSE_API_BASE_URL",
@@ -85,7 +84,6 @@ WEB_SETTINGS_SAVE_KEYS = frozenset(
         "REFERSION_API_URL",
         "REFERSION_TOKEN",
         "COLLABS_API_URL",
-        "COLLABS_LIMIT",
         "COLLABS_COOKIE",
         "COLLABS_CSRF_TOKEN",
     }
@@ -189,7 +187,6 @@ def load_env_defaults():
         "REFERSION_API_URL": os.getenv("REFERSION_API_URL", ""),
         "REFERSION_TOKEN": os.getenv("REFERSION_TOKEN", ""),
         "COLLABS_API_URL": os.getenv("COLLABS_API_URL", "https://api.collabs.shopify.com/creator/graphql"),
-        "COLLABS_LIMIT": str(core.clamp_collabs_limit(os.getenv("COLLABS_LIMIT"))),
         "COLLABS_COOKIE": os.getenv("COLLABS_COOKIE", ""),
         "COLLABS_CSRF_TOKEN": os.getenv("COLLABS_CSRF_TOKEN", ""),
         "AFF_LICENSE_API_BASE_URL": os.getenv("AFF_LICENSE_API_BASE_URL", os.getenv("AFF_LICENSE_SERVER_URL", "")),

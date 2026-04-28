@@ -18,6 +18,7 @@ class LicenseKey extends Model
         'daily_limit',
         'max_machines',
         'allowed_sources',
+        'allow_auto_apply_collabs',
         'expires_at',
         'notes',
     ];
@@ -25,6 +26,7 @@ class LicenseKey extends Model
     protected $casts = [
         'expires_at' => 'datetime',
         'allowed_sources' => 'array',
+        'allow_auto_apply_collabs' => 'boolean',
     ];
 
     public function activations(): HasMany

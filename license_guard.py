@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 import time
+import uuid
 
 try:
     import requests
@@ -231,6 +232,7 @@ def _activate_via_license_server(norm_key: str) -> tuple[bool, str]:
     hint = str(data.get("key_hint") or (norm_key[-6:] if len(norm_key) >= 6 else norm_key))
     daily_limit = int(data.get("daily_limit") or licensed_exports_per_day())
     expires_at = str(data.get("expires_at") or "")
+    allow_auto_apply_collabs = bool(data.get("allow_auto_apply_collabs", True))
     usage_day = str(data.get("usage_day") or calendar_day_vietnam())
     used_today = max(0, int(data.get("used_today") or 0))
     st = load_license_state()
@@ -240,6 +242,7 @@ def _activate_via_license_server(norm_key: str) -> tuple[bool, str]:
         "machine_fingerprint": mfp,
         "daily_limit": max(1, daily_limit),
         "allowed_sources": normalize_allowed_sources(data.get("allowed_sources")),
+        "allow_auto_apply_collabs": allow_auto_apply_collabs,
         "expires_at": expires_at,
         "activated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
@@ -325,6 +328,7 @@ def _sync_this_install_from_server() -> tuple[bool, str]:
         **inst,
         "daily_limit": max(1, daily_limit),
         "allowed_sources": normalize_allowed_sources(remote_data.get("allowed_sources") or inst.get("allowed_sources")),
+        "allow_auto_apply_collabs": bool(remote_data.get("allow_auto_apply_collabs", inst.get("allow_auto_apply_collabs", True))),
         "expires_at": str(remote_data.get("expires_at") or inst.get("expires_at") or ""),
         "machine_fingerprint": mfp,
     }
@@ -341,9 +345,27 @@ def _load_json(path: Path) -> dict:
 
 
 def _atomic_write(path: Path, data: dict) -> None:
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(path)
+    payload = json.dumps(data, ensure_ascii=False, indent=2)
+    # Dùng tên file tạm unique để tránh va chạm khi nhiều luồng/process cùng ghi.
+    # Trên Windows, os.replace có thể tạm thời lỗi WinError 32 nếu file đang bị giữ lock.
+    last_exc: Exception | None = None
+    for attempt in range(8):
+        tmp = path.with_suffix(path.suffix + f".{uuid.uuid4().hex}.tmp")
+        try:
+            tmp.write_text(payload, encoding="utf-8")
+            os.replace(tmp, path)
+            return
+        except OSError as exc:
+            last_exc = exc
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except OSError:
+                pass
+            # Backoff ngắn để vượt qua lock ngắn hạn từ process/AV/indexer.
+            time.sleep(0.03 * (attempt + 1))
+    if last_exc:
+        raise last_exc
 
 
 def load_license_state() -> dict:
@@ -681,6 +703,7 @@ def license_status_payload() -> dict:
     st = load_license_state()
     inst = st.get("this_install") or {}
     allowed_sources = normalize_allowed_sources(inst.get("allowed_sources"))
+    auto_apply_collabs_flag = bool(inst.get("allow_auto_apply_collabs", True)) if licensed else True
     srv = bool(license_api_base_url())
     activation_mode = "remote" if licensed else "none"
     rem_up = free_exports_remaining_today("uppromote")
@@ -733,6 +756,7 @@ def license_status_payload() -> dict:
         "max_machines_per_key": None,
         "activation_id": inst.get("activation_id") if licensed else None,
         "allowed_sources": allowed_sources if licensed else list(ALL_SOURCES),
+        "auto_apply_collabs_enabled": auto_apply_collabs_flag,
         "message": msg,
     }
 

@@ -86,6 +86,13 @@
                     <label><input type="checkbox" name="allowed_sources[]" value="collabs"> Shopify Collabs</label>
                 </div>
             </div>
+            <div style="margin-top:8px;">
+                <label>Auto Apply Collabs (Apply Collab)</label>
+                <div class="check-row">
+                    <label><input type="checkbox" name="allow_auto_apply_collabs" value="1" checked> Apply Collab</label>
+                </div>
+                <div class="muted" style="margin-top:4px;">Tắt mục này sẽ ẩn các nút/chức năng Auto Apply Collabs trong app.</div>
+            </div>
             <div style="margin-top:10px;"><button type="submit" class="btn btn-primary">Lưu key</button></div>
         </form>
     </div>
@@ -186,6 +193,11 @@
                                     <label><input type="checkbox" name="allowed_sources[]" value="goaffpro" @checked(in_array('goaffpro', $allowed, true))> Goaffpro</label>
                                     <label><input type="checkbox" name="allowed_sources[]" value="refersion" @checked(in_array('refersion', $allowed, true))> Refersion</label>
                                     <label><input type="checkbox" name="allowed_sources[]" value="collabs" @checked(in_array('collabs', $allowed, true))> Shopify Collabs</label>
+                                </div>
+                            </div>
+                            <div style="margin-top:6px;">
+                                <div class="check-row">
+                                    <label><input type="checkbox" name="allow_auto_apply_collabs" value="1" @checked((bool) $k->allow_auto_apply_collabs)> Apply Collab</label>
                                 </div>
                             </div>
                             <div style="margin-top:6px;"><input name="notes" value="{{ $k->notes }}"></div>

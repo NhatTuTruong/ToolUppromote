@@ -19,11 +19,11 @@
     }
   </style>
 </head>
-<body class="license-loading">
+<body class="license-loading" data-auto-apply-collabs-enabled="{{ '1' if auto_apply_collabs_enabled else '0' }}">
   <div class="app-shell">
     <header class="topbar">
       <div>
-        <h1>Lọc offer affiliate1</h1>
+        <h1>Lọc Offer Affiliate</h1>
         <p>Bảng điều khiển</p>
       </div>
       <div class="status-chip" id="statusChip">Sảnh</div>
@@ -157,7 +157,6 @@
               <input id="COLLABS_CSRF_TOKEN" class="secret-field-input token-apify" type="password" spellcheck="false" autocomplete="off" />
             </div>
           </label>
-          <label>Giới hạn mỗi request (12–48, bước 12)<input id="COLLABS_LIMIT" type="number" min="12" max="48" step="12" value="48" /></label>
         </div>
         <div class="actions">
           <button class="btn primary" id="saveSettingsBtn">Lưu cài đặt</button>
@@ -404,7 +403,8 @@
       <div class="card">
         <div class="results-head">
           <h2>File kết quả</h2>
-          <button class="btn" id="refreshResultsBtn">Làm mới</button>
+          <button class="btn" id="openEdgeCdpBtn" type="button" title="Mở Edge (sẵn sàng Auto Apply)">⧉</button>
+          <button class="btn" id="refreshResultsBtn" type="button">Làm mới</button>
         </div>
         
         <div class="file-list" id="resultFileList">
@@ -417,6 +417,20 @@
     <div class="modal-card">
       <h3>Auto Apply - Mẫu đăng ký</h3>
       <div class="form-grid">
+        <div class="filter-field-full">
+          <h4 style="margin:0 0 6px; font-size:13px; color:#334155;">Chế độ &amp; phạm vi đăng ký</h4>
+          <div class="form-grid compact">
+        <label>Chế độ đăng ký
+          <select id="aa_apply_mode">
+            <option value="only_dat">Chỉ đăng ký hàng ĐẠT trong file</option>
+            <option value="all">Đăng ký tất cả các hàng trong file</option>
+          </select>
+        </label>
+        <label>Từ hàng #<input id="aa_row_start" type="number" min="1" step="1" placeholder="1" /></label>
+        <label>Đến hàng #<input id="aa_row_end" type="number" min="1" step="1" placeholder="10 (để trống = tới cuối)" /></label>
+          </div>
+        </div>
+
         <label>Họ tên<input id="aa_full_name" type="text" /></label>
         <label>Email<input id="aa_email" type="email" /></label>
         <label>Số điện thoại<input id="aa_phone" type="text" /></label>
@@ -445,7 +459,7 @@
             <option value="Vietnam">Vietnam</option>
           </select>
         </label>
-        <div class="filter-field-full">
+        <div>
           <label class="form-field-caption">Giới tính (How do you identify?)</label>
           <div class="multi-select" data-multi-label="Identify">
             <button type="button" class="multi-select-btn" aria-expanded="false" aria-haspopup="listbox">
@@ -461,34 +475,29 @@
             </div>
           </div>
         </div>
-        <label>Chế độ đăng ký
-          <select id="aa_apply_mode">
-            <option value="only_dat">Chỉ đăng ký record ĐẠT trong file</option>
-            <option value="all">Đăng ký tất cả record có link apply</option>
-          </select>
-        </label>
-        <label>Mẫu riêng: “Have you made a purchase from us before?”
+        <label>Đã dùng sản phẩm trước đây chưa?
           <select id="aa_purchase_before_choice">
             <option value="Yes">Yes</option>
             <option value="No">No</option>
             <option value="Not yet, but I plan to!">Not yet, but I plan to!</option>
           </select>
         </label>
-        <label>Từ hàng #<input id="aa_row_start" type="number" min="1" step="1" placeholder="1" /></label>
-        <label>Đến hàng #<input id="aa_row_end" type="number" min="1" step="1" placeholder="10 (để trống = tới cuối)" /></label>
-        <label>Mẫu: Loại hình hoạt động<input id="aa_business_type" type="text" placeholder="Content Creator" /></label>
-        <label>Mẫu: Đã hợp tác với brand nào<input id="aa_brands_worked" type="text" placeholder="Brand A, Brand B" /></label>
-        <label>Mẫu: Kinh nghiệm hợp tác thành công<input id="aa_successful_partnership" type="text" /></label>
-        <label>Mẫu: Nội dung nổi bật<input id="aa_content_inspires" type="text" /></label>
-        <label>Mẫu: Mục tiêu hợp tác<input id="aa_hope_gain" type="text" /></label>
-        <label>Mẫu: Nguồn biết đến brand<input id="aa_how_found" type="text" /></label>
-        <label>Mẫu: Nơi sống (City, Country)<input id="aa_city_country" type="text" /></label>
-        <label>Mẫu: Tệp khách hàng/demographic<input id="aa_demographic" type="text" /></label>
-        <label>Mẫu: Chiến lược tăng trưởng<input id="aa_growth_strategy" type="text" /></label>
-        <label>Mẫu: Ý tưởng content cho sản phẩm<input id="aa_content_ideas" type="text" /></label>
-        <label>Mẫu: Vì sao phù hợp với brand<input id="aa_why_fit" type="text" /></label>
-        <label>Mẫu: Trải nghiệm/điều thích ở sản phẩm<input id="aa_purchase_love" type="text" /></label>
-        <label>Mẫu: Lý do muốn tham gia chương trình<input id="aa_why_join" type="text" /></label>
+        <label> Loại hình hoạt động<input id="aa_business_type" type="text" placeholder="Content Creator" /></label>
+        <label> Đã hợp tác với brand nào<input id="aa_brands_worked" type="text" placeholder="Brand A, Brand B" /></label>
+        <label> Kinh nghiệm hợp tác thành công<input id="aa_successful_partnership" type="text" /></label>
+        <label> Nội dung nổi bật<input id="aa_content_inspires" type="text" /></label>
+        <label> Mục tiêu hợp tác<input id="aa_hope_gain" type="text" /></label>
+        <label> Nguồn biết đến brand<input id="aa_how_found" type="text" /></label>
+        <label> Nơi sống (City, Country)<input id="aa_city_country" type="text" /></label>
+        <label> Đối tượng hướng đến<input id="aa_demographic" type="text" /></label>
+        <label> Chiến lược tăng trưởng<input id="aa_growth_strategy" type="text" /></label>
+        <label> Ý tưởng content cho sản phẩm<input id="aa_content_ideas" type="text" /></label>
+        <label> Bạn có bao nhiêu người theo dõi?
+          <textarea id="aa_followers_engagement" rows="1"></textarea>
+        </label>
+        <label> Vì sao phù hợp với brand<input id="aa_why_fit" type="text" /></label>
+        <label> Trải nghiệm/điều thích ở sản phẩm<input id="aa_purchase_love" type="text" /></label>
+        <label> Lý do muốn tham gia chương trình<input id="aa_why_join" type="text" /></label>
         <label>Mẫu trả lời ngắn chung<input id="aa_generic_short" type="text" placeholder="I'd love to collaborate and create engaging content for your audience." /></label>
         <label class="filter-field-full">Mẫu trả lời dài chung
           <textarea id="aa_generic_long" rows="3" placeholder="I focus on high-quality, authentic content that builds trust and drives conversions. I can deliver consistent posts, clear communication, and measurable performance."></textarea>
@@ -501,6 +510,15 @@
         <button class="btn" type="button" id="aa_cancel_btn">Hủy</button>
         <button class="btn" type="button" id="aa_save_btn">Lưu</button>
         <button class="btn primary" type="button" id="aa_confirm_btn">Bắt đầu Auto Apply</button>
+      </div>
+    </div>
+  </div>
+  <div class="modal-backdrop hidden" id="applyHistoryModal">
+    <div class="modal-card">
+      <h3>Lịch sử Apply</h3>
+      <div class="log-box" id="applyHistoryBox"></div>
+      <div class="actions">
+        <button class="btn" type="button" id="applyHistoryCloseBtn">Đóng</button>
       </div>
     </div>
   </div>

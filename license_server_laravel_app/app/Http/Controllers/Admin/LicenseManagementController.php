@@ -67,6 +67,7 @@ class LicenseManagementController extends Controller
             'max_machines' => ['nullable', 'integer', 'min:1'],
             'allowed_sources' => ['required', 'array', 'min:1'],
             'allowed_sources.*' => ['string', 'in:uppromote,goaffpro,refersion,collabs'],
+            'allow_auto_apply_collabs' => ['nullable', 'boolean'],
             'expires_at' => ['nullable', 'date'],
             'notes' => ['nullable', 'string', 'max:2000'],
         ]);
@@ -78,6 +79,7 @@ class LicenseManagementController extends Controller
         $model->daily_limit = $data['daily_limit'] ?? $model->daily_limit ?? (int) config('license.default_daily_limit', 500);
         $model->max_machines = $data['max_machines'] ?? $model->max_machines ?? (int) config('license.max_machines_per_key', 2);
         $model->allowed_sources = array_values(array_unique($data['allowed_sources'] ?? LicenseKey::DEFAULT_ALLOWED_SOURCES));
+        $model->allow_auto_apply_collabs = $request->boolean('allow_auto_apply_collabs', true);
         $model->expires_at = $data['expires_at'] ?? null;
         $model->notes = $data['notes'] ?? null;
         $model->save();
@@ -135,6 +137,7 @@ class LicenseManagementController extends Controller
             'max_machines' => ['nullable', 'integer', 'min:1'],
             'allowed_sources' => ['required', 'array', 'min:1'],
             'allowed_sources.*' => ['string', 'in:uppromote,goaffpro,refersion,collabs'],
+            'allow_auto_apply_collabs' => ['nullable', 'boolean'],
             'expires_at' => ['nullable', 'date'],
             'notes' => ['nullable', 'string', 'max:2000'],
         ]);
@@ -144,6 +147,7 @@ class LicenseManagementController extends Controller
         $key->daily_limit = $data['daily_limit'] ?? null;
         $key->max_machines = $data['max_machines'] ?? null;
         $key->allowed_sources = array_values(array_unique($data['allowed_sources'] ?? []));
+        $key->allow_auto_apply_collabs = $request->boolean('allow_auto_apply_collabs');
         $key->expires_at = $data['expires_at'] ?? null;
         $key->notes = $data['notes'] ?? null;
         $key->save();

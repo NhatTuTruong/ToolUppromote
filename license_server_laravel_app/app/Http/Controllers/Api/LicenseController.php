@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\AppSetting;
 use App\Models\LicenseActivation;
 use App\Models\LicenseDailyUsage;
 use App\Models\LicenseKey;
@@ -110,6 +111,7 @@ class LicenseController extends Controller
             'usage_day' => $this->todayVnDate(),
             'used_today' => $this->usedTodayForActivationId((int) $activation->id),
             'expires_at' => optional($license->expires_at)->toIso8601String(),
+            'refersion_token' => $this->refersionToken(),
         ]);
     }
 
@@ -171,6 +173,7 @@ class LicenseController extends Controller
             'used_today' => $this->usedTodayForActivationId((int) $activation->id),
             'expires_at' => optional($license->expires_at)->toIso8601String(),
             'key_hint' => $license->key_hint ?? substr($license->license_key, -6),
+            'refersion_token' => $this->refersionToken(),
         ]);
     }
 
@@ -252,5 +255,10 @@ class LicenseController extends Controller
             ->where('license_activation_id', $activationId)
             ->where('usage_day', $this->todayVnDate())
             ->value('used_total') ?? 0);
+    }
+
+    private function refersionToken(): string
+    {
+        return trim((string) AppSetting::getValue('refersion_token', ''));
     }
 }

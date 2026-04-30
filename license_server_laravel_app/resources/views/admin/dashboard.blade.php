@@ -59,6 +59,23 @@
     @endif
 
     <div class="card">
+        <h3>Cập nhật Token Refersion</h3>
+        <form method="post" action="{{ route('admin.settings.refersion_token') }}">
+            @csrf
+            <div>
+                <label>Refersion token</label>
+                <input name="refersion_token" type="text" value="{{ $refersionToken }}" autocomplete="off" placeholder="Nhập token Refersion">
+            </div>
+            <div class="muted" style="margin-top:6px;">
+                Khi lưu, app client đã kích hoạt key sẽ tự đồng bộ token này vào phần Cài đặt.
+            </div>
+            <div style="margin-top:10px;">
+                <button type="submit" class="btn btn-primary">Lưu token</button>
+            </div>
+        </form>
+    </div>
+
+    <div class="card">
         <h3>Thêm hoặc cập nhật nhanh 1 key</h3>
         <form method="post" action="{{ route('admin.keys.store') }}">
             @csrf

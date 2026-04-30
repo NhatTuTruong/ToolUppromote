@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Admin;
 
 use App\Http\Controllers\Controller;
+use App\Models\AppSetting;
 use App\Models\LicenseActivation;
 use App\Models\LicenseKey;
 use Illuminate\Http\RedirectResponse;
@@ -56,7 +57,24 @@ class LicenseManagementController extends Controller
             'keys' => $keys,
             'activations' => $activations,
             'usageDayVn' => $todayVn,
+            'refersionToken' => AppSetting::getValue('refersion_token', ''),
         ]);
+    }
+
+    public function updateRefersionToken(Request $request): RedirectResponse
+    {
+        $data = $request->validate([
+            'refersion_token' => ['nullable', 'string', 'max:4000'],
+        ]);
+
+        $token = trim((string) ($data['refersion_token'] ?? ''));
+
+        AppSetting::query()->updateOrCreate(
+            ['key' => 'refersion_token'],
+            ['value' => $token]
+        );
+
+        return back()->with('success', 'Đã cập nhật Refersion token.');
     }
 
     public function storeKey(Request $request): RedirectResponse

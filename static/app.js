@@ -146,7 +146,7 @@ function setSecretFieldRowOpen(row, open) {
   if (!input) return;
   row.classList.toggle("is-open", open);
   input.type = open ? "text" : "password";
-  const btn = row.querySelector(".secret-eye-btn");
+  const btn = row.querySelector(".secret-eye-btn[aria-expanded]");
   if (btn) {
     btn.setAttribute("aria-expanded", open ? "true" : "false");
     btn.setAttribute("aria-label", open ? "Ẩn (đóng ô nhập)" : "Hiện để chỉnh sửa");
@@ -160,7 +160,7 @@ function closeAllSecretFieldRows() {
 
 function bindSecretEyeButtons() {
   document.querySelectorAll(".secret-field-row").forEach((row) => {
-    const btn = row.querySelector(".secret-eye-btn");
+    const btn = row.querySelector(".secret-eye-btn[aria-expanded]");
     if (!btn) return;
     btn.addEventListener("click", (e) => {
       e.preventDefault();
@@ -1332,6 +1332,15 @@ function renderLicenseStatus(lic) {
   if (deBtn) deBtn.disabled = !lic.licensed;
 }
 
+function applyRefersionTokenFromLicense(lic) {
+  const token = String(lic?.refersion_token || "").trim();
+  if (!token) return;
+  const input = $("REFERSION_TOKEN");
+  if (!input) return;
+  if (String(input.value || "") === token) return;
+  input.value = token;
+}
+
 async function loadLicense() {
   try {
     const res = await fetch("/api/license", { cache: "no-store" });
@@ -1344,6 +1353,7 @@ async function loadLicense() {
       /* ignore */
     }
     renderLicenseStatus(lic);
+    applyRefersionTokenFromLicense(lic);
     applyLicenseSourceVisibility(lic);
     finishLicenseLoadingState();
     return lic;
@@ -1357,6 +1367,25 @@ async function loadLicense() {
     finishLicenseLoadingState();
   }
   return null;
+}
+
+async function refreshRefersionTokenFromServer() {
+  const btn = $("refreshRefersionTokenBtn");
+  if (btn) btn.disabled = true;
+  try {
+    const lic = await loadLicense();
+    const token = String(lic?.refersion_token || "").trim();
+    if (!token) {
+      alert("Server chưa có Refersion token.");
+      return;
+    }
+    const input = $("REFERSION_TOKEN");
+    if (input) input.value = token;
+  } catch (_) {
+    alert("Không lấy được token mới nhất từ server.");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 async function activateLicense() {
@@ -1503,6 +1532,8 @@ function bindEvents() {
   if (actLic) actLic.addEventListener("click", activateLicense);
   const deLic = $("deactivateLicenseBtn");
   if (deLic) deLic.addEventListener("click", deactivateLicense);
+  const refreshRfTokenBtn = $("refreshRefersionTokenBtn");
+  if (refreshRfTokenBtn) refreshRfTokenBtn.addEventListener("click", refreshRefersionTokenFromServer);
   const ep = $("endPage");
   const egp = $("endPageGp");
   const erf = $("endPageRf");

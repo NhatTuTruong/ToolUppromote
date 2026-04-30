@@ -67,6 +67,7 @@ _TZ_VN = timezone(timedelta(hours=7), "UTC+7")
 _LICENSE_PATH: Path | None = None
 _FREE_USAGE_PATH: Path | None = None
 _LICENSED_USAGE_PATH: Path | None = None
+_ENV_PATH: Path | None = None
 
 
 def calendar_day_vietnam() -> str:
@@ -75,10 +76,11 @@ def calendar_day_vietnam() -> str:
 
 
 def set_paths(base_dir: Path) -> None:
-    global _LICENSE_PATH, _FREE_USAGE_PATH, _LICENSED_USAGE_PATH
+    global _LICENSE_PATH, _FREE_USAGE_PATH, _LICENSED_USAGE_PATH, _ENV_PATH
     _LICENSE_PATH = base_dir / ".aff_license.json"
     _FREE_USAGE_PATH = base_dir / ".aff_free_usage.json"
     _LICENSED_USAGE_PATH = base_dir / ".aff_licensed_usage.json"
+    _ENV_PATH = base_dir / ".env"
 
 
 def _paths_ok() -> bool:
@@ -87,6 +89,40 @@ def _paths_ok() -> bool:
         and _FREE_USAGE_PATH is not None
         and _LICENSED_USAGE_PATH is not None
     )
+
+
+def _set_refersion_token_local(token: str) -> None:
+    """
+    Đồng bộ REFERSION_TOKEN vào môi trường chạy hiện tại + file .env cục bộ.
+    Bỏ qua khi token rỗng.
+    """
+    value = str(token or "").strip()
+    if not value:
+        return
+    os.environ["REFERSION_TOKEN"] = value
+    if _ENV_PATH is None:
+        return
+    try:
+        lines = _ENV_PATH.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        lines = []
+
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    new_line = f'REFERSION_TOKEN="{escaped}"'
+    updated = False
+    out: list[str] = []
+    for line in lines:
+        if line.startswith("REFERSION_TOKEN="):
+            out.append(new_line)
+            updated = True
+            continue
+        out.append(line)
+    if not updated:
+        out.append(new_line)
+    try:
+        _ENV_PATH.write_text("\n".join(out).rstrip() + "\n", encoding="utf-8")
+    except OSError:
+        return
 
 
 def license_api_base_url() -> str:
@@ -235,6 +271,7 @@ def _activate_via_license_server(norm_key: str) -> tuple[bool, str]:
     allow_auto_apply_collabs = bool(data.get("allow_auto_apply_collabs", True))
     usage_day = str(data.get("usage_day") or calendar_day_vietnam())
     used_today = max(0, int(data.get("used_today") or 0))
+    _set_refersion_token_local(str(data.get("refersion_token") or ""))
     st = load_license_state()
     st["this_install"] = {
         "activation_id": activation_id,
@@ -324,6 +361,7 @@ def _sync_this_install_from_server() -> tuple[bool, str]:
     daily_limit = int(remote_data.get("daily_limit") or _effective_daily_limit())
     usage_day = str(remote_data.get("usage_day") or calendar_day_vietnam())
     used_today = max(0, int(remote_data.get("used_today") or 0))
+    _set_refersion_token_local(str(remote_data.get("refersion_token") or ""))
     st["this_install"] = {
         **inst,
         "daily_limit": max(1, daily_limit),
@@ -757,6 +795,7 @@ def license_status_payload() -> dict:
         "activation_id": inst.get("activation_id") if licensed else None,
         "allowed_sources": allowed_sources if licensed else list(ALL_SOURCES),
         "auto_apply_collabs_enabled": auto_apply_collabs_flag,
+        "refersion_token": (os.getenv("REFERSION_TOKEN") or "").strip(),
         "message": msg,
     }
 

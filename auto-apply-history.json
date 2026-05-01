@@ -1,5 +1,149 @@
 [
   {
+    "file": "collabs_page1-1_1-5-2026_15-53.xlsx",
+    "started_at": "2026-05-01T16:01:01",
+    "started_at_display": "01/05/2026 16:01:01",
+    "email": "nhatdt2020@gmail.com",
+    "submitted_count": 9,
+    "submitted_items": [
+      {
+        "brand": "nakedgranola.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://nakedgranola.com/pages/collab"
+      },
+      {
+        "brand": "trinitystamps.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://trinitystamps.com/pages/collab"
+      },
+      {
+        "brand": "filterbymollymae.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://www.filterbymollymae.com/pages/collabs"
+      },
+      {
+        "brand": "solgoodbeauty.ca",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://solgoodbeauty.ca/pages/collab"
+      },
+      {
+        "brand": "shankara.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://shankara.com/pages/collabs"
+      },
+      {
+        "brand": "wooduniverse.co",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://wooduniverse.co/pages/collab"
+      },
+      {
+        "brand": "theskinfood.us",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://theskinfood.us/pages/collab"
+      },
+      {
+        "brand": "wearplayground.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://wearplayground.com/pages/collab"
+      },
+      {
+        "brand": "lunalashsupplies.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://lunalashsupplies.com/pages/collab"
+      }
+    ],
+    "attempted_items": [
+      {
+        "brand": "nakedgranola.com",
+        "domain": "nakedgranola.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://nakedgranola.com/pages/collab",
+        "submitted": true,
+        "note": "submitted"
+      },
+      {
+        "brand": "trinitystamps.com",
+        "domain": "trinitystamps.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://trinitystamps.com/pages/collab",
+        "submitted": true,
+        "note": "submitted"
+      },
+      {
+        "brand": "filterbymollymae.com",
+        "domain": "filterbymollymae.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://www.filterbymollymae.com/pages/collabs",
+        "submitted": true,
+        "note": "submitted"
+      },
+      {
+        "brand": "Join Our Influencer Team | IMGadgets",
+        "domain": "imgadgets.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://www.imgadgets.com/pages/collab",
+        "submitted": false,
+        "note": "not_in_collabs_after_apply"
+      },
+      {
+        "brand": "solgoodbeauty.ca",
+        "domain": "solgoodbeauty.ca",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://solgoodbeauty.ca/pages/collab",
+        "submitted": true,
+        "note": "submitted"
+      },
+      {
+        "brand": "shankara.com",
+        "domain": "shankara.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://shankara.com/pages/collabs",
+        "submitted": true,
+        "note": "submitted"
+      },
+      {
+        "brand": "doors.nyc",
+        "domain": "doors.nyc",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://doors.nyc/pages/collab",
+        "submitted": false,
+        "note": "not_in_collabs_after_apply"
+      },
+      {
+        "brand": "wooduniverse.co",
+        "domain": "wooduniverse.co",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://wooduniverse.co/pages/collab",
+        "submitted": true,
+        "note": "submitted"
+      },
+      {
+        "brand": "theskinfood.us",
+        "domain": "theskinfood.us",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://theskinfood.us/pages/collab",
+        "submitted": true,
+        "note": "submitted"
+      },
+      {
+        "brand": "wearplayground.com",
+        "domain": "wearplayground.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://wearplayground.com/pages/collab",
+        "submitted": true,
+        "note": "submitted"
+      },
+      {
+        "brand": "lunalashsupplies.com",
+        "domain": "lunalashsupplies.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://lunalashsupplies.com/pages/collab",
+        "submitted": true,
+        "note": "submitted"
+      }
+    ]
+  },
+  {
     "file": "collabs_page2-2_28-4-2026_9-44.xlsx",
     "started_at": "2026-04-28T12:31:35",
     "started_at_display": "28/04/2026 12:31:35",

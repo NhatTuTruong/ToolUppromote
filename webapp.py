@@ -553,12 +553,46 @@ def fetch_offers_refersion(filters: dict) -> list:
 
 
 def fetch_offers_collabs(filters: dict) -> list:
+    discovery_mode = str((filters or {}).get("discovery_mode") or "in_discovery").strip().lower()
+    if discovery_mode == "outside_discovery":
+        dedup_enabled = str(os.getenv("COLLABS_OUTSIDE_DEDUP_PERSIST", "")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "y",
+            "on",
+            "enable",
+            "enabled",
+        }
+        cse_k = (os.getenv("GOOGLE_CUSTOM_SEARCH_API_KEY") or os.getenv("GOOGLE_CSE_API_KEY") or "").strip()
+        cse_cx = (os.getenv("GOOGLE_CUSTOM_SEARCH_ENGINE_ID") or os.getenv("GOOGLE_CSE_CX") or "").strip()
+        if (os.getenv("COLLABS_OUTSIDE_GOOGLE_ACTOR_ID") or "").strip():
+            prov = "Apify Google actor"
+        elif cse_k and cse_cx:
+            prov = "Google Custom Search JSON API"
+        else:
+            prov = "Bing RSS"
+        raw_target = (filters or {}).get("outside_target_results")
+        if raw_target is None or str(raw_target).strip() == "":
+            raw_target = os.getenv("COLLABS_OUTSIDE_MAX_RESULTS", "80") or "80"
+        try:
+            target_n = max(10, min(30, int(raw_target)))
+        except Exception:
+            target_n = 30
+        dedup_txt = "dedupe=ON" if dedup_enabled else "dedupe=OFF"
+        STATE.add_log(f"Collabs ngoài Discovery: đang tìm brand ({prov}, {dedup_txt}, target={target_n})...")
+        offers = core.discover_collabs_outside_discovery_offers(filters)
+        STATE.add_log(f"Collabs ngoài Discovery: đã tìm được {len(offers)} brand hợp lệ.")
+        return offers
+
     base_url = (os.getenv("COLLABS_API_URL") or "").strip()
     if not base_url:
         raise RuntimeError("Thiếu COLLABS_API_URL trong cài đặt")
     core.enforce_fixed_fetch_defaults()
     max_pages_cap = core.collabs_max_pages_cap()
     page_size = core.DEFAULT_COLLABS_LIMIT
+    max_discovery_pages_per_run = 3
+    max_discovery_records_per_run = page_size * max_discovery_pages_per_run
     start_page = int(filters.get("start_page") or 1)
     if start_page < 1:
         start_page = 1
@@ -595,6 +629,7 @@ def fetch_offers_collabs(filters: dict) -> list:
     page = 1
     if start_page > 1:
         STATE.add_log(f"Collabs: bắt đầu từ trang {start_page}")
+    forced_end_page = start_page + max_discovery_pages_per_run - 1
     while True:
         STATE.control.wait_if_paused()
         if STATE.control.should_stop():
@@ -615,6 +650,13 @@ def fetch_offers_collabs(filters: dict) -> list:
         if page >= start_page:
             raw_nodes.extend(nodes)
             STATE.add_log(f"Collabs trang {page}: +{len(nodes)} brand (tổng {len(raw_nodes)})")
+            if len(raw_nodes) >= max_discovery_records_per_run:
+                raw_nodes = raw_nodes[:max_discovery_records_per_run]
+                STATE.add_log(
+                    f"Collabs: đạt giới hạn mỗi lần lọc {max_discovery_records_per_run} brand "
+                    f"(~{max_discovery_pages_per_run} trang), dừng phân trang."
+                )
+                break
             # Hiển thị tiến trình ngay trong pha crawl trang Collabs (0-25%).
             seen_pages = max(1, page - start_page + 1)
             _set_progress_floor(min(25.0, 5.0 + (seen_pages * 2.0)))
@@ -623,6 +665,12 @@ def fetch_offers_collabs(filters: dict) -> list:
         after = info.get("endCursor")
         if end_page is not None and page >= end_page:
             STATE.add_log(f"Collabs: đã tới trang kết thúc đã chọn: {end_page}")
+            break
+        if page >= forced_end_page:
+            STATE.add_log(
+                f"Collabs: chỉ lấy tối đa {max_discovery_pages_per_run} trang liên tiếp mỗi lần "
+                f"(trang {start_page} → {forced_end_page})."
+            )
             break
         if not has_next:
             break
@@ -776,7 +824,12 @@ def run_pipeline(settings: dict, min_traffic: int, filters: dict, source: str = 
     now = datetime.now()
     date_part = f"{now.day}-{now.month}-{now.year}"
     time_part = f"{now.hour}-{now.minute:02d}"
-    xlsx_name = f"{net_prefix}_page{export_start_page}-{export_end_page}_{date_part}_{time_part}.xlsx"
+    collabs_mode = str((filters or {}).get("discovery_mode") or "in_discovery").strip().lower()
+    if src == "collabs" and collabs_mode == "outside_discovery":
+        # File riêng cho luồng search Google ngoài Discovery.
+        xlsx_name = f"collabs_google_{now.month}-{now.year}_{time_part}.xlsx"
+    else:
+        xlsx_name = f"{net_prefix}_page{export_start_page}-{export_end_page}_{date_part}_{time_part}.xlsx"
     xlsx_path = BASE_DIR / xlsx_name
     if src == "goaffpro":
         header = list(core.GOAFF_CSV_HEADER)
@@ -1011,6 +1064,22 @@ def api_stop():
         STATE.status = "Đang dừng"
     STATE.add_log("Đang dừng...")
     return jsonify({"ok": True})
+
+
+@app.post("/api/collabs-outside/reset")
+def api_collabs_outside_reset():
+    removed: list[str] = []
+    errors: list[str] = []
+    for p in (core._outside_cursor_path(), core._outside_dedup_path()):
+        try:
+            if p.exists():
+                p.unlink()
+                removed.append(p.name)
+        except Exception as exc:
+            errors.append(f"{p.name}: {exc}")
+    if errors:
+        return jsonify({"ok": False, "error": "; ".join(errors), "removed": removed}), 500
+    return jsonify({"ok": True, "removed": removed})
 
 @app.post("/api/edge-cdp/start")
 def api_edge_cdp_start():

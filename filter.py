@@ -6,7 +6,7 @@ import re
 import sys
 import time
 from pathlib import Path
-from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
+from urllib.parse import parse_qsl, quote_plus, unquote, urlencode, urljoin, urlparse, urlunparse
 
 import requests
 
@@ -218,11 +218,24 @@ def apify_site_field(item: dict) -> str:
     """Tên site/domain trong item Apify (nhiều actor đặt tên khác nhau)."""
     if not item:
         return ""
+    # Chuẩn hoá map key lowercase để hỗ trợ actor trả key khác kiểu chữ.
+    low = {str(k).strip().lower(): v for k, v in item.items()}
     return (
         item.get("SiteName")
         or item.get("siteName")
         or item.get("Domain")
         or item.get("domain")
+        or item.get("Website")
+        or item.get("website")
+        or item.get("Url")
+        or item.get("url")
+        or item.get("Site")
+        or item.get("site")
+        or low.get("sitename")
+        or low.get("domain")
+        or low.get("website")
+        or low.get("url")
+        or low.get("site")
         or ""
     )
 
@@ -231,10 +244,26 @@ def engagement_from_item(item: dict) -> dict:
     """Khối engagement / hoặc Visits nằm ngang item."""
     if not item:
         return {}
-    eng = item.get("Engagments") or item.get("Engagements") or item.get("engagement")
+    low = {str(k).strip().lower(): v for k, v in item.items()}
+    eng = (
+        item.get("Engagments")
+        or item.get("Engagements")
+        or item.get("engagement")
+        or low.get("engagments")
+        or low.get("engagements")
+        or low.get("engagement")
+    )
     if isinstance(eng, dict) and eng:
         return eng
-    if item.get("Visits") is not None or item.get("VisitsFormatted") is not None:
+    # Một số actor để traffic nằm ngang item với key khác casing.
+    if (
+        item.get("Visits") is not None
+        or item.get("VisitsFormatted") is not None
+        or low.get("visits") is not None
+        or low.get("visitsformatted") is not None
+        or low.get("estimatedmonthlyvisits") is not None
+        or low.get("monthlyvisits") is not None
+    ):
         return item
     return {}
 
@@ -242,25 +271,56 @@ def engagement_from_item(item: dict) -> dict:
 def parse_visits_from_engagement(eng: dict) -> float:
     if not eng:
         return 0.0
-    raw = eng.get("Visits")
+    low = {str(k).strip().lower(): v for k, v in eng.items()} if isinstance(eng, dict) else {}
+    raw = eng.get("Visits") if isinstance(eng, dict) else None
     if raw is None:
-        raw = eng.get("EstimatedVisits") or eng.get("Traffic") or eng.get("MonthlyVisits")
+        raw = (
+            (eng.get("EstimatedVisits") if isinstance(eng, dict) else None)
+            or (eng.get("Traffic") if isinstance(eng, dict) else None)
+            or (eng.get("MonthlyVisits") if isinstance(eng, dict) else None)
+            or low.get("visits")
+            or low.get("estimatedvisits")
+            or low.get("traffic")
+            or low.get("monthlyvisits")
+            or low.get("estimatedmonthlyvisits")
+        )
     return parse_visits_value(raw)
 
 
 def estimated_monthly_visits_formatted(item: dict, eng: dict | None = None) -> str:
     """Chuỗi traffic theo tháng từ Apify, ưu tiên field gốc trên item."""
     src_eng = eng if isinstance(eng, dict) else {}
+    item_low = {str(k).strip().lower(): v for k, v in (item or {}).items()}
+    eng_low = {str(k).strip().lower(): v for k, v in src_eng.items()}
     candidates = (
         (item or {}).get("EstimatedMonthlyVisitsFormatted"),
         src_eng.get("EstimatedMonthlyVisitsFormatted"),
         (item or {}).get("EstimatedMonthlyVisits"),
         src_eng.get("EstimatedMonthlyVisits"),
+        item_low.get("estimatedmonthlyvisitsformatted"),
+        eng_low.get("estimatedmonthlyvisitsformatted"),
+        item_low.get("estimatedmonthlyvisits"),
+        eng_low.get("estimatedmonthlyvisits"),
     )
     for v in candidates:
         if v is not None and str(v).strip():
             return format_estimated_monthly_visits(v)
     return ""
+
+
+def visits_formatted_from_engagement(eng: dict | None) -> str:
+    if not isinstance(eng, dict) or not eng:
+        return ""
+    low = {str(k).strip().lower(): v for k, v in eng.items()}
+    raw = eng.get("VisitsFormatted") or low.get("visitsformatted")
+    if raw is not None and str(raw).strip():
+        return str(raw).strip()
+    visits = parse_visits_from_engagement(eng)
+    if visits <= 0:
+        return ""
+    if float(visits).is_integer():
+        return str(int(visits))
+    return f"{visits:.2f}".rstrip("0").rstrip(".")
 
 
 def format_estimated_monthly_visits(raw) -> str:
@@ -1397,6 +1457,642 @@ def discover_collabs_signup_url(site_url: str, timeout_sec: int = 20) -> str:
     return default_signup
 
 
+def _extract_url_from_ddg_href(href: str) -> str:
+    h = str(href or "").strip()
+    if not h:
+        return ""
+    if h.startswith("http://") or h.startswith("https://"):
+        return h
+    # DuckDuckGo thường bọc URL trong tham số uddg.
+    if "uddg=" in h:
+        try:
+            q = dict(parse_qsl(urlparse(h).query, keep_blank_values=True))
+            raw = unquote(str(q.get("uddg") or "").strip())
+            if raw.startswith("http://") or raw.startswith("https://"):
+                return raw
+        except Exception:
+            return ""
+    return ""
+
+
+def _fetch_duckduckgo_result_urls(query: str, max_results: int = 80, timeout_sec: int = 20, delay_ms: int = 350) -> list[str]:
+    q = str(query or "").strip()
+    if not q:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    offset = 0
+    page_size = 30
+    while len(out) < max_results:
+        search_url = f"https://html.duckduckgo.com/html/?q={quote_plus(q)}&s={offset}"
+        try:
+            res = requests.get(
+                search_url,
+                timeout=timeout_sec,
+                headers={
+                    "user-agent": os.getenv(
+                        "COLLABS_OUTSIDE_UA",
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                        "(KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
+                    )
+                },
+            )
+            if not res.ok:
+                break
+            html = res.text or ""
+        except Exception:
+            break
+
+        hrefs = re.findall(r"""class=["']result__a["'][^>]*href=["']([^"']+)["']""", html, flags=re.I)
+        if not hrefs:
+            # Fallback parser: lấy mọi anchor có link ra ngoài.
+            hrefs = re.findall(r"""<a[^>]*href=["']([^"']+)["']""", html, flags=re.I)
+        added = 0
+        for href in hrefs:
+            final_url = _extract_url_from_ddg_href(href)
+            if not final_url:
+                continue
+            p = urlparse(final_url)
+            if not p.netloc:
+                continue
+            norm = f"{p.scheme or 'https'}://{p.netloc}{p.path or '/'}"
+            low = norm.lower()
+            if any(x in low for x in ("facebook.com", "instagram.com", "tiktok.com", "youtube.com", "x.com/", "twitter.com/")):
+                continue
+            if norm in seen:
+                continue
+            seen.add(norm)
+            out.append(norm)
+            added += 1
+            if len(out) >= max_results:
+                break
+        if added == 0:
+            break
+        offset += page_size
+        if delay_ms > 0:
+            time.sleep(delay_ms / 1000.0)
+    return out
+
+
+def _fetch_bing_rss_result_urls(query: str, max_results: int = 80, timeout_sec: int = 20) -> list[str]:
+    q = str(query or "").strip()
+    if not q:
+        return []
+    try:
+        res = requests.get(
+            f"https://www.bing.com/search?q={quote_plus(q)}&format=rss",
+            timeout=timeout_sec,
+            headers={
+                "user-agent": os.getenv(
+                    "COLLABS_OUTSIDE_UA",
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
+                )
+            },
+        )
+        if not res.ok:
+            return []
+        xml = res.text or ""
+    except Exception:
+        return []
+
+    out: list[str] = []
+    seen: set[str] = set()
+    links = re.findall(r"<link>(.*?)</link>", xml, flags=re.I | re.S)
+    for lk in links:
+        url = str(lk or "").strip()
+        if not (url.startswith("http://") or url.startswith("https://")):
+            continue
+        p = urlparse(url)
+        if not p.netloc:
+            continue
+        low = (p.netloc + (p.path or "")).lower()
+        if "bing.com/search" in low:
+            continue
+        if any(x in low for x in ("facebook.com", "instagram.com", "tiktok.com", "youtube.com", "x.com/", "twitter.com/")):
+            continue
+        norm = f"{p.scheme or 'https'}://{p.netloc}{p.path or '/'}"
+        if norm in seen:
+            continue
+        seen.add(norm)
+        out.append(norm)
+        if len(out) >= max_results:
+            break
+    return out
+
+
+def _google_cse_credentials() -> tuple[str, str]:
+    """Trả về (api_key, cx) nếu đủ cấu hình Google Custom Search JSON API; ngược lại ('','')."""
+    key = (os.getenv("GOOGLE_CUSTOM_SEARCH_API_KEY") or os.getenv("GOOGLE_CSE_API_KEY") or "").strip()
+    cx = (os.getenv("GOOGLE_CUSTOM_SEARCH_ENGINE_ID") or os.getenv("GOOGLE_CSE_CX") or "").strip()
+    return key, cx
+
+
+def _outside_cursor_path() -> Path:
+    return Path(os.getenv("COLLABS_OUTSIDE_CURSOR_FILE", str(BASE_DIR / ".collabs_outside_cursor.json")))
+
+
+def _outside_dedup_path() -> Path:
+    return Path(os.getenv("COLLABS_OUTSIDE_DEDUP_FILE", str(BASE_DIR / ".collabs_outside_seen_hosts.json")))
+
+
+def _outside_cursor_key(provider: str, query: str) -> str:
+    return f"{provider}::{(query or '').strip().lower()}"
+
+
+def _load_outside_cursor(provider: str, query: str) -> int:
+    p = _outside_cursor_path()
+    if not p.exists():
+        return 0
+    try:
+        payload = json.loads(p.read_text(encoding="utf-8-sig") or "{}")
+    except Exception:
+        return 0
+    if not isinstance(payload, dict):
+        return 0
+    cursors = payload.get("cursors") or {}
+    if not isinstance(cursors, dict):
+        return 0
+    raw = cursors.get(_outside_cursor_key(provider, query), 0)
+    try:
+        n = int(raw)
+    except Exception:
+        return 0
+    return max(0, n)
+
+
+def _save_outside_cursor(provider: str, query: str, next_offset: int) -> None:
+    p = _outside_cursor_path()
+    data: dict = {}
+    try:
+        if p.exists():
+            loaded = json.loads(p.read_text(encoding="utf-8-sig") or "{}")
+            if isinstance(loaded, dict):
+                data = loaded
+    except Exception:
+        data = {}
+    cursors = data.get("cursors")
+    if not isinstance(cursors, dict):
+        cursors = {}
+    cursors[_outside_cursor_key(provider, query)] = max(0, int(next_offset))
+    data["cursors"] = cursors
+    data["updatedAt"] = time.time()
+    try:
+        p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        return
+
+
+def _fetch_google_result_urls_via_custom_search_api(
+    query: str, max_results: int = 80, timeout_sec: int = 20
+) -> list[str]:
+    """
+    Lấy URL organic qua Google Custom Search JSON API (hỗ trợ cú pháp Google: inurl, OR, ngoặc, …).
+    Yêu cầu .env:
+    - GOOGLE_CUSTOM_SEARCH_API_KEY (hoặc GOOGLE_CSE_API_KEY)
+    - GOOGLE_CUSTOM_SEARCH_ENGINE_ID (hoặc GOOGLE_CSE_CX — Search engine ID)
+
+    Mỗi request tối đa 10 kết quả; API không trả quá 100 kết quả cho một truy vấn (phân trang start 1..91).
+    """
+    api_key, cx = _google_cse_credentials()
+    if not api_key or not cx:
+        raise RuntimeError(
+            "Thiếu GOOGLE_CUSTOM_SEARCH_API_KEY hoặc GOOGLE_CUSTOM_SEARCH_ENGINE_ID (cx) cho Google CSE."
+        )
+    q = str(query or "").strip()
+    if not q:
+        return []
+    max_results = max(1, min(300, int(max_results)))
+    # JSON API: tổng chỉ mục tối đa ~100; mỗi lần gọi num <= 10 và start + num <= 101.
+    cap = min(max_results, 100)
+    base = "https://www.googleapis.com/customsearch/v1"
+    out: list[str] = []
+    seen: set[str] = set()
+    start = 1
+    ua = (os.getenv("COLLABS_OUTSIDE_UA") or "").strip() or (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
+    )
+    headers = {"User-Agent": ua, "Accept": "application/json"}
+    while len(out) < cap and start <= 100:
+        num = min(10, cap - len(out), max(0, 101 - start))
+        if num < 1:
+            break
+        params = {"key": api_key, "cx": cx, "q": q, "num": num, "start": start}
+        try:
+            res = requests.get(base, params=params, headers=headers, timeout=int(timeout_sec))
+        except requests.RequestException as e:
+            raise RuntimeError(f"Google Custom Search API: lỗi mạng — {e}") from e
+        if not res.ok:
+            snippet = (res.text or "")[:400]
+            if res.status_code == 429:
+                raise RuntimeError("Google Custom Search API hết quota (429). Thử lại sau hoặc kiểm tra billing.")
+            raise RuntimeError(f"Google Custom Search API lỗi HTTP {res.status_code}: {snippet}")
+        try:
+            data = res.json() if res.text else {}
+        except json.JSONDecodeError:
+            raise RuntimeError("Google Custom Search API trả nội dung không phải JSON.")
+        items = data.get("items") or []
+        if not items:
+            break
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            u = it.get("link")
+            if not isinstance(u, str):
+                continue
+            u = u.strip()
+            if not u.startswith(("http://", "https://")):
+                continue
+            p = urlparse(u)
+            if not p.netloc:
+                continue
+            low = (p.netloc + (p.path or "")).lower()
+            if any(
+                x in low
+                for x in ("facebook.com", "instagram.com", "tiktok.com", "youtube.com", "x.com/", "twitter.com/")
+            ):
+                continue
+            norm = f"{p.scheme or 'https'}://{p.netloc}{p.path or '/'}"
+            if norm in seen:
+                continue
+            seen.add(norm)
+            out.append(norm)
+            if len(out) >= cap:
+                break
+        start += len(items)
+        if len(items) < num:
+            break
+        time.sleep(0.12)
+    return out
+
+
+def _apify_run_actor(actor_id: str, run_input: dict, wait_secs: int = 180, token: str | None = None) -> str:
+    """
+    Run Apify actor và trả về defaultDatasetId.
+    """
+    tok = (str(token or "").strip() or (os.getenv("APIFY_TOKEN") or "").strip())
+    if not tok:
+        raise RuntimeError("Thiếu APIFY_TOKEN trong .env (cần để chạy Apify actor).")
+    act = str(actor_id or "").strip()
+    if not act:
+        raise RuntimeError("Thiếu COLLABS_OUTSIDE_GOOGLE_ACTOR_ID (Apify actor id).")
+    # Apify API expects "username~actorname" or actorId, not "username/actorname".
+    if "/" in act and "~" not in act:
+        parts = [p for p in act.split("/") if p]
+        if len(parts) >= 2:
+            act = f"{parts[0]}~{parts[1]}"
+    url = f"https://api.apify.com/v2/acts/{act}/runs?token={tok}&waitForFinish={int(wait_secs)}"
+    res = requests.post(url, json=run_input, timeout=max(30, int(wait_secs) + 30))
+    if not res.ok:
+        raise RuntimeError(f"Apify run actor lỗi HTTP {res.status_code}: {res.text[:300]}")
+    body = res.json() if res.text else {}
+    data = (body or {}).get("data") or {}
+    status = str(data.get("status") or "").upper()
+    run_id = str(data.get("id") or "").strip()
+    # Một số lần waitForFinish trả READY/RUNNING (queue/tải cao). Poll thêm thay vì fail ngay.
+    if status in {"READY", "RUNNING"} and run_id:
+        deadline = time.monotonic() + max(10, int(wait_secs))
+        while time.monotonic() < deadline:
+            time.sleep(2.0)
+            st_url = f"https://api.apify.com/v2/actor-runs/{run_id}?token={tok}"
+            st = requests.get(st_url, timeout=30)
+            if not st.ok:
+                continue
+            st_body = st.json() if st.text else {}
+            st_data = (st_body or {}).get("data") or {}
+            status = str(st_data.get("status") or "").upper()
+            if status in {"SUCCEEDED", "FAILED", "ABORTED", "TIMED-OUT"}:
+                data = st_data
+                break
+    if status != "SUCCEEDED":
+        raise RuntimeError(f"Apify actor chưa SUCCEEDED (status={status})")
+    dataset_id = str(data.get("defaultDatasetId") or "").strip()
+    if not dataset_id:
+        raise RuntimeError("Apify actor không trả defaultDatasetId")
+    return dataset_id
+
+
+def _extract_urls_from_google_actor_items(items: list) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    if not isinstance(items, list):
+        return []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        # 1) Một số actor trả thẳng link/url
+        for k in ("url", "link", "resultUrl", "result_url"):
+            v = it.get(k)
+            if isinstance(v, str) and v.strip().startswith(("http://", "https://")):
+                u = v.strip()
+                if u not in seen:
+                    seen.add(u)
+                    out.append(u)
+        # 2) google-search-scraper thường trả organicResults:[{url,...}]
+        org = it.get("organicResults") or it.get("organic_results") or []
+        if isinstance(org, list):
+            for r in org:
+                if not isinstance(r, dict):
+                    continue
+                u = r.get("url") or r.get("link")
+                if isinstance(u, str) and u.strip().startswith(("http://", "https://")):
+                    uu = u.strip()
+                    if uu not in seen:
+                        seen.add(uu)
+                        out.append(uu)
+    return out
+
+
+def _fetch_google_result_urls_via_apify(
+    query: str,
+    max_results: int = 80,
+    timeout_sec: int = 180,
+    start_page: int = 1,
+    end_page: int | None = None,
+) -> list[str]:
+    """
+    Lấy URL từ Google Search theo đúng cú pháp (inurl/OR/ngoặc) bằng Apify actor.
+    Yêu cầu env:
+    - COLLABS_OUTSIDE_APIFY_TOKEN (khuyến nghị) hoặc APIFY_TOKEN
+    - COLLABS_OUTSIDE_GOOGLE_ACTOR_ID (vd: apify/google-search-scraper)
+    """
+    q = str(query or "").strip()
+    if not q:
+        return []
+    actor_id = (os.getenv("COLLABS_OUTSIDE_GOOGLE_ACTOR_ID") or "").strip()
+    search_token = (os.getenv("COLLABS_OUTSIDE_APIFY_TOKEN") or "").strip()
+    if not search_token:
+        # Fallback về APIFY_TOKEN để không phá luồng cũ, nhưng khuyến nghị tách token.
+        search_token = (os.getenv("APIFY_TOKEN") or "").strip()
+    # Google actor hiện bị giới hạn 10 kết quả/trang (theo cập nhật Google), nên dùng maxPagesPerQuery để tăng tổng.
+    cap = max(10, min(300, int(max_results)))
+    per_page = 10
+    if start_page < 1:
+        start_page = 1
+    if end_page is not None and end_page < start_page:
+        end_page = start_page
+    # Tối ưu chi phí theo range trang người dùng chọn:
+    # - Nếu có end_page: chỉ cần số bản ghi tương ứng với số trang trong range.
+    # - Actor vẫn crawl từ trang 1..maxPagesPerQuery, nhưng ta không kéo dư theo max_results toàn cục.
+    if end_page is not None:
+        # Cần fetch đủ tới cuối range để slice chính xác (vd trang 4-5 cần tối thiểu 50 kết quả thô).
+        raw_needed_for_slice = max(10, int(end_page) * per_page)
+        # Ưu tiên đúng phạm vi trang user chọn: nếu MAX_RESULTS thấp hơn mức cần thiết,
+        # tự nâng lên để không bị rỗng/thiếu dữ liệu khi chọn page sâu (vd 6-8).
+        cap = max(cap, raw_needed_for_slice)
+        cap = min(cap, 300)
+        max_pages = max(1, min(20, int(end_page)))
+    else:
+        max_pages = max(1, min(20, max(1, (cap + per_page - 1) // per_page)))
+    # Actor hiện tại yêu cầu input.queries là string.
+    run_input = {
+        "queries": q,
+        "maxPagesPerQuery": max_pages,
+        "resultsPerPage": per_page,
+        "includeUnfilteredResults": False,
+        "languageCode": "en",
+        "mobileResults": False,
+    }
+    dataset_id = _apify_run_actor(actor_id, run_input, wait_secs=int(timeout_sec), token=search_token)
+    if not dataset_id:
+        return []
+    items = apify_list_items(dataset_id, token=search_token)
+    urls = _extract_urls_from_google_actor_items(items)
+    # chuẩn hóa + giới hạn
+    out: list[str] = []
+    seen: set[str] = set()
+    for u in urls:
+        p = urlparse(u)
+        if not p.netloc:
+            continue
+        norm = f"{p.scheme or 'https'}://{p.netloc}{p.path or '/'}"
+        if norm in seen:
+            continue
+        seen.add(norm)
+        out.append(norm)
+        if len(out) >= cap:
+            break
+    # giả lập phân trang Google: 10 kết quả / trang
+    if start_page > 1 or end_page is not None:
+        s = (start_page - 1) * 10
+        e = (int(end_page) * 10) if end_page is not None else len(out)
+        out = out[s:e]
+    return out
+
+
+def discover_collabs_outside_discovery_offers(filters: dict | None = None) -> list[dict]:
+    """
+    Lọc Collabs ngoài Discovery từ web search:
+    - Tìm candidate URL theo query.
+    - Verify trang có tín hiệu collab/apply.
+    - Tìm apply URL cuối bằng discover_collabs_signup_url.
+    """
+    f = filters if isinstance(filters, dict) else {}
+    raw_query = str(
+        f.get("outside_query")
+        or os.getenv("COLLABS_OUTSIDE_QUERY")
+        or '(inurl:pages/collab OR inurl:pages/collabs) ("apply now")'
+    ).strip()
+    # Cú pháp Google (inurl/OR/ngoặc): dùng Apify actor, Google CSE JSON API, hoặc Bing (hỗ trợ một phần).
+    query_list = [raw_query] if raw_query else []
+
+    # outside_target_results (UI mới) ưu tiên hơn .env; fallback về COLLABS_OUTSIDE_MAX_RESULTS.
+    raw_target = f.get("outside_target_results")
+    if raw_target is None or str(raw_target).strip() == "":
+        raw_target = os.getenv("COLLABS_OUTSIDE_MAX_RESULTS", "80") or "80"
+    try:
+        max_results = int(raw_target)
+    except Exception:
+        max_results = int(os.getenv("COLLABS_OUTSIDE_MAX_RESULTS", "80") or "80")
+    max_results = max(10, min(30, max_results))
+    max_results = (max_results // 10) * 10
+    if max_results < 10:
+        max_results = 10
+    # Pool để cursor quay vòng; cho phép >300 nếu cần.
+    raw_pool = os.getenv("COLLABS_OUTSIDE_CURSOR_POOL", "300") or "300"
+    try:
+        cursor_pool = int(raw_pool)
+    except Exception:
+        cursor_pool = 300
+    cursor_pool = max(max_results, min(5000, cursor_pool))
+    verify_timeout_sec = int(os.getenv("COLLABS_OUTSIDE_VERIFY_TIMEOUT_SEC", "20") or "20")
+    if not query_list:
+        return []
+    query_text = query_list[0]
+    provider = (
+        "apify"
+        if (os.getenv("COLLABS_OUTSIDE_GOOGLE_ACTOR_ID") or "").strip()
+        else ("google_cse" if _google_cse_credentials()[0] and _google_cse_credentials()[1] else "bing")
+    )
+    # Google CSE có trần ~100 kết quả/query -> giới hạn pool hiệu lực để tránh batch rỗng.
+    effective_pool = min(cursor_pool, 100) if provider == "google_cse" else cursor_pool
+    cursor_offset = _load_outside_cursor(provider, query_text)
+    # Mỗi lần chạy lấy batch kế tiếp đúng bằng outside_target_results (max_results).
+    start_idx = cursor_offset % effective_pool
+    if start_idx + max_results > effective_pool:
+        # Chạm giới hạn pool thì quay về page đầu cho lần này.
+        start_idx = 0
+    end_idx = start_idx + max_results
+    start_page = (start_idx // 10) + 1
+    end_page = max(start_page, (end_idx + 9) // 10)
+    candidates: list[str] = []
+    seen_candidate: set[str] = set()
+    # Thứ tự ưu tiên: Apify Google actor → Google Custom Search JSON API → Bing RSS.
+    # CSE hỗ trợ cú pháp Google (inurl/OR/…) và không cần Apify; Bing chỉ fallback khi không cấu hình Google.
+    cse_key, cse_cx = _google_cse_credentials()
+    if provider == "apify":
+        fetch_budget = max(max_results, end_page * 10)
+        urls = _fetch_google_result_urls_via_apify(
+            query_text,
+            max_results=fetch_budget,
+            timeout_sec=180,
+            start_page=start_page,
+            end_page=end_page,
+        )
+    elif provider == "google_cse" and cse_key and cse_cx:
+        fetch_budget = max(max_results, min(100, end_idx))
+        urls = _fetch_google_result_urls_via_custom_search_api(
+            query_text, max_results=fetch_budget, timeout_sec=verify_timeout_sec
+        )
+        urls = urls[start_idx:end_idx]
+    elif cse_key or cse_cx:
+        raise RuntimeError(
+            "Collabs ngoài Discovery: thiếu một trong hai — GOOGLE_CUSTOM_SEARCH_API_KEY và "
+            "GOOGLE_CUSTOM_SEARCH_ENGINE_ID (hoặc GOOGLE_CSE_API_KEY / GOOGLE_CSE_CX)."
+        )
+    else:
+        fetch_budget = max(max_results, end_idx)
+        urls = _fetch_bing_rss_result_urls(query_text, max_results=fetch_budget, timeout_sec=verify_timeout_sec)
+        urls = urls[start_idx:end_idx]
+    for u in urls:
+        if u in seen_candidate:
+            continue
+        seen_candidate.add(u)
+        candidates.append(u)
+
+    # Dedupe giữa các lần chạy (theo host). Bật bằng env:
+    # - COLLABS_OUTSIDE_DEDUP_PERSIST=1
+    # - (tuỳ chọn) COLLABS_OUTSIDE_DEDUP_FILE=.collabs_outside_seen_hosts.json
+    dedup_enabled = str(os.getenv("COLLABS_OUTSIDE_DEDUP_PERSIST", "")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+        "enable",
+        "enabled",
+    }
+    seen_hosts_persist: set[str] = set()
+    dedup_path = _outside_dedup_path()
+    if dedup_enabled:
+        try:
+            if dedup_path.exists():
+                payload = json.loads(dedup_path.read_text(encoding="utf-8-sig") or "{}")
+                arr = payload.get("hosts") if isinstance(payload, dict) else payload
+                if isinstance(arr, list):
+                    seen_hosts_persist = {host_key(x) for x in arr if host_key(x)}
+        except Exception:
+            seen_hosts_persist = set()
+
+    offers: list[dict] = []
+    seen_host: set[str] = set()
+    added_hosts: set[str] = set()
+    for url in candidates:
+        hk = host_key(url)
+        if not hk or hk in seen_host:
+            continue
+        if dedup_enabled and hk in seen_hosts_persist:
+            continue
+        seen_host.add(hk)
+        try:
+            res = requests.get(url, timeout=verify_timeout_sec)
+            if not res.ok:
+                continue
+            html = res.text or ""
+        except Exception:
+            continue
+
+        low_url = url.lower()
+        must_path = ("/pages/collab" in low_url) or ("/pages/collabs" in low_url)
+        # Đúng tiêu chí user: trang phải có "apply now" (case-insensitive) hoặc biến thể apply-now.
+        low_html = (html or "").lower()
+        must_apply_now = ("apply now" in low_html) or ("apply-now" in low_html)
+        if not must_path:
+            continue
+        if not must_apply_now:
+            continue
+
+        looks_like = _collabs_page_looks_like_signup(html, url)
+        low_url = url.lower()
+        weak_signal_url = any(k in low_url for k in ("/pages/collab", "/pages/collabs", "affiliate", "ambassador", "partner"))
+        if not looks_like and not weak_signal_url:
+            continue
+
+        apply_url = discover_collabs_signup_url(url, timeout_sec=verify_timeout_sec)
+        if not apply_url:
+            continue
+
+        brand_guess = hk.split(".")[0].replace("-", " ").replace("_", " ").title()
+        offers.append(
+            {
+                "brand": brand_guess,
+                "url": f"https://{hk}",
+                "offer": "",
+                "cookieDays": "",
+                "client_url": apply_url,
+                "offer_id": hk,
+                "shop_id": "",
+                "program_id": "",
+                "mkp_listing_id": hk,
+                "commission_type": "",
+                "category": "Outside Discovery",
+                "collabs_product_category_code": "",
+                "epc": "",
+                "payments": "",
+                "currency": "",
+                "payout_rate": "",
+                "approval_rate": "",
+                "offer_score": "",
+                "recommend_score": "",
+                "application_review": "",
+                "promotion_details": [],
+                "target_audience_customer_channels": [],
+                "target_audience_locations": [],
+                "target_audience_ages": [],
+                "target_audience_genders": [],
+                "can_apply_offer": None,
+                "is_applied_offer": None,
+                "collabs_partnership_status": "",
+                "collabs_partnership_state": "",
+                "collabs_saved": None,
+                "collabs_previously_purchased": None,
+                "collabs_target_countries": "",
+                "collabs_logo_url": "",
+                "collabs_images": "",
+                "collabs_shopify_store_id": "",
+                "collabs_holding_period": "",
+            }
+        )
+        if dedup_enabled:
+            added_hosts.add(hk)
+
+    if dedup_enabled and added_hosts:
+        try:
+            merged = sorted(set(seen_hosts_persist) | set(added_hosts))
+            # giữ tối đa 50k hosts để tránh file quá lớn
+            merged = merged[-50000:]
+            dedup_path.write_text(
+                json.dumps({"updatedAt": time.time(), "hosts": merged}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+    # Chỉ cập nhật cursor sau khi đã xử lý xong batch để tránh mất lượt khi lỗi giữa chừng.
+    _save_outside_cursor(provider, query_text, end_idx % effective_pool)
+    return offers
+
+
 # Trạng thái traffic so với ngưỡng (CSV + log)
 STATUS_TRAFFIC_OK = "ĐẠT"
 STATUS_TRAFFIC_FAIL = "CHƯA ĐẠT"
@@ -1543,8 +2239,6 @@ COLLABS_CSV_HEADER = [
     "Hoa hồng mạng lưới",
     "Thời gian giữ đơn",
     "Danh mục",
-    "Trạng thái hợp tác",
-    "Tình trạng hợp tác",
     "Đã lưu",
     "Quốc gia mục tiêu",
     "Traffic (hiển thị)",
@@ -1661,6 +2355,7 @@ def build_refersion_csv_row(offer: dict, item: dict, status: str) -> list:
 def build_collabs_csv_row(offer: dict, item: dict, status: str) -> list:
     eng = engagement_from_item(item)
     estimated_monthly = estimated_monthly_visits_formatted(item, eng)
+    visits_display = visits_formatted_from_engagement(eng)
     website = str(offer.get("url", "") or "").strip()
     apply_url = str(offer.get("client_url", "") or "").strip()
     if not apply_url and website:
@@ -1676,11 +2371,9 @@ def build_collabs_csv_row(offer: dict, item: dict, status: str) -> list:
         offer.get("offer", ""),
         format_collabs_holding_period(offer.get("collabs_holding_period", "")),
         offer.get("category", ""),
-        offer.get("collabs_partnership_status", ""),
-        offer.get("collabs_partnership_state", ""),
         fmt_yes_no_bool_like(offer.get("collabs_saved")),
         offer.get("collabs_target_countries", ""),
-        eng.get("VisitsFormatted", ""),
+        visits_display,
         estimated_monthly,
         eng.get("PagePerVisit", ""),
         format_percent_cell(eng.get("BounceRate", "")),
@@ -1712,7 +2405,10 @@ def write_xlsx_highlight_status(path: Path, header: list, rows: list, status_col
         ws.cell(row=1, column=c).fill = header_fill
     ok_values = {STATUS_TRAFFIC_OK, "GET", "ĐẠT"}
     for row in rows:
-        cells = list(row)
+        cells = [
+            ("N/A" if (v is None or (isinstance(v, str) and not v.strip())) else v)
+            for v in list(row)
+        ]
         ws.append(cells)
         r = ws.max_row
         for c in hyperlink_columns:
@@ -2284,8 +2980,8 @@ def check_apify_connection() -> str:
     return username
 
 
-def apify_list_items(dataset_id: str) -> list:
-    token = (os.getenv("APIFY_TOKEN") or "").strip()
+def apify_list_items(dataset_id: str, token: str | None = None) -> list:
+    tok = (str(token or "").strip() or (os.getenv("APIFY_TOKEN") or "").strip())
     http_retries = int(os.getenv("APIFY_HTTP_RETRIES", "3") or "3")
     if http_retries < 1:
         http_retries = 1
@@ -2309,7 +3005,7 @@ def apify_list_items(dataset_id: str) -> list:
     offset = 0
     limit = 1000
     while True:
-        url = f"https://api.apify.com/v2/datasets/{dataset_id}/items?token={token}&offset={offset}&limit={limit}&clean=true"
+        url = f"https://api.apify.com/v2/datasets/{dataset_id}/items?token={tok}&offset={offset}&limit={limit}&clean=true"
         res = _get_with_retry(url, read_timeout_sec=120)
         if not res.ok:
             raise RuntimeError(f"Apify list items lỗi HTTP {res.status_code}: {res.text[:300]}")

@@ -53,6 +53,16 @@
               <input id="APIFY_TOKEN" class="secret-field-input token-apify" type="password" spellcheck="false" autocomplete="off" />
             </div>
           </label>
+          <label class="form-field-label">
+            <span class="form-field-caption">Token Apify (Search Google Collabs) — COLLABS_OUTSIDE_APIFY_TOKEN</span>
+            <div class="secret-field-row" data-secret-for="COLLABS_OUTSIDE_APIFY_TOKEN">
+              <button type="button" class="secret-eye-btn" aria-expanded="false" aria-label="Hiện để chỉnh sửa" title="Hiện / ẩn để sửa">
+                <svg class="eye-icon eye-icon--shut" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                <svg class="eye-icon eye-icon--open" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              </button>
+              <input id="COLLABS_OUTSIDE_APIFY_TOKEN" class="secret-field-input token-apify" type="password" spellcheck="false" autocomplete="off" />
+            </div>
+          </label>
         </div>
         <h3 class="settings-sub" data-settings-source="uppromote">Uppromote</h3>
         <div class="form-grid" data-settings-source="uppromote">
@@ -183,11 +193,18 @@
       <div class="card">
         <h2>Chạy — Shopify Collabs</h2>
         <div class="form-grid compact">
+          <label>Chế độ lọc Collabs
+            <select id="collabsDiscoveryMode">
+              <option value="in_discovery">Lọc trong Discovery</option>
+              <option value="outside_discovery">Lọc từ Google Search</option>
+            </select>
+          </label>
           <label>Ngưỡng traffic tối thiểu<input id="minTrafficCb" type="number" value="9000" /></label>
-          <label>Trang bắt đầu<input id="startPageCb" type="number" min="1" value="1" /></label>
-          <label>Trang kết thúc<input id="endPageCb" type="text" inputmode="numeric" autocomplete="off" placeholder="1 — để trống = tới trang cuối API" /></label>
-          <label>Hoa hồng tối thiểu (%)<input id="minCommissionCb" type="number" step="0.01" /></label>
-          <div class="filter-field-full">
+          <label class="collabs-in-discovery-only">Trang bắt đầu<input id="startPageCb" type="number" min="1" value="1" /></label>
+          <label class="collabs-in-discovery-only">Trang kết thúc<input id="endPageCb" type="text" inputmode="numeric" autocomplete="off" placeholder="1 — để trống = tới trang cuối API" /></label>
+          <label class="collabs-in-discovery-only">Hoa hồng tối thiểu (%)<input id="minCommissionCb" type="number" step="0.01" /></label>
+          <label class="collabs-outside-discovery-only">Số kết quả mục tiêu<input id="outsideTargetResultsCb" type="number" min="10" max="30" step="10" value="30" /></label>
+          <div class="filter-field-full collabs-in-discovery-only">
             <label class="form-field-caption">Danh mục</label>
             <div class="multi-select" data-multi-label="Category Collabs">
               <button type="button" class="multi-select-btn" aria-expanded="false" aria-haspopup="listbox">
@@ -222,6 +239,7 @@
 
         <div class="actions">
           <button class="btn primary" id="runBtnCollabs">Lọc &amp; xuất Excel</button>
+          <button class="btn collabs-outside-discovery-only" id="resetOutsideStateBtn" type="button">Khôi phục</button>
           <button class="btn" id="pauseBtnCb" disabled>Tạm dừng</button>
           <button class="btn danger" id="stopBtnCb" disabled>Dừng</button>
         </div>

@@ -42,6 +42,7 @@ class RunControl:
 
 ENV_SAVE_KEY_ORDER = [
     "APIFY_TOKEN",
+    "COLLABS_OUTSIDE_APIFY_TOKEN",
     "UPPROMOTE_API_URL",
     "UPPROMOTE_BEARER_TOKEN",
     "UPPROMOTE_PER_PAGE",
@@ -62,6 +63,7 @@ ENV_SAVE_KEY_ORDER = [
 SECRET_ENV_KEYS = frozenset(
     {
         "APIFY_TOKEN",
+        "COLLABS_OUTSIDE_APIFY_TOKEN",
         "UPPROMOTE_BEARER_TOKEN",
         "GOAFFPRO_BEARER_TOKEN",
         "REFERSION_TOKEN",
@@ -75,6 +77,7 @@ SECRET_ENV_KEYS = frozenset(
 WEB_SETTINGS_SAVE_KEYS = frozenset(
     {
         "APIFY_TOKEN",
+        "COLLABS_OUTSIDE_APIFY_TOKEN",
         "UPPROMOTE_API_URL",
         "UPPROMOTE_BEARER_TOKEN",
         "UPPROMOTE_PER_PAGE",
@@ -175,6 +178,7 @@ def load_env_defaults():
     core.load_env_file(ENV_PATH)
     return {
         "APIFY_TOKEN": os.getenv("APIFY_TOKEN", ""),
+        "COLLABS_OUTSIDE_APIFY_TOKEN": os.getenv("COLLABS_OUTSIDE_APIFY_TOKEN", ""),
         "UPPROMOTE_API_URL": os.getenv("UPPROMOTE_API_URL", ""),
         "UPPROMOTE_BEARER_TOKEN": os.getenv("UPPROMOTE_BEARER_TOKEN", ""),
         "UPPROMOTE_PER_PAGE": str(core.clamp_offers_per_page(os.getenv("UPPROMOTE_PER_PAGE"))),

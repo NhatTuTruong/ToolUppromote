@@ -72,6 +72,7 @@ let pollStatusBusy = false;
 /** Khớp với ô nhập trong templates/index.html — không gồm AFF_LICENSE_* (chỉnh trong .env, không có field trên web). */
 const settingKeys = [
   "APIFY_TOKEN",
+  "COLLABS_OUTSIDE_APIFY_TOKEN",
   "UPPROMOTE_API_URL",
   "UPPROMOTE_BEARER_TOKEN",
   "UPPROMOTE_PER_PAGE",
@@ -97,6 +98,7 @@ function clampOffersPerPageField(id) {
 /** Không .trim() — giữ nguyên JWT/Bearer (chỉ chuẩn hóa xuống dòng Windows). */
 const SECRET_SETTING_KEYS = new Set([
   "APIFY_TOKEN",
+  "COLLABS_OUTSIDE_APIFY_TOKEN",
   "UPPROMOTE_BEARER_TOKEN",
   "GOAFFPRO_BEARER_TOKEN",
   "REFERSION_TOKEN",
@@ -580,6 +582,17 @@ function bindMultiSelectDropdowns() {
   }
 }
 
+function updateCollabsDiscoveryModeUI() {
+  const mode = $("collabsDiscoveryMode")?.value?.trim() || "in_discovery";
+  const isOutside = mode === "outside_discovery";
+  document.querySelectorAll(".collabs-in-discovery-only").forEach((el) => {
+    el.style.display = isOutside ? "none" : "";
+  });
+  document.querySelectorAll(".collabs-outside-discovery-only").forEach((el) => {
+    el.style.display = isOutside ? "" : "none";
+  });
+}
+
 function collectFilters(source) {
   if (source === "goaffpro") {
     return {
@@ -602,10 +615,14 @@ function collectFilters(source) {
     };
   }
   if (source === "collabs") {
+    const discoveryMode = $("collabsDiscoveryMode")?.value?.trim() || "in_discovery";
+    const outTarget = $("outsideTargetResultsCb")?.value?.trim() || "60";
     return {
-      start_page: $("startPageCb").value.trim(),
-      end_page: $("endPageCb").value.trim(),
-      min_commission: $("minCommissionCb").value.trim(),
+      discovery_mode: discoveryMode,
+      start_page: $("startPageCb")?.value?.trim() || "1",
+      end_page: $("endPageCb")?.value?.trim() || "",
+      outside_target_results: outTarget,
+      min_commission: $("minCommissionCb")?.value?.trim() || "",
       min_cookie: "",
       currency: "",
       application_review: "",
@@ -687,6 +704,23 @@ async function togglePause() {
 async function stopRun() {
   await fetch("/api/stop", { method: "POST" });
   await pollStatus();
+}
+
+async function resetCollabsOutsideState() {
+  const ok = window.confirm(
+    "Reset trạng thái ngoài Discovery?\nThao tác sẽ xóa cursor và danh sách dedupe đã lưu."
+  );
+  if (!ok) return;
+  const res = await fetch("/api/collabs-outside/reset", { method: "POST" });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok || !body?.ok) {
+    alert(body?.error || "Không reset được trạng thái ngoài Discovery.");
+    return;
+  }
+  const removed = Array.isArray(body?.removed) && body.removed.length
+    ? `\nĐã xóa: ${body.removed.join(", ")}`
+    : "\nKhông có file trạng thái để xóa.";
+  alert(`Đã reset trạng thái ngoài Discovery.${removed}`);
 }
 
 async function downloadResultFile(name) {
@@ -1452,13 +1486,14 @@ async function loadResults() {
     btnDel.addEventListener("click", () => deleteResultFile(f.name));
     const isRunning = !!aa?.running;
     const sameFile = String(aa?.file || "") === String(f.name || "");
+    const isCollabsResult = /^collabs_/i.test(String(f.name || ""));
     const btnHistory = document.createElement("button");
     btnHistory.type = "button";
     btnHistory.className = "btn sm";
     btnHistory.textContent = "Lịch sử Apply";
     btnHistory.addEventListener("click", () => openApplyHistory(f.name));
     actions.appendChild(btnDl);
-    if (isAutoApplyCollabsEnabled()) {
+    if (isAutoApplyCollabsEnabled() && isCollabsResult) {
       const btnAutoApply = document.createElement("button");
       btnAutoApply.type = "button";
       btnAutoApply.className = "btn sm";
@@ -1498,11 +1533,16 @@ function bindEvents() {
   });
   bindMultiSelectDropdowns();
   bindSecretEyeButtons();
+  const cbMode = $("collabsDiscoveryMode");
+  if (cbMode) cbMode.addEventListener("change", updateCollabsDiscoveryModeUI);
+  updateCollabsDiscoveryModeUI();
   $("saveSettingsBtn").addEventListener("click", saveSettings);
   $("runBtnUppromote").addEventListener("click", () => runFilter("uppromote"));
   $("runBtnGoaffpro").addEventListener("click", () => runFilter("goaffpro"));
   $("runBtnRefersion").addEventListener("click", () => runFilter("refersion"));
   $("runBtnCollabs").addEventListener("click", () => runFilter("collabs"));
+  const resetOutsideBtn = $("resetOutsideStateBtn");
+  if (resetOutsideBtn) resetOutsideBtn.addEventListener("click", resetCollabsOutsideState);
   ["pauseBtn", "pauseBtnGp", "pauseBtnRf", "pauseBtnCb"].forEach((id) => {
     const el = $(id);
     if (el) el.addEventListener("click", togglePause);

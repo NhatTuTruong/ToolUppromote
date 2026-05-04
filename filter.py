@@ -2,7 +2,11 @@ import csv
 import ast
 import json
 import os
+import random
+from collections.abc import Callable
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import re
+import string
 import sys
 import time
 from pathlib import Path
@@ -20,6 +24,8 @@ if hasattr(sys.stderr, "reconfigure"):
 
 BASE_DIR = app_dir()
 ACTOR_ID = "aqPbs3KeH9aD8b22w"
+# Collabs outside discovery: fallback khi actor Similarweb mặc định không trả traffic (tắt bằng COLLABS_OUTSIDE_SIMILARWEB_FALLBACK_ACTOR="").
+DEFAULT_OUTSIDE_SIMILARWEB_FALLBACK_ACTOR = "radeance~similarweb-scraper"
 MIN_VISITS = int(os.getenv("MIN_VISITS", "9000") or "9000")
 TOP_KEYWORDS_COUNT = int(os.getenv("TOP_KEYWORDS_COUNT", "5") or "5")
 
@@ -1038,6 +1044,31 @@ def resolve_redirected_url(url: str, timeout_sec: int = 20) -> str:
         return raw
 
 
+def _collabs_html_has_outside_cta_phrases(low_html: str) -> bool:
+    """
+    CTA trên trang (low_html = HTML đã .lower()).
+    Logic **HOẶC**: chỉ cần xuất hiện **một** trong các nhóm dưới → True.
+    - apply now hoặc apply-now
+    - chứa chuỗi con join (joining, rejoin, joint, …)
+    - sign up
+    - partner with us
+    - get started
+    - join community
+    """
+    if not low_html:
+        return False
+    return any(
+        (
+            ("apply now" in low_html or "apply-now" in low_html),
+            ("join" in low_html),
+            ("sign up" in low_html),
+            ("partner with us" in low_html),
+            ("get started" in low_html),
+            ("join community" in low_html),
+        )
+    )
+
+
 def _collabs_page_looks_like_signup(html: str, url: str = "") -> bool:
     text = (html or "").lower()
     u = (url or "").lower()
@@ -1112,7 +1143,7 @@ def _collabs_page_looks_like_signup(html: str, url: str = "") -> bool:
     )
     if any(p in u for p in signup_path_hints):
         return True
-    if "apply now" in text or "apply-now" in text:
+    if _collabs_html_has_outside_cta_phrases(text):
         return True
     score = 0
     if "collab" in text:
@@ -1140,10 +1171,13 @@ def _collabs_page_has_signup_cta(html: str) -> bool:
     )
 
 
-def discover_collabs_signup_url(site_url: str, timeout_sec: int = 20) -> str:
+def discover_collabs_signup_url(
+    site_url: str, timeout_sec: int = 20, should_stop: Callable[[], bool] | None = None
+) -> str:
     """
     Tìm link đăng ký collabs từ domain chính.
     Ưu tiên /pages/collab; fallback quét homepage để tìm href chứa collab/affiliate.
+    Nếu should_stop trả True (vd. người dùng bấm hủy), trả chuỗi rỗng sớm.
     """
     raw = str(site_url or "").strip()
     if not raw:
@@ -1161,11 +1195,14 @@ def discover_collabs_signup_url(site_url: str, timeout_sec: int = 20) -> str:
         max_domain_search_sec = 5
     deadline = time.monotonic() + float(max_domain_search_sec)
 
+    def _halt() -> bool:
+        return should_stop is not None and bool(should_stop())
+
     def _remaining_sec() -> float:
         return max(0.0, deadline - time.monotonic())
 
     def _try_get(candidate_url: str) -> tuple[str, str]:
-        if _remaining_sec() <= 0:
+        if _halt() or _remaining_sec() <= 0:
             return "", ""
         try:
             # Mỗi request dùng timeout theo phần thời gian còn lại (không vượt quá timeout_sec).
@@ -1214,7 +1251,7 @@ def discover_collabs_signup_url(site_url: str, timeout_sec: int = 20) -> str:
             key=lambda u: (0 if "community" in u.lower() else (1 if "collab" in u.lower() else 2)),
         )
         for cand in quick_links[:60]:
-            if _remaining_sec() <= 0:
+            if _halt() or _remaining_sec() <= 0:
                 break
             final_url, html = _try_get(cand)
             if final_url and _collabs_page_has_signup_cta(html):
@@ -1266,6 +1303,8 @@ def discover_collabs_signup_url(site_url: str, timeout_sec: int = 20) -> str:
     # 1) Thử các path phổ biến trên cả https/http base. Tìm thấy là trả ngay.
     for b in _bases_to_try():
         for p in preferred_paths:
+            if _halt():
+                return ""
             if _remaining_sec() <= 0:
                 return default_signup
             final_url, text = _try_get(f"{b}{p}")
@@ -1275,6 +1314,8 @@ def discover_collabs_signup_url(site_url: str, timeout_sec: int = 20) -> str:
     # 2) Nếu homepage chưa có từ bước quét nhanh thì lấy lại.
     if not home_url:
         home_url, home_html = _try_get(base)
+    if _halt():
+        return ""
     if not home_url:
         return default_signup
 
@@ -1313,7 +1354,7 @@ def discover_collabs_signup_url(site_url: str, timeout_sec: int = 20) -> str:
         )
     )
     for cand in quick_candidates:
-        if _remaining_sec() <= 0:
+        if _halt() or _remaining_sec() <= 0:
             break
         low = cand.lower()
         if not any(k in low for k in ("community", "collab", "affiliate", "ambassador", "partner", "apply")):
@@ -1325,14 +1366,14 @@ def discover_collabs_signup_url(site_url: str, timeout_sec: int = 20) -> str:
     # 2.1) Thử lấy thêm candidate từ sitemap để bắt các slug tùy biến
     # kiểu /pages/westoncommunity (không nằm trong preferred_paths).
     def _try_sitemap_candidates() -> str:
-        if _remaining_sec() <= 0:
+        if _halt() or _remaining_sec() <= 0:
             return ""
         sitemap_urls = [f"{base}/sitemap.xml", f"{base}/sitemap_index.xml"]
         keywords = ("collab", "affiliate", "ambassador", "community", "partner", "creator", "influencer", "apply", "-com", "collaborations", "collaboration", "collaborator", "collaborators", "partnerships", "partnership", "partners", "partner", "partner-program", "partner-programs", "ambassadors", "ambassador", "ambassador-program", "ambassador-programs", "curious-community")
         seen_sitemaps = set()
 
         def _iter_locs_from_sitemap(sm_url: str, depth: int = 0) -> list[str]:
-            if _remaining_sec() <= 0:
+            if _halt() or _remaining_sec() <= 0:
                 return []
             s = str(sm_url or "").strip()
             if not s or s in seen_sitemaps:
@@ -1364,10 +1405,10 @@ def discover_collabs_signup_url(site_url: str, timeout_sec: int = 20) -> str:
             return out
 
         for sm in sitemap_urls:
-            if _remaining_sec() <= 0:
+            if _halt() or _remaining_sec() <= 0:
                 return ""
             for loc in _iter_locs_from_sitemap(sm):
-                if _remaining_sec() <= 0:
+                if _halt() or _remaining_sec() <= 0:
                     return ""
                 cand = str(loc or "").strip()
                 if not cand:
@@ -1429,6 +1470,8 @@ def discover_collabs_signup_url(site_url: str, timeout_sec: int = 20) -> str:
         return len(seen) < max_scan_pages
 
     while idx < len(queue) and _can_scan_more():
+        if _halt():
+            return ""
         if _remaining_sec() <= 0:
             return default_signup
         cur = queue[idx]
@@ -1454,6 +1497,8 @@ def discover_collabs_signup_url(site_url: str, timeout_sec: int = 20) -> str:
                 queue.append(nxt)
 
     # Không tìm thấy CTA trong ngân sách thời gian / số trang -> fallback default.
+    if _halt():
+        return ""
     return default_signup
 
 
@@ -1534,9 +1579,13 @@ def _fetch_duckduckgo_result_urls(query: str, max_results: int = 80, timeout_sec
     return out
 
 
-def _fetch_bing_rss_result_urls(query: str, max_results: int = 80, timeout_sec: int = 20) -> list[str]:
+def _fetch_bing_rss_result_urls(
+    query: str, max_results: int = 80, timeout_sec: int = 20, should_stop: Callable[[], bool] | None = None
+) -> list[str]:
     q = str(query or "").strip()
     if not q:
+        return []
+    if should_stop and should_stop():
         return []
     try:
         res = requests.get(
@@ -1644,7 +1693,10 @@ def _save_outside_cursor(provider: str, query: str, next_offset: int) -> None:
 
 
 def _fetch_google_result_urls_via_custom_search_api(
-    query: str, max_results: int = 80, timeout_sec: int = 20
+    query: str,
+    max_results: int = 80,
+    timeout_sec: int = 20,
+    should_stop: Callable[[], bool] | None = None,
 ) -> list[str]:
     """
     Lấy URL organic qua Google Custom Search JSON API (hỗ trợ cú pháp Google: inurl, OR, ngoặc, …).
@@ -1675,6 +1727,8 @@ def _fetch_google_result_urls_via_custom_search_api(
     )
     headers = {"User-Agent": ua, "Accept": "application/json"}
     while len(out) < cap and start <= 100:
+        if should_stop and should_stop():
+            return out
         num = min(10, cap - len(out), max(0, 101 - start))
         if num < 1:
             break
@@ -1810,6 +1864,7 @@ def _fetch_google_result_urls_via_apify(
     timeout_sec: int = 180,
     start_page: int = 1,
     end_page: int | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> list[str]:
     """
     Lấy URL từ Google Search theo đúng cú pháp (inurl/OR/ngoặc) bằng Apify actor.
@@ -1854,6 +1909,8 @@ def _fetch_google_result_urls_via_apify(
         "languageCode": "en",
         "mobileResults": False,
     }
+    if should_stop and should_stop():
+        return []
     dataset_id = _apify_run_actor(actor_id, run_input, wait_secs=int(timeout_sec), token=search_token)
     if not dataset_id:
         return []
@@ -1881,7 +1938,214 @@ def _fetch_google_result_urls_via_apify(
     return out
 
 
-def discover_collabs_outside_discovery_offers(filters: dict | None = None) -> list[dict]:
+# Gán trước khi gọi discover (vd. từ webapp) để log và tìm kiếm dùng cùng một chuỗi query.
+EFFECTIVE_OUTSIDE_QUERY_KEY = "_effective_outside_query"
+# Thống kê nội bộ (sau discover) — target batch vs URL ứng viên vs brand sau verify.
+OUTSIDE_DISCOVERY_STATS_KEY = "_outside_discovery_stats"
+
+# Query cố định cho Outside Discovery (Google); ghép với dạng random chữ (x OR y) trong build_random_outside_collabs_google_query.
+_OUTSIDE_COLLABS_GOOGLE_FIXED_QUERIES: tuple[str, ...] = (
+    'inurl:pages/collabs "apply"',
+    'inurl:pages/collabs "apply now"',
+    'inurl:pages/collabs "apply today"',
+    'inurl:pages/collabs "apply to join"',
+    'inurl:pages/collabs "join"',
+    'inurl:pages/collabs "join now"',
+    'inurl:pages/collabs "join today"',
+    'inurl:pages/collabs "join our program"',
+    'inurl:pages/collabs "join our community"',
+    'inurl:pages/collabs "join the program"',
+    'inurl:pages/collabs "become a creator"',
+    'inurl:pages/collabs "become a partner"',
+    'inurl:pages/collabs "become an affiliate"',
+    'inurl:pages/collabs "become an ambassador"',
+    'inurl:pages/collabs "creator program"',
+    'inurl:pages/collabs "affiliate program"',
+    'inurl:pages/collabs "ambassador program"',
+    'inurl:pages/collabs "influencer program"',
+    'inurl:pages/collabs "content creator"',
+    'inurl:pages/collabs "ugc creator"',
+    'inurl:pages/collab "apply"',
+    'inurl:pages/collab "apply now"',
+    'inurl:pages/collab "apply to join"',
+    'inurl:pages/collab "join"',
+    'inurl:pages/collab "join now"',
+    'inurl:pages/collab "join our community"',
+    'inurl:pages/collab "join the program"',
+    'inurl:pages/collab "become an affiliate"',
+    'inurl:pages/collab "become a creator"',
+    'inurl:pages/collab "creator program"',
+    'inurl:pages/collab "affiliate program"',
+    'inurl:pages/collab "ambassador program"',
+    'inurl:pages/collab "ugc creator"',
+    'inurl:pages/collab "content creator"',
+    'inurl:pages "collabs" "apply"',
+    'inurl:pages "collabs" "apply now"',
+    'inurl:pages "collabs" "apply today"',
+    'inurl:pages "collabs" "apply to join"',
+    'inurl:pages "collabs" "join"',
+    'inurl:pages "collabs" "join now"',
+    'inurl:pages "collabs" "join today"',
+    'inurl:pages "collabs" "join our program"',
+    'inurl:pages "collabs" "join our community"',
+    'inurl:pages "collabs" "become an affiliate"',
+    'inurl:pages "collabs" "become a creator"',
+    'inurl:pages "collabs" "become a partner"',
+    'inurl:pages "collabs" "creator application"',
+    'inurl:pages "collabs" "creator program"',
+    'inurl:pages "collabs" "affiliate program"',
+    'inurl:pages "collabs" "ambassador program"',
+    'inurl:pages "collabs" "influencer program"',
+    'inurl:pages "collabs" "ugc creator"',
+    'inurl:pages "collabs" "content creator"',
+    'inurl:pages "collab" "apply"',
+    'inurl:pages "collab" "apply now"',
+    'inurl:pages "collab" "apply to join"',
+    'inurl:pages "collab" "join"',
+    'inurl:pages "collab" "join now"',
+    'inurl:pages "collab" "join our community"',
+    'inurl:pages "collab" "join the program"',
+    'inurl:pages "collab" "become an affiliate"',
+    'inurl:pages "collab" "become a creator"',
+    'inurl:pages "collab" "creator application"',
+    'inurl:pages "collab" "creator program"',
+    'inurl:pages "collab" "affiliate program"',
+    'inurl:pages "collab" "ambassador program"',
+    'inurl:pages "collab" "ugc creator"',
+    'inurl:pages "collab" "content creator"',
+    'inurl:pages "collabs" "sign up"',
+    'inurl:pages "collabs" "get started"',
+    'inurl:pages "collabs" "start now"',
+    'inurl:pages "collabs" "start today"',
+    'inurl:pages "collabs" "register"',
+    'inurl:pages "collabs" "register now"',
+    'inurl:pages "collab" "sign up"',
+    'inurl:pages "collab" "get started"',
+    'inurl:pages "collab" "start now"',
+    'inurl:pages "collab" "register"',
+    'inurl:pages "collab" "register now"',
+    'inurl:pages/collabs "sign up"',
+    'inurl:pages/collabs "get started"',
+    'inurl:pages/collabs "start now"',
+    'inurl:pages/collabs "register"',
+    'inurl:pages/collabs "register now"',
+    'inurl:pages/collab "sign up"',
+    'inurl:pages/collab "get started"',
+    'inurl:pages/collab "start now"',
+    'inurl:pages/collab "register"',
+    'inurl:pages/collab "register now"',
+)
+
+
+def _build_random_letter_pair_outside_collabs_query() -> str:
+    """inurl:pages/collab(s) ("x" OR "y") với x≠y ngẫu nhiên."""
+    x, y = random.sample(string.ascii_lowercase, 2)
+    path = random.choice(("pages/collab", "pages/collabs"))
+    return f'inurl:{path} ("{x}" OR "{y}")'
+
+
+def build_random_outside_collabs_google_query() -> str:
+    """
+    Mỗi lần lọc: **một** query — ngẫu nhiên **hoặc** dạng chữ (x OR y) **hoặc** một chuỗi cố định.
+    Hai họ có xác suất ~50/50 để dạng chữ vẫn được dùng thường xuyên.
+    """
+    if random.random() < 0.5:
+        return _build_random_letter_pair_outside_collabs_query()
+    return random.choice(_OUTSIDE_COLLABS_GOOGLE_FIXED_QUERIES)
+
+
+def resolve_outside_discovery_query_string(filters: dict | None) -> str:
+    """Chuỗi query web search: ưu tiên filters.outside_query, rồi COLLABS_OUTSIDE_QUERY, rồi query ngẫu nhiên."""
+    f = filters if isinstance(filters, dict) else {}
+    raw = str(f.get("outside_query") or os.getenv("COLLABS_OUTSIDE_QUERY") or "").strip()
+    if raw:
+        return raw
+    return build_random_outside_collabs_google_query()
+
+
+def _outside_discovery_verify_and_build_offer(
+    url: str,
+    verify_timeout_sec: int,
+    should_stop: Callable[[], bool] | None,
+) -> dict | None:
+    """Verify một URL candidate ngoài Discovery; trả dict offer hoặc None."""
+    if should_stop and should_stop():
+        return None
+    hk = host_key(url)
+    if not hk:
+        return None
+    try:
+        res = requests.get(url, timeout=verify_timeout_sec)
+        if not res.ok:
+            return None
+        html = res.text or ""
+    except Exception:
+        return None
+
+    low_url = url.lower()
+    must_path = ("/pages/collab" in low_url) or ("/pages/collabs" in low_url)
+    low_html = (html or "").lower()
+    has_cta_phrase = _collabs_html_has_outside_cta_phrases(low_html)
+    if not must_path:
+        return None
+    if not has_cta_phrase:
+        return None
+
+    looks_like = _collabs_page_looks_like_signup(html, url)
+    weak_signal_url = any(
+        k in low_url for k in ("/pages/collab", "/pages/collabs", "affiliate", "ambassador", "partner")
+    )
+    if not looks_like and not weak_signal_url:
+        return None
+
+    apply_url = discover_collabs_signup_url(url, timeout_sec=verify_timeout_sec, should_stop=should_stop)
+    if not apply_url:
+        return None
+
+    brand_guess = hk.split(".")[0].replace("-", " ").replace("_", " ").title()
+    return {
+        "brand": brand_guess,
+        "url": f"https://{hk}",
+        "offer": "",
+        "cookieDays": "",
+        "client_url": apply_url,
+        "offer_id": hk,
+        "shop_id": "",
+        "program_id": "",
+        "mkp_listing_id": hk,
+        "commission_type": "",
+        "category": "Outside Discovery",
+        "collabs_product_category_code": "",
+        "epc": "",
+        "payments": "",
+        "currency": "",
+        "payout_rate": "",
+        "approval_rate": "",
+        "offer_score": "",
+        "recommend_score": "",
+        "application_review": "",
+        "promotion_details": [],
+        "target_audience_customer_channels": [],
+        "target_audience_locations": [],
+        "target_audience_ages": [],
+        "target_audience_genders": [],
+        "can_apply_offer": None,
+        "is_applied_offer": None,
+        "collabs_partnership_status": "",
+        "collabs_partnership_state": "",
+        "collabs_saved": None,
+        "collabs_previously_purchased": None,
+        "collabs_target_countries": "",
+        "collabs_logo_url": "",
+        "collabs_images": "",
+        "collabs_shopify_store_id": "",
+        "collabs_holding_period": "",
+    }
+
+
+def discover_collabs_outside_discovery_offers(
+    filters: dict | None = None, should_stop: Callable[[], bool] | None = None
+) -> list[dict]:
     """
     Lọc Collabs ngoài Discovery từ web search:
     - Tìm candidate URL theo query.
@@ -1889,13 +2153,9 @@ def discover_collabs_outside_discovery_offers(filters: dict | None = None) -> li
     - Tìm apply URL cuối bằng discover_collabs_signup_url.
     """
     f = filters if isinstance(filters, dict) else {}
-    raw_query = str(
-        f.get("outside_query")
-        or os.getenv("COLLABS_OUTSIDE_QUERY")
-        or '(inurl:pages/collab OR inurl:pages/collabs) ("apply now")'
-    ).strip()
+    query_text = str(f.get(EFFECTIVE_OUTSIDE_QUERY_KEY) or "").strip() or resolve_outside_discovery_query_string(f)
     # Cú pháp Google (inurl/OR/ngoặc): dùng Apify actor, Google CSE JSON API, hoặc Bing (hỗ trợ một phần).
-    query_list = [raw_query] if raw_query else []
+    query_list = [query_text] if query_text else []
 
     # outside_target_results (UI mới) ưu tiên hơn .env; fallback về COLLABS_OUTSIDE_MAX_RESULTS.
     raw_target = f.get("outside_target_results")
@@ -1916,10 +2176,11 @@ def discover_collabs_outside_discovery_offers(filters: dict | None = None) -> li
     except Exception:
         cursor_pool = 300
     cursor_pool = max(max_results, min(5000, cursor_pool))
-    verify_timeout_sec = int(os.getenv("COLLABS_OUTSIDE_VERIFY_TIMEOUT_SEC", "20") or "20")
+    verify_timeout_sec = int(os.getenv("COLLABS_OUTSIDE_VERIFY_TIMEOUT_SEC", "30") or "30")
     if not query_list:
         return []
-    query_text = query_list[0]
+    if should_stop and should_stop():
+        return []
     provider = (
         "apify"
         if (os.getenv("COLLABS_OUTSIDE_GOOGLE_ACTOR_ID") or "").strip()
@@ -1949,11 +2210,15 @@ def discover_collabs_outside_discovery_offers(filters: dict | None = None) -> li
             timeout_sec=180,
             start_page=start_page,
             end_page=end_page,
+            should_stop=should_stop,
         )
     elif provider == "google_cse" and cse_key and cse_cx:
         fetch_budget = max(max_results, min(100, end_idx))
         urls = _fetch_google_result_urls_via_custom_search_api(
-            query_text, max_results=fetch_budget, timeout_sec=verify_timeout_sec
+            query_text,
+            max_results=fetch_budget,
+            timeout_sec=verify_timeout_sec,
+            should_stop=should_stop,
         )
         urls = urls[start_idx:end_idx]
     elif cse_key or cse_cx:
@@ -1963,7 +2228,12 @@ def discover_collabs_outside_discovery_offers(filters: dict | None = None) -> li
         )
     else:
         fetch_budget = max(max_results, end_idx)
-        urls = _fetch_bing_rss_result_urls(query_text, max_results=fetch_budget, timeout_sec=verify_timeout_sec)
+        urls = _fetch_bing_rss_result_urls(
+            query_text,
+            max_results=fetch_budget,
+            timeout_sec=verify_timeout_sec,
+            should_stop=should_stop,
+        )
         urls = urls[start_idx:end_idx]
     for u in urls:
         if u in seen_candidate:
@@ -1998,84 +2268,64 @@ def discover_collabs_outside_discovery_offers(filters: dict | None = None) -> li
     offers: list[dict] = []
     seen_host: set[str] = set()
     added_hosts: set[str] = set()
+    work_urls: list[str] = []
+    stopped_early = False
     for url in candidates:
+        if should_stop and should_stop():
+            stopped_early = True
+            break
         hk = host_key(url)
         if not hk or hk in seen_host:
             continue
         if dedup_enabled and hk in seen_hosts_persist:
             continue
         seen_host.add(hk)
-        try:
-            res = requests.get(url, timeout=verify_timeout_sec)
-            if not res.ok:
-                continue
-            html = res.text or ""
-        except Exception:
-            continue
+        work_urls.append(url)
 
-        low_url = url.lower()
-        must_path = ("/pages/collab" in low_url) or ("/pages/collabs" in low_url)
-        # Đúng tiêu chí user: trang phải có "apply now" (case-insensitive) hoặc biến thể apply-now.
-        low_html = (html or "").lower()
-        must_apply_now = ("apply now" in low_html) or ("apply-now" in low_html)
-        if not must_path:
-            continue
-        if not must_apply_now:
-            continue
+    nw = int(os.getenv("COLLABS_OUTSIDE_VERIFY_WORKERS", "8") or "8")
+    nw = max(1, min(16, nw))
 
-        looks_like = _collabs_page_looks_like_signup(html, url)
-        low_url = url.lower()
-        weak_signal_url = any(k in low_url for k in ("/pages/collab", "/pages/collabs", "affiliate", "ambassador", "partner"))
-        if not looks_like and not weak_signal_url:
-            continue
-
-        apply_url = discover_collabs_signup_url(url, timeout_sec=verify_timeout_sec)
-        if not apply_url:
-            continue
-
-        brand_guess = hk.split(".")[0].replace("-", " ").replace("_", " ").title()
-        offers.append(
-            {
-                "brand": brand_guess,
-                "url": f"https://{hk}",
-                "offer": "",
-                "cookieDays": "",
-                "client_url": apply_url,
-                "offer_id": hk,
-                "shop_id": "",
-                "program_id": "",
-                "mkp_listing_id": hk,
-                "commission_type": "",
-                "category": "Outside Discovery",
-                "collabs_product_category_code": "",
-                "epc": "",
-                "payments": "",
-                "currency": "",
-                "payout_rate": "",
-                "approval_rate": "",
-                "offer_score": "",
-                "recommend_score": "",
-                "application_review": "",
-                "promotion_details": [],
-                "target_audience_customer_channels": [],
-                "target_audience_locations": [],
-                "target_audience_ages": [],
-                "target_audience_genders": [],
-                "can_apply_offer": None,
-                "is_applied_offer": None,
-                "collabs_partnership_status": "",
-                "collabs_partnership_state": "",
-                "collabs_saved": None,
-                "collabs_previously_purchased": None,
-                "collabs_target_countries": "",
-                "collabs_logo_url": "",
-                "collabs_images": "",
-                "collabs_shopify_store_id": "",
-                "collabs_holding_period": "",
-            }
-        )
-        if dedup_enabled:
-            added_hosts.add(hk)
+    if work_urls:
+        if nw <= 1 or len(work_urls) <= 1:
+            for u in work_urls:
+                if should_stop and should_stop():
+                    stopped_early = True
+                    break
+                off = _outside_discovery_verify_and_build_offer(u, verify_timeout_sec, should_stop)
+                if off:
+                    offers.append(off)
+                    if dedup_enabled:
+                        added_hosts.add(host_key(off.get("url", "") or ""))
+        else:
+            ex = ThreadPoolExecutor(max_workers=nw)
+            try:
+                futures = {
+                    ex.submit(_outside_discovery_verify_and_build_offer, u, verify_timeout_sec, should_stop): i
+                    for i, u in enumerate(work_urls)
+                }
+                pending = set(futures.keys())
+                slots: list[dict | None] = [None] * len(work_urls)
+                while pending:
+                    done, pending = wait(pending, timeout=0.25, return_when=FIRST_COMPLETED)
+                    for fut in done:
+                        idx = futures.pop(fut, -1)
+                        if idx < 0:
+                            continue
+                        try:
+                            slots[idx] = fut.result()
+                        except Exception:
+                            slots[idx] = None
+                    if should_stop and should_stop():
+                        stopped_early = True
+                        break
+                for slot in slots:
+                    if not slot:
+                        continue
+                    offers.append(slot)
+                    if dedup_enabled:
+                        added_hosts.add(host_key(slot.get("url", "") or ""))
+            finally:
+                ex.shutdown(wait=False, cancel_futures=True)
 
     if dedup_enabled and added_hosts:
         try:
@@ -2088,8 +2338,15 @@ def discover_collabs_outside_discovery_offers(filters: dict | None = None) -> li
             )
         except Exception:
             pass
-    # Chỉ cập nhật cursor sau khi đã xử lý xong batch để tránh mất lượt khi lỗi giữa chừng.
-    _save_outside_cursor(provider, query_text, end_idx % effective_pool)
+    # Chỉ cập nhật cursor khi chạy xong batch (không hủy giữa chừng) để không bỏ lỡ URL kế tiếp.
+    if not stopped_early and not (should_stop and should_stop()):
+        _save_outside_cursor(provider, query_text, end_idx % effective_pool)
+    if isinstance(f, dict):
+        f[OUTSIDE_DISCOVERY_STATS_KEY] = {
+            "target_batch": max_results,
+            "candidate_urls": len(candidates),
+            "offers_verified": len(offers),
+        }
     return offers
 
 
@@ -2887,11 +3144,24 @@ def load_brand_average_prices() -> dict:
     return result
 
 
-def apify_call_actor(domains: list) -> str:
+def _normalize_apify_actor_id(actor_id: str) -> str:
+    act = str(actor_id or "").strip()
+    if "/" in act and "~" not in act:
+        parts = [p for p in act.split("/") if p]
+        if len(parts) >= 2:
+            act = f"{parts[0]}~{parts[1]}"
+    return act
+
+
+def _apify_store_actor_dataset_id(actor_id: str, run_input: dict, *, wait_secs: int | None = None) -> str:
+    """
+    Chạy actor Apify Store (POST + poll), trả về defaultDatasetId.
+    Dùng chung cho actor Similarweb mặc định và actor fallback outside discovery.
+    """
     token = (os.getenv("APIFY_TOKEN") or "").strip()
     if not token:
         raise RuntimeError("Thiếu APIFY_TOKEN trong .env")
-    wait_secs = int(os.getenv("APIFY_WAIT_FOR_FINISH_SECS", "240") or "240")
+    ws = wait_secs if wait_secs is not None else int(os.getenv("APIFY_WAIT_FOR_FINISH_SECS", "240") or "240")
     http_retries = int(os.getenv("APIFY_HTTP_RETRIES", "3") or "3")
     if http_retries < 1:
         http_retries = 1
@@ -2918,9 +3188,11 @@ def apify_call_actor(domains: list) -> str:
                 time.sleep(sleep_sec)
         raise RuntimeError(f"Apify request thất bại sau {http_retries} lần thử: {last_exc}")
 
-    url = f"https://api.apify.com/v2/acts/{ACTOR_ID}/runs?token={token}&waitForFinish={wait_secs}"
-    run_input = {"domains": domains, "proxyConfiguration": {"useApifyProxy": False}}
-    res = _request_with_retry("POST", url, json_payload=run_input, read_timeout_sec=wait_secs + 30)
+    act = _normalize_apify_actor_id(actor_id)
+    if not act:
+        raise RuntimeError("Thiếu actor id Apify.")
+    url = f"https://api.apify.com/v2/acts/{act}/runs?token={token}&waitForFinish={int(ws)}"
+    res = _request_with_retry("POST", url, json_payload=run_input, read_timeout_sec=float(ws) + 30.0)
     if not res.ok:
         raise RuntimeError(f"Apify call actor lỗi HTTP {res.status_code}: {res.text[:300]}")
     body = res.json()
@@ -2951,7 +3223,323 @@ def apify_call_actor(domains: list) -> str:
     dataset_id = data.get("defaultDatasetId")
     if not dataset_id:
         raise RuntimeError("Apify không trả về defaultDatasetId")
-    return dataset_id
+    return str(dataset_id)
+
+
+def apify_call_actor(domains: list) -> str:
+    if not domains:
+        raise RuntimeError("Danh sách domain Apify rỗng")
+    return _apify_store_actor_dataset_id(
+        ACTOR_ID,
+        {"domains": list(domains), "proxyConfiguration": {"useApifyProxy": False}},
+    )
+
+
+def _similarweb_monthly_text_has_positive_visits(text: str) -> bool:
+    """Chuỗi dạng T1(577), T2(0) — chỉ coi là có traffic nếu có ít nhất một số trong ngoặc > 0."""
+    if not text or not str(text).strip():
+        return False
+    for m in re.finditer(r"\(([^)]+)\)", str(text)):
+        if parse_visits_value(m.group(1)) > 0:
+            return True
+    return False
+
+
+def _similarweb_item_has_traffic(item: dict | None) -> bool:
+    """
+    Có dữ liệu traffic *dùng được* (số visits > 0 hoặc monthly có tháng > 0).
+    Tránh coi chuỗi monthly chỉ toàn 0 / VisitsFormatted \"0\" là \"đã có traffic\" — khi đó vẫn cần fallback Radeance.
+    """
+    if not item:
+        return False
+    eng = engagement_from_item(item)
+    if parse_visits_from_engagement(eng) > 0:
+        return True
+    em = str(estimated_monthly_visits_formatted(item, eng) or "").strip()
+    if em and _similarweb_monthly_text_has_positive_visits(em):
+        return True
+    vf = str(visits_formatted_from_engagement(eng) or "").strip()
+    if vf and parse_visits_value(vf) > 0:
+        return True
+    return False
+
+
+def _format_visits_integer_display(v: float) -> str:
+    try:
+        n = int(round(float(v)))
+    except Exception:
+        return ""
+    if n <= 0:
+        return ""
+    return f"{n:,}"
+
+
+def _radeance_dataset_row_host_keys(raw: dict) -> set[str]:
+    """Các host chuẩn hoá có thể suy ra từ một dòng dataset radeance/similarweb-scraper."""
+    low = {str(k).strip().lower(): v for k, v in raw.items()}
+    keys: set[str] = set()
+    for cand in (
+        raw.get("searchUrl"),
+        raw.get("url"),
+        raw.get("domain"),
+        raw.get("website"),
+        low.get("searchurl"),
+        low.get("url"),
+        low.get("domain"),
+        low.get("website"),
+    ):
+        if isinstance(cand, str) and cand.strip():
+            hk = host_key(cand.strip())
+            if hk:
+                keys.add(hk)
+    return keys
+
+
+def normalize_radeance_similarweb_item(raw: dict) -> dict:
+    """
+    Chuẩn hoá một dòng dataset từ radeance/similarweb-scraper về shape gần actor Similarweb cũ
+    (Engagements, TopCountryShares, TopKeywordShares, EstimatedMonthlyVisits) để build_collabs_csv_row / lọc traffic hoạt động.
+    """
+    if not isinstance(raw, dict) or not raw:
+        return {}
+    low = {str(k).strip().lower(): v for k, v in raw.items()}
+    domain = str(raw.get("domain") or low.get("domain") or "").strip()
+    url = str(raw.get("url") or raw.get("searchUrl") or low.get("url") or low.get("searchurl") or "").strip()
+    if not url and domain:
+        d = domain.lstrip("/")
+        url = f"https://{d}" if d else ""
+    eng_in = raw.get("engagement") or raw.get("Engagement") or {}
+    if not isinstance(eng_in, dict):
+        eng_in = {}
+    total_vis = (
+        raw.get("totalVisits")
+        or raw.get("TotalVisits")
+        or low.get("totalvisits")
+        or raw.get("Visits")
+        or low.get("visits")
+    )
+    if total_vis is None:
+        total_vis = eng_in.get("visits") or eng_in.get("Visits")
+    visits_f = parse_visits_value(total_vis)
+    if visits_f <= 0:
+        for ak in (
+            "traffic",
+            "Traffic",
+            "estimatedTraffic",
+            "EstimatedTraffic",
+            "estimatedVisits",
+            "EstimatedVisits",
+            "lastMonthVisits",
+            "LastMonthVisits",
+            "pageViews",
+            "PageViews",
+            "globalVisits",
+            "GlobalVisits",
+        ):
+            v = raw.get(ak)
+            if v is None:
+                v = low.get(ak.lower())
+            if v is None:
+                continue
+            pv = parse_visits_value(v)
+            if pv > visits_f:
+                visits_f = pv
+    mv_arr = raw.get("monthlyVisits") or low.get("monthlyvisits")
+    if visits_f <= 0 and isinstance(mv_arr, list) and mv_arr:
+        best_mv = 0.0
+        for row in mv_arr:
+            if isinstance(row, dict):
+                lv = row.get("visits") or row.get("Visits")
+                if lv is not None:
+                    best_mv = max(best_mv, parse_visits_value(lv))
+        if best_mv > visits_f:
+            visits_f = best_mv
+    ppg = raw.get("pagesPerVisit")
+    if ppg is None:
+        ppg = eng_in.get("pagesPerVisit")
+    br = raw.get("bounceRate")
+    if br is None:
+        br = eng_in.get("bounceRate")
+    monthly_df = raw.get("monthlyVisitsDateFormat") or low.get("monthlyvisitsdateformat") or {}
+    if isinstance(monthly_df, str) and monthly_df.strip().startswith("{"):
+        try:
+            monthly_df = json.loads(monthly_df)
+        except Exception:
+            monthly_df = {}
+    if not isinstance(monthly_df, dict):
+        monthly_df = {}
+    if visits_f <= 0 and monthly_df:
+        try:
+            mx = max((parse_visits_value(v) for v in monthly_df.values()), default=0.0)
+            if mx > visits_f:
+                visits_f = mx
+        except Exception:
+            pass
+
+    top_country_shares: list[dict] = []
+    tcc_raw = raw.get("website_traffic_by_country") or raw.get("countryShare") or []
+    if isinstance(tcc_raw, list):
+        for row in tcc_raw[:12]:
+            if not isinstance(row, dict):
+                continue
+            code = str(row.get("country") or row.get("CountryCode") or "").strip().upper()
+            if not code:
+                continue
+            sh = row.get("share")
+            if sh is None:
+                sh = row.get("Value")
+            try:
+                fv = float(sh)
+            except Exception:
+                fv = 0.0
+            if 0 <= fv <= 1.0:
+                fv *= 100.0
+            top_country_shares.append({"CountryCode": code, "Value": fv})
+
+    top_kw: list[dict] = []
+    tk_raw = raw.get("topKeywords") or []
+    if isinstance(tk_raw, list):
+        for row in tk_raw:
+            if not isinstance(row, dict):
+                continue
+            kw = row.get("keyword") or row.get("Keyword") or row.get("Name")
+            if not kw:
+                continue
+            vol = row.get("searchVolume") or row.get("search_volume") or row.get("Volume")
+            est = row.get("estimatedValue") or row.get("estimated_value") or row.get("EstimatedValue")
+            cpc = row.get("cpc") if row.get("cpc") is not None else row.get("CPC")
+            try:
+                vol_i = int(round(float(vol))) if vol is not None and str(vol).strip() else 0
+            except Exception:
+                vol_i = 0
+            top_kw.append(
+                {
+                    "Name": str(kw),
+                    "Keyword": str(kw),
+                    "Volume": vol_i,
+                    "EstimatedValue": est,
+                    "Cpc": cpc,
+                }
+            )
+
+    hk_canon = host_key(url) if url else (host_key(domain) if domain else "")
+    site_field = hk_canon or (domain or "").strip() or host_key(str(raw.get("searchUrl") or ""))
+    return {
+        "SiteName": site_field,
+        "Domain": domain,
+        "Url": url or (f"https://{hk_canon}" if hk_canon else ""),
+        "Engagements": {
+            "Visits": visits_f,
+            "VisitsFormatted": _format_visits_integer_display(visits_f),
+            "PagePerVisit": ppg,
+            "BounceRate": br,
+        },
+        "EstimatedMonthlyVisits": monthly_df,
+        "TopCountryShares": top_country_shares,
+        "TopKeywordShares": top_kw,
+        "TopKeywords": top_kw,
+    }
+
+
+def merge_outside_similarweb_fallback_batch(part_domains: list, batch_items: list) -> tuple[list, int]:
+    """
+    Sau actor Similarweb mặc định: với mỗi domain trong batch, nếu không có traffic hợp lệ
+    thì gọi actor fallback (radeance/similarweb-scraper), chuẩn hoá và ghi đè vào map theo host.
+
+    Trả về (danh sách item theo thứ tự part_domains, số domain đã gọi fallback).
+    """
+    if not isinstance(part_domains, list) or not part_domains:
+        return (batch_items if isinstance(batch_items, list) else []), 0
+    batch_items = batch_items if isinstance(batch_items, list) else []
+
+    env_fb = os.getenv("COLLABS_OUTSIDE_SIMILARWEB_FALLBACK_ACTOR")
+    if env_fb is not None and not str(env_fb).strip():
+        fallback_actor = ""
+    else:
+        fallback_actor = (str(env_fb).strip() if env_fb else DEFAULT_OUTSIDE_SIMILARWEB_FALLBACK_ACTOR)
+
+    by_h: dict[str, dict] = {}
+    for it in batch_items:
+        if not isinstance(it, dict):
+            continue
+        k = host_key(apify_site_field(it))
+        if k:
+            by_h[k] = it
+
+    need: list[str] = []
+    seen_need: set[str] = set()
+    for d in part_domains:
+        hk = host_key(d)
+        if not hk:
+            continue
+        it = by_h.get(hk, {})
+        if _similarweb_item_has_traffic(it):
+            continue
+        if hk not in seen_need:
+            seen_need.add(hk)
+            need.append(hk)
+
+    if not need or not fallback_actor:
+        out = []
+        for d in part_domains:
+            hk = host_key(d)
+            if not hk:
+                continue
+            out.append(by_h.get(hk, {}))
+        return out, 0
+
+    urls = []
+    for hk in need:
+        urls.append(f"https://{hk}")
+
+    fb_wait = int(os.getenv("COLLABS_OUTSIDE_SIMILARWEB_WAIT_SECS", "360") or "360")
+    run_input = {
+        "urls": urls,
+        "include_base_data": True,
+        "include_similar_sites": False,
+        "include_indepth_data": False,
+        "output_mode": "individual",
+    }
+    try:
+        ds = _apify_store_actor_dataset_id(fallback_actor, run_input, wait_secs=fb_wait)
+        fb_items = apify_list_items(ds)
+    except Exception as exc:
+        print(f"Cảnh báo Similarweb fallback ({fallback_actor}): {exc}")
+        out = []
+        for d in part_domains:
+            hk = host_key(d)
+            if not hk:
+                continue
+            out.append(by_h.get(hk, {}))
+        return out, 0
+
+    for i, raw in enumerate(fb_items):
+        if not isinstance(raw, dict):
+            continue
+        norm = normalize_radeance_similarweb_item(raw)
+        if not norm:
+            continue
+        row_hosts = _radeance_dataset_row_host_keys(raw)
+        matched: str | None = None
+        for hk in need:
+            if hk in row_hosts:
+                matched = hk
+                break
+        if matched is None and i < len(need):
+            matched = need[i]
+        nk = host_key(apify_site_field(norm))
+        if matched:
+            by_h[matched] = norm
+        if nk:
+            by_h[nk] = norm
+
+    out = []
+    for d in part_domains:
+        hk = host_key(d)
+        if not hk:
+            continue
+        out.append(by_h.get(hk, {}))
+    return out, len(need)
 
 
 def check_apify_connection() -> str:

@@ -616,7 +616,7 @@ function collectFilters(source) {
   }
   if (source === "collabs") {
     const discoveryMode = $("collabsDiscoveryMode")?.value?.trim() || "in_discovery";
-    const outTarget = $("outsideTargetResultsCb")?.value?.trim() || "60";
+    const outTarget = $("outsideTargetResultsCb")?.value?.trim() || "30";
     return {
       discovery_mode: discoveryMode,
       start_page: $("startPageCb")?.value?.trim() || "1",

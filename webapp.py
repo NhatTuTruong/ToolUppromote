@@ -555,6 +555,9 @@ def fetch_offers_refersion(filters: dict) -> list:
 def fetch_offers_collabs(filters: dict) -> list:
     discovery_mode = str((filters or {}).get("discovery_mode") or "in_discovery").strip().lower()
     if discovery_mode == "outside_discovery":
+        STATE.control.wait_if_paused()
+        if STATE.control.should_stop():
+            return []
         dedup_enabled = str(os.getenv("COLLABS_OUTSIDE_DEDUP_PERSIST", "")).strip().lower() in {
             "1",
             "true",
@@ -580,9 +583,31 @@ def fetch_offers_collabs(filters: dict) -> list:
         except Exception:
             target_n = 30
         dedup_txt = "dedupe=ON" if dedup_enabled else "dedupe=OFF"
-        STATE.add_log(f"Collabs ngoài Discovery: đang tìm brand ({prov}, {dedup_txt}, target={target_n})...")
-        offers = core.discover_collabs_outside_discovery_offers(filters)
-        STATE.add_log(f"Collabs ngoài Discovery: đã tìm được {len(offers)} brand hợp lệ.")
+        fcollab = dict(filters or {})
+        # Luôn sinh query mới mỗi lần lọc (không giữ _effective_outside_query từ request cũ).
+        fcollab.pop(core.EFFECTIVE_OUTSIDE_QUERY_KEY, None)
+        q_google = core.resolve_outside_discovery_query_string(fcollab)
+        fcollab[core.EFFECTIVE_OUTSIDE_QUERY_KEY] = q_google
+        STATE.add_log(
+            f"Collabs ngoài Discovery: Google query: {q_google!r} — đang tìm brand ({prov}, {dedup_txt}, target={target_n})..."
+        )
+        offers = core.discover_collabs_outside_discovery_offers(
+            fcollab, should_stop=STATE.control.should_stop
+        )
+        outside_stats = fcollab.pop(core.OUTSIDE_DISCOVERY_STATS_KEY, None)
+        if STATE.control.should_stop():
+            STATE.add_log("Collabs ngoài Discovery: đã dừng theo yêu cầu.")
+        else:
+            STATE.add_log(f"Collabs ngoài Discovery: đã tìm được {len(offers)} brand hợp lệ.")
+            if isinstance(outside_stats, dict):
+                tb = outside_stats.get("target_batch")
+                cu = outside_stats.get("candidate_urls")
+                STATE.add_log(
+                    f"Collabs ngoài Discovery: giải thích số lượng — target={tb} là tối đa "
+                    f"số URL lấy từ Google (theo cursor/query), không phải đảm bảo đủ brand; "
+                    f"lần này có {cu} URL ứng viên từ tìm kiếm, sau khi kiểm tra trang collab + Apply now + link signup "
+                    f"còn {len(offers)} brand."
+                )
         return offers
 
     base_url = (os.getenv("COLLABS_API_URL") or "").strip()
@@ -793,6 +818,9 @@ def run_pipeline(settings: dict, min_traffic: int, filters: dict, source: str = 
     if not domains:
         raise RuntimeError("Không có tên miền: thêm URL từ offer hoặc file domain.txt.")
 
+    collabs_discovery_mode = str((filters or {}).get("discovery_mode") or "in_discovery").strip().lower()
+    outside_similarweb_fallback = src == "collabs" and collabs_discovery_mode == "outside_discovery"
+
     STATE.add_log(f"Chạy Apify cho {len(domains)} tên miền...")
     items = []
     chunk_size = int(
@@ -806,7 +834,15 @@ def run_pipeline(settings: dict, min_traffic: int, filters: dict, source: str = 
             return
         STATE.add_log(f"Apify đợt {idx}: {len(part)} tên miền")
         dataset_id = core.apify_call_actor(part)
-        items.extend(core.apify_list_items(dataset_id))
+        batch = core.apify_list_items(dataset_id)
+        if outside_similarweb_fallback:
+            batch, n_fb = core.merge_outside_similarweb_fallback_batch(part, batch)
+            if n_fb:
+                STATE.add_log(
+                    f"Collabs ngoài Discovery: Similarweb fallback Apify cho {n_fb} domain "
+                    f"(thiếu traffic từ actor mặc định; xem COLLABS_OUTSIDE_SIMILARWEB_FALLBACK_ACTOR trong .env)."
+                )
+        items.extend(batch)
 
     by_host = {}
     for item in items:
@@ -824,8 +860,7 @@ def run_pipeline(settings: dict, min_traffic: int, filters: dict, source: str = 
     now = datetime.now()
     date_part = f"{now.day}-{now.month}-{now.year}"
     time_part = f"{now.hour}-{now.minute:02d}"
-    collabs_mode = str((filters or {}).get("discovery_mode") or "in_discovery").strip().lower()
-    if src == "collabs" and collabs_mode == "outside_discovery":
+    if src == "collabs" and collabs_discovery_mode == "outside_discovery":
         # File riêng cho luồng search Google ngoài Discovery.
         xlsx_name = f"collabs_google_{now.month}-{now.year}_{time_part}.xlsx"
     else:

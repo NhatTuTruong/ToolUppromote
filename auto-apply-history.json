@@ -1,5 +1,376 @@
 [
   {
+    "file": "collabs_google_5-2026_10-01.xlsx",
+    "started_at": "2026-05-04T10:16:31",
+    "started_at_display": "04/05/2026 10:16:31",
+    "email": "nhatdt2020@gmail.com",
+    "submitted_count": 2,
+    "submitted_items": [
+      {
+        "brand": "apexphotostudios.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://apexphotostudios.com/pages/collabs"
+      },
+      {
+        "brand": "saachistyle.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://saachistyle.com/pages/collabs"
+      }
+    ],
+    "attempted_items": [
+      {
+        "brand": "Shopify Collabs · You don’t meet the requirements, yet",
+        "domain": "palladiumboots.eu",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://palladiumboots.eu/pages/collab",
+        "submitted": false,
+        "note": "no_fields_detected"
+      },
+      {
+        "brand": "Shopify Collabs · You don’t meet the requirements, yet",
+        "domain": "en.giesswein.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://en.giesswein.com/pages/collabs",
+        "submitted": false,
+        "note": "no_fields_detected"
+      },
+      {
+        "brand": "404 Not Found",
+        "domain": "tothestars.media",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://tothestars.media/pages/collab",
+        "submitted": false,
+        "note": "not_in_collabs_after_apply"
+      },
+      {
+        "brand": "Shopify Collabs · You don’t meet the requirements, yet",
+        "domain": "labelswelove.de",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://labelswelove.de/pages/collabs",
+        "submitted": false,
+        "note": "no_fields_detected"
+      },
+      {
+        "brand": "404 Nicht gefunden",
+        "domain": "stickabush.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://stickabush.com/pages/collab",
+        "submitted": false,
+        "note": "not_in_collabs_after_apply"
+      },
+      {
+        "brand": "Collabs & Special Projects | Sebago",
+        "domain": "sebago.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://www.sebago.com/pages/collab",
+        "submitted": false,
+        "note": "not_in_collabs_after_apply"
+      },
+      {
+        "brand": "404 Not Found – Makia",
+        "domain": "makia.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://makia.com/pages/collab",
+        "submitted": false,
+        "note": "no_apply_cta"
+      },
+      {
+        "brand": "Collabs – mundart studios",
+        "domain": "mundartstudios.de",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://www.mundartstudios.de/pages/collab",
+        "submitted": false,
+        "note": "not_in_collabs_after_apply"
+      },
+      {
+        "brand": "Shopify Collabs · You don’t meet the requirements, yet",
+        "domain": "natchlabs.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://natchlabs.com/pages/collabs",
+        "submitted": false,
+        "note": "no_fields_detected"
+      },
+      {
+        "brand": "Shopify Collabs · You don’t meet the requirements, yet",
+        "domain": "blacklinecarcare.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://blacklinecarcare.com/pages/collabs",
+        "submitted": false,
+        "note": "no_fields_detected"
+      },
+      {
+        "brand": "apexphotostudios.com",
+        "domain": "apexphotostudios.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://apexphotostudios.com/pages/collabs",
+        "submitted": true,
+        "note": "submitted"
+      },
+      {
+        "brand": "KOIO - Affiliate",
+        "domain": "koio.co",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://www.koio.co/pages/collab",
+        "submitted": false,
+        "note": "not_in_collabs_after_apply"
+      },
+      {
+        "brand": "Collabs – UNE PIECE US",
+        "domain": "us.unepiece.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://us.unepiece.com/pages/collab",
+        "submitted": false,
+        "note": "not_in_collabs_after_apply"
+      },
+      {
+        "brand": "Collabs – SOKO",
+        "domain": "shopsoko.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://shopsoko.com/pages/collab",
+        "submitted": false,
+        "note": "not_in_collabs_after_apply"
+      },
+      {
+        "brand": "Collabs | Petal & Pup USA",
+        "domain": "petalandpup.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://petalandpup.com/pages/collab",
+        "submitted": false,
+        "note": "not_in_collabs_after_apply"
+      },
+      {
+        "brand": "Join A Cleanup",
+        "domain": "keepnaturewild.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://keepnaturewild.com/pages/collab",
+        "submitted": false,
+        "note": "not_in_collabs_after_apply"
+      },
+      {
+        "brand": "saachistyle.com",
+        "domain": "saachistyle.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://saachistyle.com/pages/collabs",
+        "submitted": true,
+        "note": "submitted"
+      },
+      {
+        "brand": "Collabs – Diesel J’s",
+        "domain": "dieseljpapers.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://www.dieseljpapers.com/pages/collab",
+        "submitted": false,
+        "note": "not_in_collabs_after_apply"
+      }
+    ]
+  },
+  {
+    "file": "collabs_google_5-2026_10-01.xlsx",
+    "started_at": "2026-05-04T10:10:46",
+    "started_at_display": "04/05/2026 10:10:46",
+    "email": "nhatdt2020@gmail.com",
+    "submitted_count": 4,
+    "submitted_items": [
+      {
+        "brand": "en.giesswein.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://en.giesswein.com/pages/collabs"
+      },
+      {
+        "brand": "labelswelove.de",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://labelswelove.de/pages/collabs"
+      },
+      {
+        "brand": "natchlabs.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://natchlabs.com/pages/collabs"
+      },
+      {
+        "brand": "blacklinecarcare.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://blacklinecarcare.com/pages/collabs"
+      }
+    ],
+    "attempted_items": [
+      {
+        "brand": "Shopify Collabs · You don’t meet the requirements, yet",
+        "domain": "palladiumboots.eu",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://palladiumboots.eu/pages/collab",
+        "submitted": false,
+        "note": "no_fields_detected"
+      },
+      {
+        "brand": "en.giesswein.com",
+        "domain": "en.giesswein.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://en.giesswein.com/pages/collabs",
+        "submitted": true,
+        "note": "submitted"
+      },
+      {
+        "brand": "404 Not Found",
+        "domain": "tothestars.media",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://tothestars.media/pages/collab",
+        "submitted": false,
+        "note": "no_apply_cta"
+      },
+      {
+        "brand": "labelswelove.de",
+        "domain": "labelswelove.de",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://labelswelove.de/pages/collabs",
+        "submitted": true,
+        "note": "submitted"
+      },
+      {
+        "brand": "404 Nicht gefunden",
+        "domain": "stickabush.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://stickabush.com/pages/collab",
+        "submitted": false,
+        "note": "not_in_collabs_after_apply"
+      },
+      {
+        "brand": "Collabs & Special Projects | Sebago",
+        "domain": "sebago.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://www.sebago.com/pages/collab",
+        "submitted": false,
+        "note": "not_in_collabs_after_apply"
+      },
+      {
+        "brand": "404 Not Found – Makia",
+        "domain": "makia.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://makia.com/pages/collab",
+        "submitted": false,
+        "note": "no_apply_cta"
+      },
+      {
+        "brand": "Collabs – mundart studios",
+        "domain": "mundartstudios.de",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://www.mundartstudios.de/pages/collab",
+        "submitted": false,
+        "note": "not_in_collabs_after_apply"
+      },
+      {
+        "brand": "natchlabs.com",
+        "domain": "natchlabs.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://natchlabs.com/pages/collabs",
+        "submitted": true,
+        "note": "submitted"
+      },
+      {
+        "brand": "blacklinecarcare.com",
+        "domain": "blacklinecarcare.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://blacklinecarcare.com/pages/collabs",
+        "submitted": true,
+        "note": "submitted"
+      }
+    ]
+  },
+  {
+    "file": "collabs_google_5-2026_10-03.xlsx",
+    "started_at": "2026-05-04T10:06:40",
+    "started_at_display": "04/05/2026 10:06:40",
+    "email": "nhatdt2020@gmail.com",
+    "submitted_count": 4,
+    "submitted_items": [
+      {
+        "brand": "mymemobrick.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://mymemobrick.com/pages/collabs"
+      },
+      {
+        "brand": "rubypearlco.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://www.rubypearlco.com/pages/collabs"
+      },
+      {
+        "brand": "thesthing.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://thesthing.com/pages/collabs"
+      },
+      {
+        "brand": "beebsgoods.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://beebsgoods.com/pages/collabs"
+      }
+    ],
+    "attempted_items": [
+      {
+        "brand": "mymemobrick.com",
+        "domain": "mymemobrick.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://mymemobrick.com/pages/collabs",
+        "submitted": true,
+        "note": "submitted"
+      },
+      {
+        "brand": "rubypearlco.com",
+        "domain": "rubypearlco.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://www.rubypearlco.com/pages/collabs",
+        "submitted": true,
+        "note": "submitted"
+      },
+      {
+        "brand": "thesthing.com",
+        "domain": "thesthing.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://thesthing.com/pages/collabs",
+        "submitted": true,
+        "note": "submitted"
+      },
+      {
+        "brand": "Affiliates – Candylab",
+        "domain": "candylabtoys.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://www.candylabtoys.com/pages/collab",
+        "submitted": false,
+        "note": "not_in_collabs_after_apply"
+      },
+      {
+        "brand": "INH Babes | Facebook",
+        "domain": "inhhair.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://inhhair.com/pages/collab",
+        "submitted": false,
+        "note": "not_in_collabs_after_apply"
+      },
+      {
+        "brand": "404 Not Found – FARM Rio",
+        "domain": "farmrio.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://farmrio.com/pages/collab",
+        "submitted": false,
+        "note": "no_apply_cta"
+      },
+      {
+        "brand": "beebsgoods.com",
+        "domain": "beebsgoods.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://beebsgoods.com/pages/collabs",
+        "submitted": true,
+        "note": "submitted"
+      },
+      {
+        "brand": "Collabs – DucExercitum",
+        "domain": "ducexercitum.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://ducexercitum.com/pages/collab",
+        "submitted": false,
+        "note": "not_in_collabs_after_apply"
+      }
+    ]
+  },
+  {
     "file": "collabs_page1-1_1-5-2026_15-53.xlsx",
     "started_at": "2026-05-01T16:01:01",
     "started_at_display": "01/05/2026 16:01:01",

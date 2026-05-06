@@ -42,7 +42,7 @@ class RunControl:
 
 ENV_SAVE_KEY_ORDER = [
     "APIFY_TOKEN",
-    "COLLABS_OUTSIDE_APIFY_TOKEN",
+    "APIFY_TOKEN_BACKUP",
     "UPPROMOTE_API_URL",
     "UPPROMOTE_BEARER_TOKEN",
     "UPPROMOTE_PER_PAGE",
@@ -63,7 +63,7 @@ ENV_SAVE_KEY_ORDER = [
 SECRET_ENV_KEYS = frozenset(
     {
         "APIFY_TOKEN",
-        "COLLABS_OUTSIDE_APIFY_TOKEN",
+        "APIFY_TOKEN_BACKUP",
         "UPPROMOTE_BEARER_TOKEN",
         "GOAFFPRO_BEARER_TOKEN",
         "REFERSION_TOKEN",
@@ -77,7 +77,7 @@ SECRET_ENV_KEYS = frozenset(
 WEB_SETTINGS_SAVE_KEYS = frozenset(
     {
         "APIFY_TOKEN",
-        "COLLABS_OUTSIDE_APIFY_TOKEN",
+        "APIFY_TOKEN_BACKUP",
         "UPPROMOTE_API_URL",
         "UPPROMOTE_BEARER_TOKEN",
         "UPPROMOTE_PER_PAGE",
@@ -143,6 +143,9 @@ def save_env(values: dict):
             merged[_pg] = str(core.clamp_offers_per_page(merged[_pg]))
     if "COLLABS_LIMIT" in merged:
         merged["COLLABS_LIMIT"] = str(core.clamp_collabs_limit(merged["COLLABS_LIMIT"]))
+    # Gộp token Apify: không giữ key cũ tách riêng khi đã có token chính trong lần lưu này.
+    if "APIFY_TOKEN" in values and str(values.get("APIFY_TOKEN") or "").strip():
+        merged.pop("COLLABS_OUTSIDE_APIFY_TOKEN", None)
     keys_out = [k for k in ENV_SAVE_KEY_ORDER if k in merged]
     for k in sorted(merged.keys()):
         if k not in keys_out:
@@ -177,8 +180,8 @@ def row_is_dat(offer: dict, filters: dict, source: str, visits: float, min_traff
 def load_env_defaults():
     core.load_env_file(ENV_PATH)
     return {
-        "APIFY_TOKEN": os.getenv("APIFY_TOKEN", ""),
-        "COLLABS_OUTSIDE_APIFY_TOKEN": os.getenv("COLLABS_OUTSIDE_APIFY_TOKEN", ""),
+        "APIFY_TOKEN": (os.getenv("APIFY_TOKEN") or os.getenv("COLLABS_OUTSIDE_APIFY_TOKEN") or "").strip(),
+        "APIFY_TOKEN_BACKUP": os.getenv("APIFY_TOKEN_BACKUP", ""),
         "UPPROMOTE_API_URL": os.getenv("UPPROMOTE_API_URL", ""),
         "UPPROMOTE_BEARER_TOKEN": os.getenv("UPPROMOTE_BEARER_TOKEN", ""),
         "UPPROMOTE_PER_PAGE": str(core.clamp_offers_per_page(os.getenv("UPPROMOTE_PER_PAGE"))),
@@ -391,8 +394,8 @@ def run_pipeline(settings: dict, min_traffic: int, filters: dict, log, control: 
             log("Stopped.")
             return
         log(f"Apify batch {idx}: {len(part)} domains")
-        dataset_id = core.apify_call_actor(part)
-        items.extend(core.apify_list_items(dataset_id))
+        dataset_id, apify_tok = core.apify_call_actor(part)
+        items.extend(core.apify_list_items(dataset_id, token=apify_tok))
 
     by_host = {}
     for item in items:

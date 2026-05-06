@@ -44,7 +44,7 @@
        
         <div class="form-grid">
           <label class="form-field-label">
-            <span class="form-field-caption">Token Apify (APIFY_TOKEN)</span>
+            <span class="form-field-caption">Token Apify chính (APIFY_TOKEN) — Similarweb + tìm Google Collabs ngoài Discovery</span>
             <div class="secret-field-row" data-secret-for="APIFY_TOKEN">
               <button type="button" class="secret-eye-btn" aria-expanded="false" aria-label="Hiện để chỉnh sửa" title="Hiện / ẩn để sửa">
                 <svg class="eye-icon eye-icon--shut" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
@@ -54,13 +54,13 @@
             </div>
           </label>
           <label class="form-field-label">
-            <span class="form-field-caption">Token Apify (Search Google Collabs) — COLLABS_OUTSIDE_APIFY_TOKEN</span>
-            <div class="secret-field-row" data-secret-for="COLLABS_OUTSIDE_APIFY_TOKEN">
+            <span class="form-field-caption">Token Apify dự phòng (APIFY_TOKEN_BACKUP) — khi token chính hết quota / lỗi quyền</span>
+            <div class="secret-field-row" data-secret-for="APIFY_TOKEN_BACKUP">
               <button type="button" class="secret-eye-btn" aria-expanded="false" aria-label="Hiện để chỉnh sửa" title="Hiện / ẩn để sửa">
                 <svg class="eye-icon eye-icon--shut" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
                 <svg class="eye-icon eye-icon--open" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
               </button>
-              <input id="COLLABS_OUTSIDE_APIFY_TOKEN" class="secret-field-input token-apify" type="password" spellcheck="false" autocomplete="off" />
+              <input id="APIFY_TOKEN_BACKUP" class="secret-field-input token-apify" type="password" spellcheck="false" autocomplete="off" />
             </div>
           </label>
         </div>

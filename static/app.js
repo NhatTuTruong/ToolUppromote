@@ -72,7 +72,7 @@ let pollStatusBusy = false;
 /** Khớp với ô nhập trong templates/index.html — không gồm AFF_LICENSE_* (chỉnh trong .env, không có field trên web). */
 const settingKeys = [
   "APIFY_TOKEN",
-  "COLLABS_OUTSIDE_APIFY_TOKEN",
+  "APIFY_TOKEN_BACKUP",
   "UPPROMOTE_API_URL",
   "UPPROMOTE_BEARER_TOKEN",
   "UPPROMOTE_PER_PAGE",
@@ -98,7 +98,7 @@ function clampOffersPerPageField(id) {
 /** Không .trim() — giữ nguyên JWT/Bearer (chỉ chuẩn hóa xuống dòng Windows). */
 const SECRET_SETTING_KEYS = new Set([
   "APIFY_TOKEN",
-  "COLLABS_OUTSIDE_APIFY_TOKEN",
+  "APIFY_TOKEN_BACKUP",
   "UPPROMOTE_BEARER_TOKEN",
   "GOAFFPRO_BEARER_TOKEN",
   "REFERSION_TOKEN",

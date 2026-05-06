@@ -833,8 +833,8 @@ def run_pipeline(settings: dict, min_traffic: int, filters: dict, source: str = 
             STATE.add_log("Đã dừng.")
             return
         STATE.add_log(f"Apify đợt {idx}: {len(part)} tên miền")
-        dataset_id = core.apify_call_actor(part)
-        batch = core.apify_list_items(dataset_id)
+        dataset_id, apify_tok = core.apify_call_actor(part)
+        batch = core.apify_list_items(dataset_id, token=apify_tok)
         if outside_similarweb_fallback:
             batch, n_fb = core.merge_outside_similarweb_fallback_batch(part, batch)
             if n_fb:

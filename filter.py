@@ -1781,17 +1781,11 @@ def _fetch_google_result_urls_via_custom_search_api(
     return out
 
 
-def _apify_run_actor(actor_id: str, run_input: dict, wait_secs: int = 180, token: str | None = None) -> str:
-    """
-    Run Apify actor và trả về defaultDatasetId.
-    """
-    tok = (str(token or "").strip() or (os.getenv("APIFY_TOKEN") or "").strip())
-    if not tok:
-        raise RuntimeError("Thiếu APIFY_TOKEN trong .env (cần để chạy Apify actor).")
+def _apify_run_actor_with_token(actor_id: str, run_input: dict, wait_secs: int, tok: str) -> str:
+    """Một lần POST + poll đơn giản (Google actor); tok cố định."""
     act = str(actor_id or "").strip()
     if not act:
         raise RuntimeError("Thiếu COLLABS_OUTSIDE_GOOGLE_ACTOR_ID (Apify actor id).")
-    # Apify API expects "username~actorname" or actorId, not "username/actorname".
     if "/" in act and "~" not in act:
         parts = [p for p in act.split("/") if p]
         if len(parts) >= 2:
@@ -1799,12 +1793,14 @@ def _apify_run_actor(actor_id: str, run_input: dict, wait_secs: int = 180, token
     url = f"https://api.apify.com/v2/acts/{act}/runs?token={tok}&waitForFinish={int(wait_secs)}"
     res = requests.post(url, json=run_input, timeout=max(30, int(wait_secs) + 30))
     if not res.ok:
+        body = (res.text or "")[:800]
+        if _apify_http_suggests_token_failover(res.status_code, body):
+            raise ApifyTokenFailover(f"HTTP {res.status_code}: {body[:300]}")
         raise RuntimeError(f"Apify run actor lỗi HTTP {res.status_code}: {res.text[:300]}")
     body = res.json() if res.text else {}
     data = (body or {}).get("data") or {}
     status = str(data.get("status") or "").upper()
     run_id = str(data.get("id") or "").strip()
-    # Một số lần waitForFinish trả READY/RUNNING (queue/tải cao). Poll thêm thay vì fail ngay.
     if status in {"READY", "RUNNING"} and run_id:
         deadline = time.monotonic() + max(10, int(wait_secs))
         while time.monotonic() < deadline:
@@ -1812,6 +1808,9 @@ def _apify_run_actor(actor_id: str, run_input: dict, wait_secs: int = 180, token
             st_url = f"https://api.apify.com/v2/actor-runs/{run_id}?token={tok}"
             st = requests.get(st_url, timeout=30)
             if not st.ok:
+                pb = (st.text or "")[:800]
+                if _apify_http_suggests_token_failover(st.status_code, pb):
+                    raise ApifyTokenFailover(f"poll HTTP {st.status_code}: {pb[:300]}")
                 continue
             st_body = st.json() if st.text else {}
             st_data = (st_body or {}).get("data") or {}
@@ -1825,6 +1824,35 @@ def _apify_run_actor(actor_id: str, run_input: dict, wait_secs: int = 180, token
     if not dataset_id:
         raise RuntimeError("Apify actor không trả defaultDatasetId")
     return dataset_id
+
+
+def _apify_run_actor(actor_id: str, run_input: dict, wait_secs: int = 180, token: str | None = None) -> tuple[str, str]:
+    """
+    Run Apify actor và trả về (defaultDatasetId, token_đã_dùng).
+    token=None → thử APIFY_TOKEN rồi APIFY_TOKEN_BACKUP khi lỗi quota/quyền.
+    """
+    if str(token or "").strip():
+        t = str(token).strip()
+        return _apify_run_actor_with_token(actor_id, run_input, wait_secs, t), t
+    candidates = apify_effective_token_candidates()
+    if not candidates:
+        raise RuntimeError("Thiếu APIFY_TOKEN trong .env (cần để chạy Apify actor Google Search).")
+    last_fail: Exception | None = None
+    for idx, tok in enumerate(candidates):
+        try:
+            ds = _apify_run_actor_with_token(actor_id, run_input, wait_secs, tok)
+            if idx > 0:
+                print("Apify Google actor: đã dùng token dự phòng (APIFY_TOKEN_BACKUP).")
+            return ds, tok
+        except ApifyTokenFailover as exc:
+            last_fail = exc
+            if idx + 1 < len(candidates):
+                print(f"Apify Google actor: token lỗi — thử dự phòng: {exc}")
+                continue
+            raise RuntimeError(f"Apify Google: hết token thử: {exc}") from exc
+    if last_fail:
+        raise RuntimeError(str(last_fail)) from last_fail
+    raise RuntimeError("Apify: không có token.")
 
 
 def _extract_urls_from_google_actor_items(items: list) -> list[str]:
@@ -1869,17 +1897,13 @@ def _fetch_google_result_urls_via_apify(
     """
     Lấy URL từ Google Search theo đúng cú pháp (inurl/OR/ngoặc) bằng Apify actor.
     Yêu cầu env:
-    - COLLABS_OUTSIDE_APIFY_TOKEN (khuyến nghị) hoặc APIFY_TOKEN
+    - APIFY_TOKEN (và tuỳ chọn APIFY_TOKEN_BACKUP) — dùng chung với Similarweb
     - COLLABS_OUTSIDE_GOOGLE_ACTOR_ID (vd: apify/google-search-scraper)
     """
     q = str(query or "").strip()
     if not q:
         return []
     actor_id = (os.getenv("COLLABS_OUTSIDE_GOOGLE_ACTOR_ID") or "").strip()
-    search_token = (os.getenv("COLLABS_OUTSIDE_APIFY_TOKEN") or "").strip()
-    if not search_token:
-        # Fallback về APIFY_TOKEN để không phá luồng cũ, nhưng khuyến nghị tách token.
-        search_token = (os.getenv("APIFY_TOKEN") or "").strip()
     # Google actor hiện bị giới hạn 10 kết quả/trang (theo cập nhật Google), nên dùng maxPagesPerQuery để tăng tổng.
     cap = max(10, min(300, int(max_results)))
     per_page = 10
@@ -1911,10 +1935,10 @@ def _fetch_google_result_urls_via_apify(
     }
     if should_stop and should_stop():
         return []
-    dataset_id = _apify_run_actor(actor_id, run_input, wait_secs=int(timeout_sec), token=search_token)
+    dataset_id, used_tok = _apify_run_actor(actor_id, run_input, wait_secs=int(timeout_sec), token=None)
     if not dataset_id:
         return []
-    items = apify_list_items(dataset_id, token=search_token)
+    items = apify_list_items(dataset_id, token=used_tok)
     urls = _extract_urls_from_google_actor_items(items)
     # chuẩn hóa + giới hạn
     out: list[str] = []
@@ -3153,14 +3177,56 @@ def _normalize_apify_actor_id(actor_id: str) -> str:
     return act
 
 
-def _apify_store_actor_dataset_id(actor_id: str, run_input: dict, *, wait_secs: int | None = None) -> str:
+class ApifyTokenFailover(Exception):
+    """Token Apify chính có thể hết quota / hết hạn — thử APIFY_TOKEN_BACKUP."""
+
+
+def apify_primary_token() -> str:
     """
-    Chạy actor Apify Store (POST + poll), trả về defaultDatasetId.
-    Dùng chung cho actor Similarweb mặc định và actor fallback outside discovery.
+    Token Apify chính (dùng cho Similarweb + Google Search Collabs ngoài Discovery).
+    COLLABS_OUTSIDE_APIFY_TOKEN chỉ còn để tương thích .env cũ khi APIFY_TOKEN trống.
     """
-    token = (os.getenv("APIFY_TOKEN") or "").strip()
-    if not token:
-        raise RuntimeError("Thiếu APIFY_TOKEN trong .env")
+    return ((os.getenv("APIFY_TOKEN") or "").strip() or (os.getenv("COLLABS_OUTSIDE_APIFY_TOKEN") or "").strip())
+
+
+def apify_effective_token_candidates() -> list[str]:
+    """Chính rồi dự phòng (không trùng)."""
+    primary = apify_primary_token()
+    backup = (os.getenv("APIFY_TOKEN_BACKUP") or "").strip()
+    out: list[str] = []
+    if primary:
+        out.append(primary)
+    if backup and backup not in out:
+        out.append(backup)
+    return out
+
+
+def _apify_http_suggests_token_failover(status: int, body: str) -> bool:
+    if status in (401, 402, 403, 429):
+        return True
+    low = (body or "")[:1200].lower()
+    for hint in (
+        "quota",
+        "limit exceeded",
+        "insufficient credit",
+        "payment required",
+        "unauthorized",
+        "invalid token",
+        "token is invalid",
+        "expired",
+        "usage was exceeded",
+        "monthly usage",
+        "exceeded your",
+    ):
+        if hint in low:
+            return True
+    return status == 400 and any(x in low for x in ("quota", "limit", "credit", "token"))
+
+
+def _apify_store_actor_dataset_id_with_token(
+    actor_id: str, run_input: dict, *, wait_secs: int | None, token: str
+) -> str:
+    """Một lần chạy actor với token cố định (POST + poll)."""
     ws = wait_secs if wait_secs is not None else int(os.getenv("APIFY_WAIT_FOR_FINISH_SECS", "240") or "240")
     http_retries = int(os.getenv("APIFY_HTTP_RETRIES", "3") or "3")
     if http_retries < 1:
@@ -3194,6 +3260,9 @@ def _apify_store_actor_dataset_id(actor_id: str, run_input: dict, *, wait_secs: 
     url = f"https://api.apify.com/v2/acts/{act}/runs?token={token}&waitForFinish={int(ws)}"
     res = _request_with_retry("POST", url, json_payload=run_input, read_timeout_sec=float(ws) + 30.0)
     if not res.ok:
+        body = (res.text or "")[:800]
+        if _apify_http_suggests_token_failover(res.status_code, body):
+            raise ApifyTokenFailover(f"HTTP {res.status_code}: {body[:300]}")
         raise RuntimeError(f"Apify call actor lỗi HTTP {res.status_code}: {res.text[:300]}")
     body = res.json()
     data = body.get("data") or {}
@@ -3212,6 +3281,9 @@ def _apify_store_actor_dataset_id(actor_id: str, run_input: dict, *, wait_secs: 
         poll_url = f"https://api.apify.com/v2/actor-runs/{run_id}?token={token}&waitForFinish={wait_poll_secs}"
         poll_res = _request_with_retry("GET", poll_url, read_timeout_sec=wait_poll_secs + 30)
         if not poll_res.ok:
+            pb = (poll_res.text or "")[:800]
+            if _apify_http_suggests_token_failover(poll_res.status_code, pb):
+                raise ApifyTokenFailover(f"poll HTTP {poll_res.status_code}: {pb[:300]}")
             raise RuntimeError(f"Apify poll lỗi HTTP {poll_res.status_code}: {poll_res.text[:300]}")
         data = (poll_res.json() or {}).get("data") or data
         status = data.get("status")
@@ -3226,7 +3298,35 @@ def _apify_store_actor_dataset_id(actor_id: str, run_input: dict, *, wait_secs: 
     return str(dataset_id)
 
 
-def apify_call_actor(domains: list) -> str:
+def _apify_store_actor_dataset_id(actor_id: str, run_input: dict, *, wait_secs: int | None = None) -> tuple[str, str]:
+    """
+    Chạy actor Apify Store (POST + poll), trả về (defaultDatasetId, token_đã_dùng).
+    Token chính (APIFY_TOKEN) hết quota/401… → tự thử APIFY_TOKEN_BACKUP nếu có.
+    """
+    candidates = apify_effective_token_candidates()
+    if not candidates:
+        raise RuntimeError(
+            "Thiếu APIFY_TOKEN trong .env (Similarweb và tìm Google Collabs ngoài Discovery dùng chung một token)."
+        )
+    last_fail: Exception | None = None
+    for idx, tok in enumerate(candidates):
+        try:
+            ds = _apify_store_actor_dataset_id_with_token(actor_id, run_input, wait_secs=wait_secs, token=tok)
+            if idx > 0:
+                print("Apify: đã dùng token dự phòng (APIFY_TOKEN_BACKUP) sau lỗi token chính.")
+            return ds, tok
+        except ApifyTokenFailover as exc:
+            last_fail = exc
+            if idx + 1 < len(candidates):
+                print(f"Apify token lỗi quota/quyền — chuyển sang token dự phòng: {exc}")
+                continue
+            raise RuntimeError(f"Apify: hết token thử (quota/quyền): {exc}") from exc
+    if last_fail:
+        raise RuntimeError(str(last_fail)) from last_fail
+    raise RuntimeError("Apify: không có token hợp lệ.")
+
+
+def apify_call_actor(domains: list) -> tuple[str, str]:
     if not domains:
         raise RuntimeError("Danh sách domain Apify rỗng")
     return _apify_store_actor_dataset_id(
@@ -3501,8 +3601,8 @@ def merge_outside_similarweb_fallback_batch(part_domains: list, batch_items: lis
         "output_mode": "individual",
     }
     try:
-        ds = _apify_store_actor_dataset_id(fallback_actor, run_input, wait_secs=fb_wait)
-        fb_items = apify_list_items(ds)
+        ds, fb_tok = _apify_store_actor_dataset_id(fallback_actor, run_input, wait_secs=fb_wait)
+        fb_items = apify_list_items(ds, token=fb_tok)
     except Exception as exc:
         print(f"Cảnh báo Similarweb fallback ({fallback_actor}): {exc}")
         out = []
@@ -3543,33 +3643,45 @@ def merge_outside_similarweb_fallback_batch(part_domains: list, batch_items: lis
 
 
 def check_apify_connection() -> str:
-    """Kiểm tra kết nối/tính hợp lệ APIFY_TOKEN trước khi chạy lọc."""
-    token = (os.getenv("APIFY_TOKEN") or "").strip()
-    if not token:
+    """Kiểm tra kết nối Apify; thử token chính rồi token dự phòng."""
+    candidates = apify_effective_token_candidates()
+    if not candidates:
         raise RuntimeError("Thiếu APIFY_TOKEN trong .env")
-    url = f"https://api.apify.com/v2/users/me?token={token}"
-    try:
-        res = requests.get(url, timeout=20)
-    except requests.RequestException as exc:
-        raise RuntimeError(f"Không kết nối được Apify: {exc}") from exc
-    if not res.ok:
-        raise RuntimeError(f"Apify connection check lỗi HTTP {res.status_code}: {res.text[:300]}")
-    try:
-        body = res.json()
-    except Exception as exc:
-        raise RuntimeError("Apify connection check trả về dữ liệu không hợp lệ.") from exc
-    data = body.get("data") or {}
-    username = (
-        str(data.get("username") or "").strip()
-        or str(data.get("email") or "").strip()
-        or str(data.get("id") or "").strip()
-        or "unknown-user"
-    )
-    return username
+    last_err = ""
+    for tok in candidates:
+        url = f"https://api.apify.com/v2/users/me?token={tok}"
+        try:
+            res = requests.get(url, timeout=20)
+        except requests.RequestException as exc:
+            last_err = str(exc)
+            continue
+        if not res.ok:
+            last_err = f"HTTP {res.status_code}: {res.text[:300]}"
+            if _apify_http_suggests_token_failover(res.status_code, res.text or ""):
+                continue
+            raise RuntimeError(f"Apify connection check lỗi HTTP {res.status_code}: {res.text[:300]}")
+        try:
+            body = res.json()
+        except Exception as exc:
+            raise RuntimeError("Apify connection check trả về dữ liệu không hợp lệ.") from exc
+        data = body.get("data") or {}
+        username = (
+            str(data.get("username") or "").strip()
+            or str(data.get("email") or "").strip()
+            or str(data.get("id") or "").strip()
+            or "unknown-user"
+        )
+        return username
+    raise RuntimeError(f"Apify connection check thất bại với mọi token đã cấu hình: {last_err}")
 
 
 def apify_list_items(dataset_id: str, token: str | None = None) -> list:
-    tok = (str(token or "").strip() or (os.getenv("APIFY_TOKEN") or "").strip())
+    tok = (str(token or "").strip() or apify_primary_token())
+    if not tok:
+        cand = apify_effective_token_candidates()
+        if not cand:
+            raise RuntimeError("Thiếu APIFY_TOKEN trong .env")
+        tok = cand[0]
     http_retries = int(os.getenv("APIFY_HTTP_RETRIES", "3") or "3")
     if http_retries < 1:
         http_retries = 1
@@ -3639,8 +3751,8 @@ def main():
     )
     for idx, part in enumerate(chunked(domains, max_domains_per_run), start=1):
         print(f"Apify batch {idx}: {len(part)} domains")
-        dataset_id = apify_call_actor(part)
-        items.extend(apify_list_items(dataset_id))
+        dataset_id, apify_tok = apify_call_actor(part)
+        items.extend(apify_list_items(dataset_id, token=apify_tok))
 
     by_host = {}
     for item in items:

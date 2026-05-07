@@ -1332,13 +1332,13 @@ def run_auto_apply(
                           // 1) Radios by group name (fix trường hợp nhiều câu trong cùng block)
                           const radios = Array.from(document.querySelectorAll('input[type="radio"]'))
                             .filter((i) => isVisible(i) && !i.disabled && !isPurchaseQuestionInput(i));
-                          const groups = new Map();
+                          const radioGroups = new Map();
                           for (const r of radios) {
                             const k = r.name || `__single_${radios.indexOf(r)}`;
-                            if (!groups.has(k)) groups.set(k, []);
-                            groups.get(k).push(r);
+                            if (!radioGroups.has(k)) radioGroups.set(k, []);
+                            radioGroups.get(k).push(r);
                           }
-                          for (const arr of groups.values()) {
+                          for (const arr of radioGroups.values()) {
                             if (!arr.length) continue;
                             if (arr.some((r) => r.checked)) continue;
                             let target = arr.find((r) => /\\byes\\b/.test(textOf(r))) || arr[0];
@@ -1347,19 +1347,41 @@ def run_auto_apply(
                               picked += 1;
                             }
                           }
-                          // 2) Checkboxes: luôn chọn cái đầu tiên (rule mới).
-                          const blocks = Array.from(document.querySelectorAll('fieldset, .Polaris-ChoiceList, .Polaris-FormLayout__Item, form, div'));
-                          for (const b of blocks) {
-                            const boxes = Array.from(b.querySelectorAll('input[type="checkbox"]'))
-                              .filter((i) => isVisible(i) && !i.disabled);
-                            if (!boxes.length) continue;
-                            if (boxes.some((x) => isPurchaseQuestionInput(x))) continue;
-                            if (boxes.some((x) => x.checked)) continue;
-                            let target = boxes[0];
-                            if (target) {
-                              target.click();
-                              picked += 1;
+                          // 2) Checkboxes: mỗi cụm câu hỏi chỉ giữ checkbox đầu tiên.
+                          const allBoxes = Array.from(document.querySelectorAll('input[type="checkbox"]'))
+                            .filter((i) => isVisible(i) && !i.disabled && !isPurchaseQuestionInput(i));
+                          const checkboxGroups = new Map();
+                          const groupRootOf = (el) => {
+                            return el.closest('fieldset, .Polaris-LegacyStack, .Polaris-ChoiceList, [role="group"], .Polaris-FormLayout__Item, form')
+                              || el.closest('div')
+                              || document.body;
+                          };
+                          for (const cb of allBoxes) {
+                            const root = groupRootOf(cb);
+                            const key = root;
+                            if (!checkboxGroups.has(key)) checkboxGroups.set(key, []);
+                            checkboxGroups.get(key).push(cb);
+                          }
+                          for (const arr of checkboxGroups.values()) {
+                            if (!arr.length) continue;
+                            const target = arr[0];
+                            let changed = false;
+                            const hasChecked = arr.some((x) => x.checked);
+                            if (hasChecked) {
+                              // Có ô đã tick: clear toàn bộ rồi tick lại ô đầu.
+                              for (let i = 0; i < arr.length; i += 1) {
+                                if (arr[i].checked) {
+                                  arr[i].click();
+                                  changed = true;
+                                }
+                              }
                             }
+                            // Không có ô nào tick hoặc vừa clear xong: chỉ tick ô đầu.
+                            if (target && !target.checked) {
+                              target.click();
+                              changed = true;
+                            }
+                            if (changed) picked += 1;
                           }
                           return picked;
                         }""",

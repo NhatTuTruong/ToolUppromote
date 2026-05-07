@@ -2070,9 +2070,33 @@ def _build_random_letter_pair_outside_collabs_query() -> str:
 
 def build_random_outside_collabs_google_query() -> str:
     """
-    Mỗi lần lọc: **một** query — ngẫu nhiên **hoặc** dạng chữ (x OR y) **hoặc** một chuỗi cố định.
-    Hai họ có xác suất ~50/50 để dạng chữ vẫn được dùng thường xuyên.
+    Mỗi lần lọc: **một** query.
+
+    - GROUP_QERRY=1 (mặc định hoặc trống): giữ hành vi cũ — query
+      ngẫu nhiên dạng chữ (x OR y) hoặc một chuỗi cố định trong
+      _OUTSIDE_COLLABS_GOOGLE_FIXED_QUERIES.
+    - GROUP_QERRY=2: dùng nhóm query mới:
+      ("/pages/affiliate" OR "/pages/collab") (intitle:"Collabs" OR intitle:"Community") ("x" OR "y").
     """
+    group = (os.getenv("GROUP_QERRY") or "1").strip()
+    if group == "2":
+        x, y = random.sample(string.ascii_lowercase, 2)
+        template = (
+            os.getenv(
+                "COLLABS_OUTSIDE_GOOGLE_GROUP2_QUERY_TEMPLATE",
+                '("/pages/affiliate" OR "/pages/collab") '
+                '(intitle:"Collabs" OR intitle:"Community") ("x" OR "y")',
+            )
+            or ""
+        ).strip()
+        # Hỗ trợ 2 kiểu placeholder:
+        # - Mặc định theo bạn: ("x" OR "y") sẽ được thay "x"/"y" bằng chữ cái random.
+        # - Hoặc template dùng {x}/{y} thì format trực tiếp.
+        if "{x}" in template or "{y}" in template:
+            return template.format(x=x, y=y)
+        return template.replace('"x"', f'"{x}"').replace('"y"', f'"{y}"')
+
+    # Nhóm 1: hành vi cũ.
     if random.random() < 0.5:
         return _build_random_letter_pair_outside_collabs_query()
     return random.choice(_OUTSIDE_COLLABS_GOOGLE_FIXED_QUERIES)

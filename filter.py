@@ -2,11 +2,15 @@ import csv
 import ast
 import json
 import os
+import random
+from collections.abc import Callable
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import re
+import string
 import sys
 import time
 from pathlib import Path
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, quote_plus, unquote, urlencode, urljoin, urlparse, urlunparse
 
 import requests
 
@@ -20,6 +24,8 @@ if hasattr(sys.stderr, "reconfigure"):
 
 BASE_DIR = app_dir()
 ACTOR_ID = "aqPbs3KeH9aD8b22w"
+# Collabs outside discovery: fallback khi actor Similarweb mặc định không trả traffic (tắt bằng COLLABS_OUTSIDE_SIMILARWEB_FALLBACK_ACTOR="").
+DEFAULT_OUTSIDE_SIMILARWEB_FALLBACK_ACTOR = "radeance~similarweb-scraper"
 MIN_VISITS = int(os.getenv("MIN_VISITS", "9000") or "9000")
 TOP_KEYWORDS_COUNT = int(os.getenv("TOP_KEYWORDS_COUNT", "5") or "5")
 
@@ -28,10 +34,12 @@ DEFAULT_APIFY_MAX_DOMAINS_PER_RUN = 50
 DEFAULT_UPPROMOTE_PAGE_DELAY_MS = 250
 DEFAULT_GOAFFPRO_PAGE_DELAY_MS = 250
 DEFAULT_REFERSION_PAGE_DELAY_MS = 250
+DEFAULT_COLLABS_PAGE_DELAY_MS = 50
 DEFAULT_OFFERS_PER_PAGE = 50
 MAX_OFFERS_PER_PAGE = 50
 MIN_OFFERS_PER_PAGE = 10
 OFFERS_PER_PAGE_STEP = 10
+DEFAULT_COLLABS_LIMIT = 12
 
 
 def clamp_offers_per_page(raw) -> int:
@@ -52,6 +60,11 @@ def clamp_offers_per_page(raw) -> int:
     return n
 
 
+def clamp_collabs_limit(raw) -> int:
+    """Collabs cố định 12 brand/request (giữ hàm để tương thích call-site cũ)."""
+    return DEFAULT_COLLABS_LIMIT
+
+
 def enforce_fixed_fetch_defaults() -> None:
     """Apify 50 domain/lần; Uppromote & Goaffpro trễ 250ms/trang; không giới hạn số trang; offer/trang (Up & Go) theo .env/UI đã chuẩn hóa."""
     os.environ["APIFY_MAX_DOMAINS_PER_RUN"] = str(DEFAULT_APIFY_MAX_DOMAINS_PER_RUN)
@@ -61,8 +74,11 @@ def enforce_fixed_fetch_defaults() -> None:
     os.environ.pop("GOAFFPRO_MAX_PAGES", None)
     os.environ["REFERSION_PAGE_DELAY_MS"] = str(DEFAULT_REFERSION_PAGE_DELAY_MS)
     os.environ.pop("REFERSION_MAX_PAGES", None)
+    os.environ["COLLABS_PAGE_DELAY_MS"] = str(DEFAULT_COLLABS_PAGE_DELAY_MS)
+    os.environ.pop("COLLABS_MAX_PAGES", None)
     os.environ["UPPROMOTE_PER_PAGE"] = str(clamp_offers_per_page(os.getenv("UPPROMOTE_PER_PAGE")))
     os.environ["GOAFFPRO_LIMIT"] = str(clamp_offers_per_page(os.getenv("GOAFFPRO_LIMIT")))
+    os.environ["COLLABS_LIMIT"] = str(clamp_collabs_limit(os.getenv("COLLABS_LIMIT")))
 
 
 def uppromote_max_pages_cap() -> int | None:
@@ -92,6 +108,18 @@ def goaffpro_max_pages_cap() -> int | None:
 def refersion_max_pages_cap() -> int | None:
     """None = không giới hạn trang Refersion."""
     raw = (os.getenv("REFERSION_MAX_PAGES") or "").strip().lower()
+    if not raw or raw in ("0", "unlimited", "none", "no", "inf"):
+        return None
+    try:
+        n = int(raw)
+    except ValueError:
+        return None
+    return n if n > 0 else None
+
+
+def collabs_max_pages_cap() -> int | None:
+    """None = không giới hạn trang Shopify Collabs."""
+    raw = (os.getenv("COLLABS_MAX_PAGES") or "").strip().lower()
     if not raw or raw in ("0", "unlimited", "none", "no", "inf"):
         return None
     try:
@@ -196,11 +224,24 @@ def apify_site_field(item: dict) -> str:
     """Tên site/domain trong item Apify (nhiều actor đặt tên khác nhau)."""
     if not item:
         return ""
+    # Chuẩn hoá map key lowercase để hỗ trợ actor trả key khác kiểu chữ.
+    low = {str(k).strip().lower(): v for k, v in item.items()}
     return (
         item.get("SiteName")
         or item.get("siteName")
         or item.get("Domain")
         or item.get("domain")
+        or item.get("Website")
+        or item.get("website")
+        or item.get("Url")
+        or item.get("url")
+        or item.get("Site")
+        or item.get("site")
+        or low.get("sitename")
+        or low.get("domain")
+        or low.get("website")
+        or low.get("url")
+        or low.get("site")
         or ""
     )
 
@@ -209,10 +250,26 @@ def engagement_from_item(item: dict) -> dict:
     """Khối engagement / hoặc Visits nằm ngang item."""
     if not item:
         return {}
-    eng = item.get("Engagments") or item.get("Engagements") or item.get("engagement")
+    low = {str(k).strip().lower(): v for k, v in item.items()}
+    eng = (
+        item.get("Engagments")
+        or item.get("Engagements")
+        or item.get("engagement")
+        or low.get("engagments")
+        or low.get("engagements")
+        or low.get("engagement")
+    )
     if isinstance(eng, dict) and eng:
         return eng
-    if item.get("Visits") is not None or item.get("VisitsFormatted") is not None:
+    # Một số actor để traffic nằm ngang item với key khác casing.
+    if (
+        item.get("Visits") is not None
+        or item.get("VisitsFormatted") is not None
+        or low.get("visits") is not None
+        or low.get("visitsformatted") is not None
+        or low.get("estimatedmonthlyvisits") is not None
+        or low.get("monthlyvisits") is not None
+    ):
         return item
     return {}
 
@@ -220,25 +277,56 @@ def engagement_from_item(item: dict) -> dict:
 def parse_visits_from_engagement(eng: dict) -> float:
     if not eng:
         return 0.0
-    raw = eng.get("Visits")
+    low = {str(k).strip().lower(): v for k, v in eng.items()} if isinstance(eng, dict) else {}
+    raw = eng.get("Visits") if isinstance(eng, dict) else None
     if raw is None:
-        raw = eng.get("EstimatedVisits") or eng.get("Traffic") or eng.get("MonthlyVisits")
+        raw = (
+            (eng.get("EstimatedVisits") if isinstance(eng, dict) else None)
+            or (eng.get("Traffic") if isinstance(eng, dict) else None)
+            or (eng.get("MonthlyVisits") if isinstance(eng, dict) else None)
+            or low.get("visits")
+            or low.get("estimatedvisits")
+            or low.get("traffic")
+            or low.get("monthlyvisits")
+            or low.get("estimatedmonthlyvisits")
+        )
     return parse_visits_value(raw)
 
 
 def estimated_monthly_visits_formatted(item: dict, eng: dict | None = None) -> str:
     """Chuỗi traffic theo tháng từ Apify, ưu tiên field gốc trên item."""
     src_eng = eng if isinstance(eng, dict) else {}
+    item_low = {str(k).strip().lower(): v for k, v in (item or {}).items()}
+    eng_low = {str(k).strip().lower(): v for k, v in src_eng.items()}
     candidates = (
         (item or {}).get("EstimatedMonthlyVisitsFormatted"),
         src_eng.get("EstimatedMonthlyVisitsFormatted"),
         (item or {}).get("EstimatedMonthlyVisits"),
         src_eng.get("EstimatedMonthlyVisits"),
+        item_low.get("estimatedmonthlyvisitsformatted"),
+        eng_low.get("estimatedmonthlyvisitsformatted"),
+        item_low.get("estimatedmonthlyvisits"),
+        eng_low.get("estimatedmonthlyvisits"),
     )
     for v in candidates:
         if v is not None and str(v).strip():
             return format_estimated_monthly_visits(v)
     return ""
+
+
+def visits_formatted_from_engagement(eng: dict | None) -> str:
+    if not isinstance(eng, dict) or not eng:
+        return ""
+    low = {str(k).strip().lower(): v for k, v in eng.items()}
+    raw = eng.get("VisitsFormatted") or low.get("visitsformatted")
+    if raw is not None and str(raw).strip():
+        return str(raw).strip()
+    visits = parse_visits_from_engagement(eng)
+    if visits <= 0:
+        return ""
+    if float(visits).is_integer():
+        return str(int(visits))
+    return f"{visits:.2f}".rstrip("0").rstrip(".")
 
 
 def format_estimated_monthly_visits(raw) -> str:
@@ -380,6 +468,139 @@ def build_refersion_headers() -> dict:
             "(KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
         ),
     }
+
+
+def build_collabs_headers() -> dict:
+    cookie = (os.getenv("COLLABS_COOKIE") or "").strip()
+    csrf = (os.getenv("COLLABS_CSRF_TOKEN") or "").strip()
+    if not cookie:
+        raise RuntimeError("Thiếu COLLABS_COOKIE trong .env")
+    if not csrf:
+        raise RuntimeError("Thiếu COLLABS_CSRF_TOKEN trong .env")
+    return {
+        "accept": "*/*",
+        "content-type": "application/json",
+        "cookie": cookie,
+        "origin": os.getenv("COLLABS_ORIGIN", "https://collabs.shopify.com"),
+        "referer": os.getenv("COLLABS_REFERER", "https://collabs.shopify.com/"),
+        "x-client-type": os.getenv("COLLABS_CLIENT_TYPE", "web"),
+        "x-csrf-token": csrf,
+        "user-agent": os.getenv(
+            "COLLABS_USER_AGENT",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
+        ),
+    }
+
+
+COLLABS_BRANDS_QUERY = (
+    "query BrandsQuery($first: Int, $last: Int, $after: String, $before: String, "
+    "$brandValues: [BrandValue!], $categories: [ProductCategory!], "
+    "$productCategories: [CreatorProductCategory!], $saved: Boolean, $searchQuery: String) {"
+    " socialAccounts { id __typename }"
+    " brandsNetworkSearch("
+    "   first: $first"
+    "   last: $last"
+    "   after: $after"
+    "   before: $before"
+    "   brandValues: $brandValues"
+    "   categories: $categories"
+    "   productCategories: $productCategories"
+    "   saved: $saved"
+    "   searchQuery: $searchQuery"
+    " ) {"
+    "   totalCount"
+    "   pageInfo { hasNextPage hasPreviousPage endCursor startCursor __typename }"
+    "   nodes {"
+    "     id"
+    "     ... on BrandInterface {"
+    "       name"
+    "       logoUrl"
+    "       images"
+    "       backgroundColor"
+    "       shopifyStore { id shopifyStoreId __typename }"
+    "       saved"
+    "       partnershipStatus"
+    "       productCategory"
+    "       networkCommissionRange"
+    "       partnershipState"
+    "       targetCountries"
+    "       previouslyPurchased"
+    "       __typename"
+    "     }"
+    "     __typename"
+    "   }"
+    "   __typename"
+    " }"
+    "}"
+)
+
+COLLABS_BRAND_PROFILE_QUERY = (
+    "query DiscoverBrandProfileQuery($shopifyStoreId: GID!) {"
+    " socialAccounts { id __typename }"
+    " brand(shopifyStoreId: $shopifyStoreId) {"
+    "   id"
+    "   ... on BrandInterface {"
+    "     name"
+    "     holdingPeriod"
+    "     socialLinks { platform url __typename }"
+    "     shopifyStore { id shopifyStoreId __typename }"
+    "     __typename"
+    "   }"
+    "   __typename"
+    " }"
+    " creator { submittedApplications submittedApplicationsLimit __typename }"
+    "}"
+)
+
+COLLABS_CATEGORY_LABELS = {
+    "CLOTHING_AND_ACCESSORIES": "Clothing and accessories",
+    "WOMENS_CLOTHING": "Women's clothing and accessories",
+    "MENS_CLOTHING": "Men's clothing and accessories",
+    "BEAUTY": "Beauty",
+    "HEALTH_AND_WELLNESS": "Health and wellness",
+    "FOOD_AND_DRINK": "Food and drink",
+    "HOME_GOODS_AND_DECOR": "Home goods and decor",
+    "BABY_AND_TODDLER": "Baby and toddler",
+    "ELECTRONICS": "Electronics",
+    "SPORTS_GOODS": "Sports goods",
+    "ARTS_AND_CRAFTS": "Arts and crafts",
+    "TECH": "Tech",
+    "PHOTOGRAPHY": "Photography",
+    "PET_SUPPLIES_AND_ACCESSORIES": "Pet supplies and accessories",
+    "DIY": "DIY",
+    "AUTOMOTIVE": "Automotive",
+    "GARDENING": "Gardening",
+    "TOBACCO_AND_VAPE": "Tobacco and vape",
+    "MATURE": "Mature",
+    "MUSICAL_INSTRUMENTS_AND_ACCESSORIES": "Musical instruments and accessories",
+}
+
+
+def collabs_category_label(raw_code: str) -> str:
+    code = str(raw_code or "").strip().upper()
+    if not code:
+        return ""
+    return COLLABS_CATEGORY_LABELS.get(code, code)
+
+
+def format_collabs_holding_period(raw) -> str:
+    """Chuẩn hóa holding period: số -> thêm ' day'."""
+    if raw is None:
+        return ""
+    s = str(raw).strip()
+    if not s:
+        return ""
+    low = s.lower()
+    if "day" in low:
+        return s
+    try:
+        n = float(s.replace(",", ""))
+    except ValueError:
+        return s
+    if abs(n - round(n)) < 1e-9:
+        return f"{int(round(n))} day"
+    return f"{n:g} day"
 
 
 def with_page(url: str, page: int) -> str:
@@ -714,6 +935,1469 @@ def map_refersion_offer(offer: dict) -> dict:
     }
 
 
+def _collabs_storefront_url(social_links) -> str:
+    if not isinstance(social_links, list):
+        return ""
+    for item in social_links:
+        if not isinstance(item, dict):
+            continue
+        platform = str(item.get("platform") or "").strip().upper()
+        if platform != "STOREFRONT":
+            continue
+        url = str(item.get("url") or "").strip()
+        if url.startswith("http://") or url.startswith("https://"):
+            return url
+    return ""
+
+
+def _collabs_brand_url(node: dict, detail_brand: dict | None = None) -> str:
+    # Ưu tiên domain storefront từ API detail, vì list query không trả website đầy đủ.
+    if isinstance(detail_brand, dict):
+        storefront_url = _collabs_storefront_url(detail_brand.get("socialLinks"))
+        if storefront_url:
+            return storefront_url
+    # Fallback cũ: map sang myshopify khi chỉ có store id.
+    store = node.get("shopifyStore") if isinstance(node.get("shopifyStore"), dict) else {}
+    sid = str(store.get("shopifyStoreId") or "").strip()
+    if sid and sid.isdigit():
+        return f"https://{sid}.myshopify.com"
+    return ""
+
+
+def map_collabs_brand(node: dict, detail_brand: dict | None = None) -> dict:
+    name = str(node.get("name") or "").strip()
+    commission = node.get("networkCommissionRange")
+    if commission in (None, ""):
+        offer = ""
+    else:
+        offer = f"{commission}%"
+    category_code = str(node.get("productCategory") or "").strip().upper()
+    return {
+        "brand": name,
+        "url": _collabs_brand_url(node, detail_brand),
+        "offer": offer,
+        "cookieDays": "",
+        "client_url": "",
+        "offer_id": node.get("id") or "",
+        "shop_id": (node.get("shopifyStore") or {}).get("id") if isinstance(node.get("shopifyStore"), dict) else "",
+        "program_id": "",
+        "mkp_listing_id": node.get("id") or "",
+        "commission_type": "network_commission_range",
+        "category": collabs_category_label(category_code),
+        "collabs_product_category_code": category_code,
+        "epc": "",
+        "payments": "",
+        "currency": "",
+        "payout_rate": "",
+        "approval_rate": "",
+        "offer_score": "",
+        "recommend_score": "",
+        "application_review": "",
+        "promotion_details": [],
+        "target_audience_customer_channels": [],
+        "target_audience_locations": [],
+        "target_audience_ages": [],
+        "target_audience_genders": [],
+        "can_apply_offer": None,
+        "is_applied_offer": None,
+        "collabs_partnership_status": node.get("partnershipStatus") or "",
+        "collabs_partnership_state": node.get("partnershipState") or "",
+        "collabs_saved": node.get("saved"),
+        "collabs_previously_purchased": node.get("previouslyPurchased"),
+        "collabs_target_countries": join_list(node.get("targetCountries") or []),
+        "collabs_logo_url": node.get("logoUrl") or "",
+        "collabs_images": join_list(node.get("images") or []),
+        "collabs_shopify_store_id": ((node.get("shopifyStore") or {}).get("shopifyStoreId") if isinstance(node.get("shopifyStore"), dict) else ""),
+        "collabs_holding_period": (detail_brand.get("holdingPeriod") if isinstance(detail_brand, dict) else ""),
+    }
+
+
+def collabs_shopify_store_gid(node: dict) -> str:
+    store = node.get("shopifyStore") if isinstance(node.get("shopifyStore"), dict) else {}
+    raw_id = str(store.get("id") or "").strip()
+    if not raw_id:
+        return ""
+    if raw_id.startswith("gid://"):
+        return raw_id
+    return f"gid://dovetale-api/ShopifyStore/{raw_id}"
+
+
+def resolve_redirected_url(url: str, timeout_sec: int = 20) -> str:
+    """
+    Theo dõi redirect để lấy URL đích cuối (brand gốc).
+    Trả về URL ban đầu nếu request lỗi/timeout.
+    """
+    raw = str(url or "").strip()
+    if not raw:
+        return ""
+    if not (raw.startswith("http://") or raw.startswith("https://")):
+        return raw
+    try:
+        res = requests.get(raw, allow_redirects=True, timeout=timeout_sec, stream=True)
+        final_url = str(res.url or "").strip()
+        try:
+            res.close()
+        except Exception:
+            pass
+        return final_url or raw
+    except Exception:
+        return raw
+
+
+def _collabs_html_has_outside_cta_phrases(low_html: str) -> bool:
+    """
+    CTA trên trang (low_html = HTML đã .lower()).
+    Logic **HOẶC**: chỉ cần xuất hiện **một** trong các nhóm dưới → True.
+    - apply now hoặc apply-now
+    - chứa chuỗi con join (joining, rejoin, joint, …)
+    - sign up
+    - partner with us
+    - get started
+    - join community
+    """
+    if not low_html:
+        return False
+    return any(
+        (
+            ("apply now" in low_html or "apply-now" in low_html),
+            ("join" in low_html),
+            ("sign up" in low_html),
+            ("partner with us" in low_html),
+            ("get started" in low_html),
+            ("join community" in low_html),
+        )
+    )
+
+
+def _collabs_page_looks_like_signup(html: str, url: str = "") -> bool:
+    text = (html or "").lower()
+    u = (url or "").lower()
+    title_match = re.search(r"<title[^>]*>(.*?)</title>", html or "", flags=re.I | re.S)
+    title_text = (title_match.group(1).strip().lower() if title_match else "")
+    if "class=\"collabs-page__main\"" in text or "class='collabs-page__main'" in text:
+        return True
+    if "community" in title_text:
+        return True
+    signup_path_hints = (
+        "/pages/collab",
+        "/pages/collabs",
+        "/pages/collabs-signup",
+        "/pages/partnerships",
+        "/pages/ambassador",
+        "/pages/affiliate",
+        "/pages/affiliates",
+        "/pages/collaborators",
+        "/pages/affiliate-program",
+        "/pages/affiliate-programs",
+        "/pages/ambassadors",
+        "/pages/ambassador-program",
+        "/pages/ambassador-programs",
+        "/pages/collaboration",
+        "/pages/partners",
+        "/pages/partner-program",
+        "/pages/partner-programs",
+        "/pages/collaborations",
+        "/pages/curious-community",
+        "/pages/shopify-collabs",
+        "/ambassadors",
+        "/ambassador",
+        "/community",
+        "/affiliates",
+        "/affiliate",
+        "/affiliate-program",
+        "/affiliate-programs",
+        "/collab",
+        "/collabs",
+        "/collaborators",
+        "/partnerships",
+        "/partners",
+        "/partner",
+        "/partner-program",
+        "/partner-programs",
+        "/collaborations",
+        "/collaboration",
+        "/ambassador-program",
+        "/ambassador-programs",
+        "/curious-community",
+        "-com",
+        "ambassadors",
+        "ambassador",
+        "community",
+        "affiliates",
+        "affiliate",
+        "affiliate-program",
+        "affiliate-programs",
+        "collab",
+        "collabs",
+        "collaborators",
+        "partnerships",
+        "partners",
+        "partner",
+        "partner-program",
+        "partner-programs",
+        "collaborations",
+        "collaboration",
+        "ambassador-program",
+        "ambassador-programs",
+        "curious-community"
+    )
+    if any(p in u for p in signup_path_hints):
+        return True
+    if _collabs_html_has_outside_cta_phrases(text):
+        return True
+    score = 0
+    if "collab" in text:
+        score += 1
+    if "affiliate" in text:
+        score += 1
+    if "apply" in text or "application" in text:
+        score += 1
+    return score >= 2
+
+
+def _collabs_page_has_signup_cta(html: str) -> bool:
+    """
+    Tiêu chí đúng cho trang đăng ký Collabs:
+    page phải có element: <div class="collabs-page__cta ..."> (hoặc single-quote).
+    """
+    h = html or ""
+    # Bắt buộc là div.collabs-page__cta để tránh false-positive từ script/css hoặc element khác.
+    return bool(
+        re.search(
+            r"""<div[^>]*\bclass\s*=\s*["'][^"']*\bcollabs-page__cta\b[^"']*["'][^>]*>""",
+            h,
+            flags=re.I,
+        )
+    )
+
+
+def discover_collabs_signup_url(
+    site_url: str, timeout_sec: int = 20, should_stop: Callable[[], bool] | None = None
+) -> str:
+    """
+    Tìm link đăng ký collabs từ domain chính.
+    Ưu tiên /pages/collab; fallback quét homepage để tìm href chứa collab/affiliate.
+    Nếu should_stop trả True (vd. người dùng bấm hủy), trả chuỗi rỗng sớm.
+    """
+    raw = str(site_url or "").strip()
+    if not raw:
+        return ""
+    parsed = urlparse(raw if "://" in raw else f"https://{raw}")
+    if not parsed.netloc:
+        return ""
+    base = f"{parsed.scheme or 'https'}://{parsed.netloc}"
+    default_signup = f"{base}/pages/collab"
+
+    # Tổng thời gian tìm kiếm cho 1 domain (giây). Quá thời gian -> trả default và nhảy domain khác.
+    # Yêu cầu mới: tối đa 30 giây (có thể override bằng env).
+    max_domain_search_sec = int(os.getenv("COLLABS_SIGNUP_MAX_DOMAIN_SECONDS", "30") or "30")
+    if max_domain_search_sec < 5:
+        max_domain_search_sec = 5
+    deadline = time.monotonic() + float(max_domain_search_sec)
+
+    def _halt() -> bool:
+        return should_stop is not None and bool(should_stop())
+
+    def _remaining_sec() -> float:
+        return max(0.0, deadline - time.monotonic())
+
+    def _try_get(candidate_url: str) -> tuple[str, str]:
+        if _halt() or _remaining_sec() <= 0:
+            return "", ""
+        try:
+            # Mỗi request dùng timeout theo phần thời gian còn lại (không vượt quá timeout_sec).
+            req_timeout = min(float(timeout_sec), max(0.5, _remaining_sec()))
+            res = requests.get(candidate_url, allow_redirects=True, timeout=req_timeout)
+            final_url = str(res.url or candidate_url).strip()
+            if not res.ok:
+                return "", ""
+            ctype = str(res.headers.get("content-type") or "").lower()
+            # Tránh tải nhầm file/binary; ưu tiên HTML.
+            if ctype and ("text/html" not in ctype) and ("application/xhtml" not in ctype):
+                return "", ""
+            text = res.text or ""
+            return final_url, text
+        except Exception:
+            return "", ""
+
+    def _bases_to_try() -> list[str]:
+        # Dù input là http/https, thử cả hai để giảm bỏ sót.
+        return [f"https://{parsed.netloc}", f"http://{parsed.netloc}"]
+
+    # 0) Quét nhanh homepage trước khi brute-force preferred paths
+    # để bắt các slug tùy biến như /pages/westoncommunity.
+    home_url, home_html = _try_get(base)
+    if home_url:
+        quick_keywords = ("community", "-com", "collab", "affiliate", "ambassador", "partner", "apply", "creator", "influencer", "ambassadors", "ambassador", "community", "affiliates", "affiliate", "affiliate-program", "affiliate-programs", "collab", "collabs", "collaborators", "partnerships", "partners", "partner", "partner-program", "partner-programs", "collaborations", "collaboration", "ambassador-program", "ambassador-programs", "curious-community")
+        quick_links = []
+        for href in re.findall(r"""href=["']([^"'#]+)["']""", home_html or "", flags=re.I):
+            h = str(href or "").strip()
+            if not h:
+                continue
+            low_h = h.lower()
+            if low_h.startswith(("mailto:", "tel:", "javascript:", "data:")):
+                continue
+            cand = urljoin(home_url, h)
+            cp = urlparse(cand)
+            if cp.netloc != parsed.netloc:
+                continue
+            normalized = f"{cp.scheme or 'https'}://{cp.netloc}{cp.path or '/'}"
+            low = normalized.lower()
+            if any(k in low for k in quick_keywords):
+                quick_links.append(normalized)
+        # Ưu tiên community trước, sau đó collab/affiliate.
+        quick_links = sorted(
+            set(quick_links),
+            key=lambda u: (0 if "community" in u.lower() else (1 if "collab" in u.lower() else 2)),
+        )
+        for cand in quick_links[:60]:
+            if _halt() or _remaining_sec() <= 0:
+                break
+            final_url, html = _try_get(cand)
+            if final_url and _collabs_page_has_signup_cta(html):
+                return final_url
+
+    preferred_paths = [
+        "/pages/collab",
+        "/pages/collabs",
+        "/pages/collabs-signup",
+        "/pages/partnerships",
+        "/pages/ambassador",
+        "/pages/affiliate",
+        "/pages/affiliates",
+        "/pages/collaborators",
+        "/pages/affiliate-program",
+        "/pages/affiliate-programs",
+        "/pages/ambassadors",
+        "/pages/ambassador-program",
+        "/pages/ambassador-programs",
+        "/pages/collaboration",
+        "/pages/partners",
+        "/pages/partner-program",
+        "/pages/partner-programs",
+        "/pages/collaborations",
+        "/pages/curious-community",
+        "/pages/shopify-collabs",
+        "/ambassadors",
+        "/ambassador",
+        "/community",
+        "/affiliates",
+        "/affiliate",
+        "/affiliate-program",
+        "/affiliate-programs",
+        "/collab",
+        "/collabs",
+        "/collaborators",
+        "/partnerships",
+        "/partners",
+        "/partner",
+        "/partner-program",
+        "/partner-programs",
+        "/collaborations",
+        "/collaboration",
+        "/ambassador-program",
+        "/ambassador-programs",
+        "/curious-community",
+        "-com",
+    ]
+    # 1) Thử các path phổ biến trên cả https/http base. Tìm thấy là trả ngay.
+    for b in _bases_to_try():
+        for p in preferred_paths:
+            if _halt():
+                return ""
+            if _remaining_sec() <= 0:
+                return default_signup
+            final_url, text = _try_get(f"{b}{p}")
+            if final_url and _collabs_page_has_signup_cta(text):
+                return final_url
+
+    # 2) Nếu homepage chưa có từ bước quét nhanh thì lấy lại.
+    if not home_url:
+        home_url, home_html = _try_get(base)
+    if _halt():
+        return ""
+    if not home_url:
+        return default_signup
+
+    # 2.05) Quick-hit từ homepage: thử ngay các link nội bộ có tín hiệu cộng đồng/collab
+    # để tránh rơi fallback /pages/collab khi site dùng slug tùy biến như /pages/westoncommunity.
+    def _extract_same_domain_links_quick(page_html: str, page_url: str) -> list[str]:
+        out = []
+        for href in re.findall(r"""href=["']([^"'#]+)["']""", page_html or "", flags=re.I):
+            h = str(href).strip()
+            if not h:
+                continue
+            low_h = h.lower()
+            if low_h.startswith(("mailto:", "tel:", "javascript:", "data:")):
+                continue
+            cand = urljoin(page_url, h)
+            cp = urlparse(cand)
+            if cp.netloc != parsed.netloc:
+                continue
+            path = cp.path or "/"
+            low_path = path.lower()
+            if any(
+                low_path.endswith(ext)
+                for ext in (".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg", ".js", ".css", ".pdf", ".xml")
+            ):
+                continue
+            out.append(f"{cp.scheme or 'https'}://{cp.netloc}{path}")
+        return out
+
+    quick_candidates = _extract_same_domain_links_quick(home_html, home_url)
+    # Ưu tiên community/collab trước để tăng độ chính xác cho Shopify Collabs page.
+    quick_candidates.sort(
+        key=lambda u: (
+            0
+            if "community" in u.lower()
+            else (1 if "collab" in u.lower() else (2 if "affiliate" in u.lower() else 3))
+        )
+    )
+    for cand in quick_candidates:
+        if _halt() or _remaining_sec() <= 0:
+            break
+        low = cand.lower()
+        if not any(k in low for k in ("community", "collab", "affiliate", "ambassador", "partner", "apply")):
+            continue
+        final_url, html = _try_get(cand)
+        if final_url and _collabs_page_has_signup_cta(html):
+            return final_url
+
+    # 2.1) Thử lấy thêm candidate từ sitemap để bắt các slug tùy biến
+    # kiểu /pages/westoncommunity (không nằm trong preferred_paths).
+    def _try_sitemap_candidates() -> str:
+        if _halt() or _remaining_sec() <= 0:
+            return ""
+        sitemap_urls = [f"{base}/sitemap.xml", f"{base}/sitemap_index.xml"]
+        keywords = ("collab", "affiliate", "ambassador", "community", "partner", "creator", "influencer", "apply", "-com", "collaborations", "collaboration", "collaborator", "collaborators", "partnerships", "partnership", "partners", "partner", "partner-program", "partner-programs", "ambassadors", "ambassador", "ambassador-program", "ambassador-programs", "curious-community")
+        seen_sitemaps = set()
+
+        def _iter_locs_from_sitemap(sm_url: str, depth: int = 0) -> list[str]:
+            if _halt() or _remaining_sec() <= 0:
+                return []
+            s = str(sm_url or "").strip()
+            if not s or s in seen_sitemaps:
+                return []
+            seen_sitemaps.add(s)
+            try:
+                req_timeout = min(float(timeout_sec), max(0.5, _remaining_sec()))
+                res = requests.get(s, allow_redirects=True, timeout=req_timeout)
+                if not res.ok:
+                    return []
+                text = res.text or ""
+            except Exception:
+                return []
+            locs = [str(x or "").strip() for x in re.findall(r"<loc>(.*?)</loc>", text, flags=re.I | re.S)]
+            out: list[str] = []
+            for loc in locs:
+                if not loc:
+                    continue
+                cp = urlparse(loc)
+                if cp.netloc != parsed.netloc:
+                    continue
+                low = loc.lower()
+                # sitemap index -> đi sâu thêm 1 cấp vào sitemap con
+                if low.endswith(".xml"):
+                    if depth < 1:
+                        out.extend(_iter_locs_from_sitemap(loc, depth=depth + 1))
+                    continue
+                out.append(loc)
+            return out
+
+        for sm in sitemap_urls:
+            if _halt() or _remaining_sec() <= 0:
+                return ""
+            for loc in _iter_locs_from_sitemap(sm):
+                if _halt() or _remaining_sec() <= 0:
+                    return ""
+                cand = str(loc or "").strip()
+                if not cand:
+                    continue
+                cp = urlparse(cand)
+                if cp.netloc != parsed.netloc:
+                    continue
+                low = cand.lower()
+                if not any(k in low for k in keywords):
+                    continue
+                final_url, html = _try_get(cand)
+                if final_url and _collabs_page_has_signup_cta(html):
+                    return final_url
+        return ""
+
+    sm_url = _try_sitemap_candidates()
+    if sm_url:
+        return sm_url
+
+    # Quét toàn site (có giới hạn) để tìm page apply.
+    # Mặc định nâng lên để giảm bỏ sót; có thể chỉnh bằng env.
+    # Đặt <=0 để "không giới hạn" nhưng vẫn bị chặn bởi hard cap an toàn.
+    max_scan_pages = int(os.getenv("COLLABS_SIGNUP_SCAN_MAX_PAGES", "500") or "500")
+    hard_cap = int(os.getenv("COLLABS_SIGNUP_SCAN_HARD_CAP", "5000") or "5000")
+    if hard_cap < 50:
+        hard_cap = 50
+
+    def _extract_same_domain_links(page_html: str, page_url: str) -> list[str]:
+        out = []
+        for href in re.findall(r"""href=["']([^"'#]+)["']""", page_html or "", flags=re.I):
+            h = str(href).strip()
+            if not h:
+                continue
+            # Bỏ các scheme không phải http(s)
+            low_h = h.lower()
+            if low_h.startswith(("mailto:", "tel:", "javascript:", "data:")):
+                continue
+            cand = urljoin(page_url, h)
+            cp = urlparse(cand)
+            if cp.netloc != parsed.netloc:
+                continue
+            path = cp.path or "/"
+            # Bỏ link static/media để không tốn lượt quét.
+            low_path = path.lower()
+            if any(low_path.endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg", ".js", ".css", ".pdf", ".xml")):
+                continue
+            # Chuẩn hóa bỏ query/fragment để tránh trùng lặp vô hạn.
+            out.append(f"{cp.scheme or 'https'}://{cp.netloc}{path}")
+        return out
+
+    queue = [home_url]
+    seen = set()
+    idx = 0
+    def _can_scan_more() -> bool:
+        if len(seen) >= hard_cap:
+            return False
+        if max_scan_pages <= 0:
+            return True
+        return len(seen) < max_scan_pages
+
+    while idx < len(queue) and _can_scan_more():
+        if _halt():
+            return ""
+        if _remaining_sec() <= 0:
+            return default_signup
+        cur = queue[idx]
+        idx += 1
+        if cur in seen:
+            continue
+        seen.add(cur)
+        final_url, text = _try_get(cur)
+        if not final_url:
+            continue
+        # Chỉ coi là trang đăng ký nếu có CTA thật.
+        if _collabs_page_has_signup_cta(text):
+            return final_url
+
+        for nxt in _extract_same_domain_links(text, final_url):
+            if nxt in seen:
+                continue
+            low = nxt.lower()
+            # Ưu tiên đường dẫn có tín hiệu collab/apply/affiliate/community/-com/partnership.
+            if any(k in low for k in ("collab", "affiliate", "ambassador", "apply", "community", "-com", "partnership")):
+                queue.insert(idx, nxt)
+            else:
+                queue.append(nxt)
+
+    # Không tìm thấy CTA trong ngân sách thời gian / số trang -> fallback default.
+    if _halt():
+        return ""
+    return default_signup
+
+
+def _extract_url_from_ddg_href(href: str) -> str:
+    h = str(href or "").strip()
+    if not h:
+        return ""
+    if h.startswith("http://") or h.startswith("https://"):
+        return h
+    # DuckDuckGo thường bọc URL trong tham số uddg.
+    if "uddg=" in h:
+        try:
+            q = dict(parse_qsl(urlparse(h).query, keep_blank_values=True))
+            raw = unquote(str(q.get("uddg") or "").strip())
+            if raw.startswith("http://") or raw.startswith("https://"):
+                return raw
+        except Exception:
+            return ""
+    return ""
+
+
+def _fetch_duckduckgo_result_urls(query: str, max_results: int = 80, timeout_sec: int = 20, delay_ms: int = 350) -> list[str]:
+    q = str(query or "").strip()
+    if not q:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    offset = 0
+    page_size = 30
+    while len(out) < max_results:
+        search_url = f"https://html.duckduckgo.com/html/?q={quote_plus(q)}&s={offset}"
+        try:
+            res = requests.get(
+                search_url,
+                timeout=timeout_sec,
+                headers={
+                    "user-agent": os.getenv(
+                        "COLLABS_OUTSIDE_UA",
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                        "(KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
+                    )
+                },
+            )
+            if not res.ok:
+                break
+            html = res.text or ""
+        except Exception:
+            break
+
+        hrefs = re.findall(r"""class=["']result__a["'][^>]*href=["']([^"']+)["']""", html, flags=re.I)
+        if not hrefs:
+            # Fallback parser: lấy mọi anchor có link ra ngoài.
+            hrefs = re.findall(r"""<a[^>]*href=["']([^"']+)["']""", html, flags=re.I)
+        added = 0
+        for href in hrefs:
+            final_url = _extract_url_from_ddg_href(href)
+            if not final_url:
+                continue
+            p = urlparse(final_url)
+            if not p.netloc:
+                continue
+            norm = f"{p.scheme or 'https'}://{p.netloc}{p.path or '/'}"
+            low = norm.lower()
+            if any(x in low for x in ("facebook.com", "instagram.com", "tiktok.com", "youtube.com", "x.com/", "twitter.com/")):
+                continue
+            if norm in seen:
+                continue
+            seen.add(norm)
+            out.append(norm)
+            added += 1
+            if len(out) >= max_results:
+                break
+        if added == 0:
+            break
+        offset += page_size
+        if delay_ms > 0:
+            time.sleep(delay_ms / 1000.0)
+    return out
+
+
+def _fetch_bing_rss_result_urls(
+    query: str, max_results: int = 80, timeout_sec: int = 20, should_stop: Callable[[], bool] | None = None
+) -> list[str]:
+    q = str(query or "").strip()
+    if not q:
+        return []
+    if should_stop and should_stop():
+        return []
+    try:
+        res = requests.get(
+            f"https://www.bing.com/search?q={quote_plus(q)}&format=rss",
+            timeout=timeout_sec,
+            headers={
+                "user-agent": os.getenv(
+                    "COLLABS_OUTSIDE_UA",
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
+                )
+            },
+        )
+        if not res.ok:
+            return []
+        xml = res.text or ""
+    except Exception:
+        return []
+
+    out: list[str] = []
+    seen: set[str] = set()
+    links = re.findall(r"<link>(.*?)</link>", xml, flags=re.I | re.S)
+    for lk in links:
+        url = str(lk or "").strip()
+        if not (url.startswith("http://") or url.startswith("https://")):
+            continue
+        p = urlparse(url)
+        if not p.netloc:
+            continue
+        low = (p.netloc + (p.path or "")).lower()
+        if "bing.com/search" in low:
+            continue
+        if any(x in low for x in ("facebook.com", "instagram.com", "tiktok.com", "youtube.com", "x.com/", "twitter.com/")):
+            continue
+        norm = f"{p.scheme or 'https'}://{p.netloc}{p.path or '/'}"
+        if norm in seen:
+            continue
+        seen.add(norm)
+        out.append(norm)
+        if len(out) >= max_results:
+            break
+    return out
+
+
+def _google_cse_credentials() -> tuple[str, str]:
+    """Trả về (api_key, cx) nếu đủ cấu hình Google Custom Search JSON API; ngược lại ('','')."""
+    key = (os.getenv("GOOGLE_CUSTOM_SEARCH_API_KEY") or os.getenv("GOOGLE_CSE_API_KEY") or "").strip()
+    cx = (os.getenv("GOOGLE_CUSTOM_SEARCH_ENGINE_ID") or os.getenv("GOOGLE_CSE_CX") or "").strip()
+    return key, cx
+
+
+def _outside_cursor_path() -> Path:
+    return Path(os.getenv("COLLABS_OUTSIDE_CURSOR_FILE", str(BASE_DIR / ".collabs_outside_cursor.json")))
+
+
+def _outside_dedup_path() -> Path:
+    return Path(os.getenv("COLLABS_OUTSIDE_DEDUP_FILE", str(BASE_DIR / ".collabs_outside_seen_hosts.json")))
+
+
+def _outside_cursor_key(provider: str, query: str) -> str:
+    return f"{provider}::{(query or '').strip().lower()}"
+
+
+def _load_outside_cursor(provider: str, query: str) -> int:
+    p = _outside_cursor_path()
+    if not p.exists():
+        return 0
+    try:
+        payload = json.loads(p.read_text(encoding="utf-8-sig") or "{}")
+    except Exception:
+        return 0
+    if not isinstance(payload, dict):
+        return 0
+    cursors = payload.get("cursors") or {}
+    if not isinstance(cursors, dict):
+        return 0
+    raw = cursors.get(_outside_cursor_key(provider, query), 0)
+    try:
+        n = int(raw)
+    except Exception:
+        return 0
+    return max(0, n)
+
+
+def _save_outside_cursor(provider: str, query: str, next_offset: int) -> None:
+    p = _outside_cursor_path()
+    data: dict = {}
+    try:
+        if p.exists():
+            loaded = json.loads(p.read_text(encoding="utf-8-sig") or "{}")
+            if isinstance(loaded, dict):
+                data = loaded
+    except Exception:
+        data = {}
+    cursors = data.get("cursors")
+    if not isinstance(cursors, dict):
+        cursors = {}
+    cursors[_outside_cursor_key(provider, query)] = max(0, int(next_offset))
+    data["cursors"] = cursors
+    data["updatedAt"] = time.time()
+    try:
+        p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        return
+
+
+def _fetch_google_result_urls_via_custom_search_api(
+    query: str,
+    max_results: int = 80,
+    timeout_sec: int = 20,
+    should_stop: Callable[[], bool] | None = None,
+) -> list[str]:
+    """
+    Lấy URL organic qua Google Custom Search JSON API (hỗ trợ cú pháp Google: inurl, OR, ngoặc, …).
+    Yêu cầu .env:
+    - GOOGLE_CUSTOM_SEARCH_API_KEY (hoặc GOOGLE_CSE_API_KEY)
+    - GOOGLE_CUSTOM_SEARCH_ENGINE_ID (hoặc GOOGLE_CSE_CX — Search engine ID)
+
+    Mỗi request tối đa 10 kết quả; API không trả quá 100 kết quả cho một truy vấn (phân trang start 1..91).
+    """
+    api_key, cx = _google_cse_credentials()
+    if not api_key or not cx:
+        raise RuntimeError(
+            "Thiếu GOOGLE_CUSTOM_SEARCH_API_KEY hoặc GOOGLE_CUSTOM_SEARCH_ENGINE_ID (cx) cho Google CSE."
+        )
+    q = str(query or "").strip()
+    if not q:
+        return []
+    max_results = max(1, min(300, int(max_results)))
+    # JSON API: tổng chỉ mục tối đa ~100; mỗi lần gọi num <= 10 và start + num <= 101.
+    cap = min(max_results, 100)
+    base = "https://www.googleapis.com/customsearch/v1"
+    out: list[str] = []
+    seen: set[str] = set()
+    start = 1
+    ua = (os.getenv("COLLABS_OUTSIDE_UA") or "").strip() or (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
+    )
+    headers = {"User-Agent": ua, "Accept": "application/json"}
+    while len(out) < cap and start <= 100:
+        if should_stop and should_stop():
+            return out
+        num = min(10, cap - len(out), max(0, 101 - start))
+        if num < 1:
+            break
+        params = {"key": api_key, "cx": cx, "q": q, "num": num, "start": start}
+        try:
+            res = requests.get(base, params=params, headers=headers, timeout=int(timeout_sec))
+        except requests.RequestException as e:
+            raise RuntimeError(f"Google Custom Search API: lỗi mạng — {e}") from e
+        if not res.ok:
+            snippet = (res.text or "")[:400]
+            if res.status_code == 429:
+                raise RuntimeError("Google Custom Search API hết quota (429). Thử lại sau hoặc kiểm tra billing.")
+            raise RuntimeError(f"Google Custom Search API lỗi HTTP {res.status_code}: {snippet}")
+        try:
+            data = res.json() if res.text else {}
+        except json.JSONDecodeError:
+            raise RuntimeError("Google Custom Search API trả nội dung không phải JSON.")
+        items = data.get("items") or []
+        if not items:
+            break
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            u = it.get("link")
+            if not isinstance(u, str):
+                continue
+            u = u.strip()
+            if not u.startswith(("http://", "https://")):
+                continue
+            p = urlparse(u)
+            if not p.netloc:
+                continue
+            low = (p.netloc + (p.path or "")).lower()
+            if any(
+                x in low
+                for x in ("facebook.com", "instagram.com", "tiktok.com", "youtube.com", "x.com/", "twitter.com/")
+            ):
+                continue
+            norm = f"{p.scheme or 'https'}://{p.netloc}{p.path or '/'}"
+            if norm in seen:
+                continue
+            seen.add(norm)
+            out.append(norm)
+            if len(out) >= cap:
+                break
+        start += len(items)
+        if len(items) < num:
+            break
+        time.sleep(0.12)
+    return out
+
+
+def _apify_run_actor_with_token(actor_id: str, run_input: dict, wait_secs: int, tok: str) -> str:
+    """Một lần POST + poll đơn giản (Google actor); tok cố định."""
+    act = str(actor_id or "").strip()
+    if not act:
+        raise RuntimeError("Thiếu COLLABS_OUTSIDE_GOOGLE_ACTOR_ID (Apify actor id).")
+    if "/" in act and "~" not in act:
+        parts = [p for p in act.split("/") if p]
+        if len(parts) >= 2:
+            act = f"{parts[0]}~{parts[1]}"
+    url = f"https://api.apify.com/v2/acts/{act}/runs?token={tok}&waitForFinish={int(wait_secs)}"
+    res = requests.post(url, json=run_input, timeout=max(30, int(wait_secs) + 30))
+    if not res.ok:
+        body = (res.text or "")[:800]
+        if _apify_http_suggests_token_failover(res.status_code, body):
+            raise ApifyTokenFailover(f"HTTP {res.status_code}: {body[:300]}")
+        raise RuntimeError(f"Apify run actor lỗi HTTP {res.status_code}: {res.text[:300]}")
+    body = res.json() if res.text else {}
+    data = (body or {}).get("data") or {}
+    status = str(data.get("status") or "").upper()
+    run_id = str(data.get("id") or "").strip()
+    if status in {"READY", "RUNNING"} and run_id:
+        deadline = time.monotonic() + max(10, int(wait_secs))
+        while time.monotonic() < deadline:
+            time.sleep(2.0)
+            st_url = f"https://api.apify.com/v2/actor-runs/{run_id}?token={tok}"
+            st = requests.get(st_url, timeout=30)
+            if not st.ok:
+                pb = (st.text or "")[:800]
+                if _apify_http_suggests_token_failover(st.status_code, pb):
+                    raise ApifyTokenFailover(f"poll HTTP {st.status_code}: {pb[:300]}")
+                continue
+            st_body = st.json() if st.text else {}
+            st_data = (st_body or {}).get("data") or {}
+            status = str(st_data.get("status") or "").upper()
+            if status in {"SUCCEEDED", "FAILED", "ABORTED", "TIMED-OUT"}:
+                data = st_data
+                break
+    if status != "SUCCEEDED":
+        raise RuntimeError(f"Apify actor chưa SUCCEEDED (status={status})")
+    dataset_id = str(data.get("defaultDatasetId") or "").strip()
+    if not dataset_id:
+        raise RuntimeError("Apify actor không trả defaultDatasetId")
+    return dataset_id
+
+
+def _apify_run_actor(actor_id: str, run_input: dict, wait_secs: int = 180, token: str | None = None) -> tuple[str, str]:
+    """
+    Run Apify actor và trả về (defaultDatasetId, token_đã_dùng).
+    token=None → thử APIFY_TOKEN rồi APIFY_TOKEN_BACKUP khi lỗi quota/quyền.
+    """
+    if str(token or "").strip():
+        t = str(token).strip()
+        return _apify_run_actor_with_token(actor_id, run_input, wait_secs, t), t
+    candidates = apify_effective_token_candidates()
+    if not candidates:
+        raise RuntimeError("Thiếu APIFY_TOKEN trong .env (cần để chạy Apify actor Google Search).")
+    last_fail: Exception | None = None
+    for idx, tok in enumerate(candidates):
+        try:
+            ds = _apify_run_actor_with_token(actor_id, run_input, wait_secs, tok)
+            if idx > 0:
+                print("Apify Google actor: đã dùng token dự phòng (APIFY_TOKEN_BACKUP).")
+            return ds, tok
+        except ApifyTokenFailover as exc:
+            last_fail = exc
+            if idx + 1 < len(candidates):
+                print(f"Apify Google actor: token lỗi — thử dự phòng: {exc}")
+                continue
+            raise RuntimeError(f"Apify Google: hết token thử: {exc}") from exc
+    if last_fail:
+        raise RuntimeError(str(last_fail)) from last_fail
+    raise RuntimeError("Apify: không có token.")
+
+
+def _extract_urls_from_google_actor_items(items: list) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    if not isinstance(items, list):
+        return []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        # 1) Một số actor trả thẳng link/url
+        for k in ("url", "link", "resultUrl", "result_url"):
+            v = it.get(k)
+            if isinstance(v, str) and v.strip().startswith(("http://", "https://")):
+                u = v.strip()
+                if u not in seen:
+                    seen.add(u)
+                    out.append(u)
+        # 2) google-search-scraper thường trả organicResults:[{url,...}]
+        org = it.get("organicResults") or it.get("organic_results") or []
+        if isinstance(org, list):
+            for r in org:
+                if not isinstance(r, dict):
+                    continue
+                u = r.get("url") or r.get("link")
+                if isinstance(u, str) and u.strip().startswith(("http://", "https://")):
+                    uu = u.strip()
+                    if uu not in seen:
+                        seen.add(uu)
+                        out.append(uu)
+    return out
+
+
+def _fetch_google_result_urls_via_apify(
+    query: str,
+    max_results: int = 80,
+    timeout_sec: int = 180,
+    start_page: int = 1,
+    end_page: int | None = None,
+    should_stop: Callable[[], bool] | None = None,
+) -> list[str]:
+    """
+    Lấy URL từ Google Search theo đúng cú pháp (inurl/OR/ngoặc) bằng Apify actor.
+    Yêu cầu env:
+    - APIFY_TOKEN (và tuỳ chọn APIFY_TOKEN_BACKUP) — dùng chung với Similarweb
+    - COLLABS_OUTSIDE_GOOGLE_ACTOR_ID (vd: apify/google-search-scraper)
+    """
+    q = str(query or "").strip()
+    if not q:
+        return []
+    actor_id = (os.getenv("COLLABS_OUTSIDE_GOOGLE_ACTOR_ID") or "").strip()
+    # Google actor hiện bị giới hạn 10 kết quả/trang (theo cập nhật Google), nên dùng maxPagesPerQuery để tăng tổng.
+    cap = max(10, min(300, int(max_results)))
+    per_page = 10
+    if start_page < 1:
+        start_page = 1
+    if end_page is not None and end_page < start_page:
+        end_page = start_page
+    # Tối ưu chi phí theo range trang người dùng chọn:
+    # - Nếu có end_page: chỉ cần số bản ghi tương ứng với số trang trong range.
+    # - Actor vẫn crawl từ trang 1..maxPagesPerQuery, nhưng ta không kéo dư theo max_results toàn cục.
+    if end_page is not None:
+        # Cần fetch đủ tới cuối range để slice chính xác (vd trang 4-5 cần tối thiểu 50 kết quả thô).
+        raw_needed_for_slice = max(10, int(end_page) * per_page)
+        # Ưu tiên đúng phạm vi trang user chọn: nếu MAX_RESULTS thấp hơn mức cần thiết,
+        # tự nâng lên để không bị rỗng/thiếu dữ liệu khi chọn page sâu (vd 6-8).
+        cap = max(cap, raw_needed_for_slice)
+        cap = min(cap, 300)
+        max_pages = max(1, min(20, int(end_page)))
+    else:
+        max_pages = max(1, min(20, max(1, (cap + per_page - 1) // per_page)))
+    # Actor hiện tại yêu cầu input.queries là string.
+    run_input = {
+        "queries": q,
+        "maxPagesPerQuery": max_pages,
+        "resultsPerPage": per_page,
+        "includeUnfilteredResults": False,
+        "languageCode": "en",
+        "mobileResults": False,
+    }
+    if should_stop and should_stop():
+        return []
+    dataset_id, used_tok = _apify_run_actor(actor_id, run_input, wait_secs=int(timeout_sec), token=None)
+    if not dataset_id:
+        return []
+    items = apify_list_items(dataset_id, token=used_tok)
+    urls = _extract_urls_from_google_actor_items(items)
+    # chuẩn hóa + giới hạn
+    out: list[str] = []
+    seen: set[str] = set()
+    for u in urls:
+        p = urlparse(u)
+        if not p.netloc:
+            continue
+        norm = f"{p.scheme or 'https'}://{p.netloc}{p.path or '/'}"
+        if norm in seen:
+            continue
+        seen.add(norm)
+        out.append(norm)
+        if len(out) >= cap:
+            break
+    # giả lập phân trang Google: 10 kết quả / trang
+    if start_page > 1 or end_page is not None:
+        s = (start_page - 1) * 10
+        e = (int(end_page) * 10) if end_page is not None else len(out)
+        out = out[s:e]
+    return out
+
+
+# Gán trước khi gọi discover (vd. từ webapp) để log và tìm kiếm dùng cùng một chuỗi query.
+EFFECTIVE_OUTSIDE_QUERY_KEY = "_effective_outside_query"
+# Thống kê nội bộ (sau discover) — target batch vs URL ứng viên vs brand sau verify.
+OUTSIDE_DISCOVERY_STATS_KEY = "_outside_discovery_stats"
+
+# Query cố định cho Outside Discovery (Google); ghép với dạng random chữ (x OR y) trong build_random_outside_collabs_google_query.
+_OUTSIDE_COLLABS_GOOGLE_FIXED_QUERIES: tuple[str, ...] = (
+    'inurl:pages/collabs "apply"',
+    'inurl:pages/collabs "apply now"',
+    'inurl:pages/collabs "apply today"',
+    'inurl:pages/collabs "apply to join"',
+    'inurl:pages/collabs "join"',
+    'inurl:pages/collabs "join now"',
+    'inurl:pages/collabs "join today"',
+    'inurl:pages/collabs "join our program"',
+    'inurl:pages/collabs "join our community"',
+    'inurl:pages/collabs "join the program"',
+    'inurl:pages/collabs "become a creator"',
+    'inurl:pages/collabs "become a partner"',
+    'inurl:pages/collabs "become an affiliate"',
+    'inurl:pages/collabs "become an ambassador"',
+    'inurl:pages/collabs "creator program"',
+    'inurl:pages/collabs "affiliate program"',
+    'inurl:pages/collabs "ambassador program"',
+    'inurl:pages/collabs "influencer program"',
+    'inurl:pages/collabs "content creator"',
+    'inurl:pages/collabs "ugc creator"',
+    'inurl:pages/collab "apply"',
+    'inurl:pages/collab "apply now"',
+    'inurl:pages/collab "apply to join"',
+    'inurl:pages/collab "join"',
+    'inurl:pages/collab "join now"',
+    'inurl:pages/collab "join our community"',
+    'inurl:pages/collab "join the program"',
+    'inurl:pages/collab "become an affiliate"',
+    'inurl:pages/collab "become a creator"',
+    'inurl:pages/collab "creator program"',
+    'inurl:pages/collab "affiliate program"',
+    'inurl:pages/collab "ambassador program"',
+    'inurl:pages/collab "ugc creator"',
+    'inurl:pages/collab "content creator"',
+    'inurl:pages "collabs" "apply"',
+    'inurl:pages "collabs" "apply now"',
+    'inurl:pages "collabs" "apply today"',
+    'inurl:pages "collabs" "apply to join"',
+    'inurl:pages "collabs" "join"',
+    'inurl:pages "collabs" "join now"',
+    'inurl:pages "collabs" "join today"',
+    'inurl:pages "collabs" "join our program"',
+    'inurl:pages "collabs" "join our community"',
+    'inurl:pages "collabs" "become an affiliate"',
+    'inurl:pages "collabs" "become a creator"',
+    'inurl:pages "collabs" "become a partner"',
+    'inurl:pages "collabs" "creator application"',
+    'inurl:pages "collabs" "creator program"',
+    'inurl:pages "collabs" "affiliate program"',
+    'inurl:pages "collabs" "ambassador program"',
+    'inurl:pages "collabs" "influencer program"',
+    'inurl:pages "collabs" "ugc creator"',
+    'inurl:pages "collabs" "content creator"',
+    'inurl:pages "collab" "apply"',
+    'inurl:pages "collab" "apply now"',
+    'inurl:pages "collab" "apply to join"',
+    'inurl:pages "collab" "join"',
+    'inurl:pages "collab" "join now"',
+    'inurl:pages "collab" "join our community"',
+    'inurl:pages "collab" "join the program"',
+    'inurl:pages "collab" "become an affiliate"',
+    'inurl:pages "collab" "become a creator"',
+    'inurl:pages "collab" "creator application"',
+    'inurl:pages "collab" "creator program"',
+    'inurl:pages "collab" "affiliate program"',
+    'inurl:pages "collab" "ambassador program"',
+    'inurl:pages "collab" "ugc creator"',
+    'inurl:pages "collab" "content creator"',
+    'inurl:pages "collabs" "sign up"',
+    'inurl:pages "collabs" "get started"',
+    'inurl:pages "collabs" "start now"',
+    'inurl:pages "collabs" "start today"',
+    'inurl:pages "collabs" "register"',
+    'inurl:pages "collabs" "register now"',
+    'inurl:pages "collab" "sign up"',
+    'inurl:pages "collab" "get started"',
+    'inurl:pages "collab" "start now"',
+    'inurl:pages "collab" "register"',
+    'inurl:pages "collab" "register now"',
+    'inurl:pages/collabs "sign up"',
+    'inurl:pages/collabs "get started"',
+    'inurl:pages/collabs "start now"',
+    'inurl:pages/collabs "register"',
+    'inurl:pages/collabs "register now"',
+    'inurl:pages/collab "sign up"',
+    'inurl:pages/collab "get started"',
+    'inurl:pages/collab "start now"',
+    'inurl:pages/collab "register"',
+    'inurl:pages/collab "register now"',
+)
+
+
+def _build_random_letter_pair_outside_collabs_query() -> str:
+    """inurl:pages/collab(s) ("x" OR "y") với x≠y ngẫu nhiên."""
+    x, y = random.sample(string.ascii_lowercase, 2)
+    path = random.choice(("pages/collab", "pages/collabs"))
+    return f'inurl:{path} ("{x}" OR "{y}")'
+
+
+def build_random_outside_collabs_google_query() -> str:
+    """
+    Mỗi lần lọc: **một** query.
+
+    - GROUP_QERRY=1 (mặc định hoặc trống): giữ hành vi cũ — query
+      ngẫu nhiên dạng chữ (x OR y) hoặc một chuỗi cố định trong
+      _OUTSIDE_COLLABS_GOOGLE_FIXED_QUERIES.
+    - GROUP_QERRY=2: dùng nhóm query mới:
+      ("/pages/affiliate" OR "/pages/collab") (intitle:"Collabs" OR intitle:"Community") ("x" OR "y").
+    """
+    group = (os.getenv("GROUP_QERRY") or "1").strip()
+    if group == "2":
+        x, y = random.sample(string.ascii_lowercase, 2)
+        template = (
+            os.getenv(
+                "COLLABS_OUTSIDE_GOOGLE_GROUP2_QUERY_TEMPLATE",
+                '("/pages/affiliate" OR "/pages/collab") '
+                '(intitle:"Collabs" OR intitle:"Community") ("x" OR "y")',
+            )
+            or ""
+        ).strip()
+        # Hỗ trợ 2 kiểu placeholder:
+        # - Mặc định theo bạn: ("x" OR "y") sẽ được thay "x"/"y" bằng chữ cái random.
+        # - Hoặc template dùng {x}/{y} thì format trực tiếp.
+        if "{x}" in template or "{y}" in template:
+            return template.format(x=x, y=y)
+        return template.replace('"x"', f'"{x}"').replace('"y"', f'"{y}"')
+
+    # Nhóm 1: hành vi cũ.
+    if random.random() < 0.5:
+        return _build_random_letter_pair_outside_collabs_query()
+    return random.choice(_OUTSIDE_COLLABS_GOOGLE_FIXED_QUERIES)
+
+
+def resolve_outside_discovery_query_string(filters: dict | None) -> str:
+    """Chuỗi query web search: ưu tiên filters.outside_query, rồi COLLABS_OUTSIDE_QUERY, rồi query ngẫu nhiên."""
+    f = filters if isinstance(filters, dict) else {}
+    raw = str(f.get("outside_query") or os.getenv("COLLABS_OUTSIDE_QUERY") or "").strip()
+    if raw:
+        return raw
+    return build_random_outside_collabs_google_query()
+
+
+def _outside_discovery_verify_and_build_offer(
+    url: str,
+    verify_timeout_sec: int,
+    should_stop: Callable[[], bool] | None,
+) -> dict | None:
+    """Verify một URL candidate ngoài Discovery; trả dict offer hoặc None."""
+    if should_stop and should_stop():
+        return None
+    hk = host_key(url)
+    if not hk:
+        return None
+    try:
+        res = requests.get(url, timeout=verify_timeout_sec)
+        if not res.ok:
+            return None
+        html = res.text or ""
+    except Exception:
+        return None
+
+    low_url = url.lower()
+    must_path = ("/pages/collab" in low_url) or ("/pages/collabs" in low_url)
+    low_html = (html or "").lower()
+    has_cta_phrase = _collabs_html_has_outside_cta_phrases(low_html)
+    if not must_path:
+        return None
+    if not has_cta_phrase:
+        return None
+
+    looks_like = _collabs_page_looks_like_signup(html, url)
+    weak_signal_url = any(
+        k in low_url for k in ("/pages/collab", "/pages/collabs", "affiliate", "ambassador", "partner")
+    )
+    if not looks_like and not weak_signal_url:
+        return None
+
+    apply_url = discover_collabs_signup_url(url, timeout_sec=verify_timeout_sec, should_stop=should_stop)
+    if not apply_url:
+        return None
+
+    brand_guess = hk.split(".")[0].replace("-", " ").replace("_", " ").title()
+    return {
+        "brand": brand_guess,
+        "url": f"https://{hk}",
+        "offer": "",
+        "cookieDays": "",
+        "client_url": apply_url,
+        "offer_id": hk,
+        "shop_id": "",
+        "program_id": "",
+        "mkp_listing_id": hk,
+        "commission_type": "",
+        "category": "Outside Discovery",
+        "collabs_product_category_code": "",
+        "epc": "",
+        "payments": "",
+        "currency": "",
+        "payout_rate": "",
+        "approval_rate": "",
+        "offer_score": "",
+        "recommend_score": "",
+        "application_review": "",
+        "promotion_details": [],
+        "target_audience_customer_channels": [],
+        "target_audience_locations": [],
+        "target_audience_ages": [],
+        "target_audience_genders": [],
+        "can_apply_offer": None,
+        "is_applied_offer": None,
+        "collabs_partnership_status": "",
+        "collabs_partnership_state": "",
+        "collabs_saved": None,
+        "collabs_previously_purchased": None,
+        "collabs_target_countries": "",
+        "collabs_logo_url": "",
+        "collabs_images": "",
+        "collabs_shopify_store_id": "",
+        "collabs_holding_period": "",
+    }
+
+
+def discover_collabs_outside_discovery_offers(
+    filters: dict | None = None, should_stop: Callable[[], bool] | None = None
+) -> list[dict]:
+    """
+    Lọc Collabs ngoài Discovery từ web search:
+    - Tìm candidate URL theo query.
+    - Verify trang có tín hiệu collab/apply.
+    - Tìm apply URL cuối bằng discover_collabs_signup_url.
+    """
+    f = filters if isinstance(filters, dict) else {}
+    query_text = str(f.get(EFFECTIVE_OUTSIDE_QUERY_KEY) or "").strip() or resolve_outside_discovery_query_string(f)
+    # Cú pháp Google (inurl/OR/ngoặc): dùng Apify actor, Google CSE JSON API, hoặc Bing (hỗ trợ một phần).
+    query_list = [query_text] if query_text else []
+
+    # outside_target_results (UI mới) ưu tiên hơn .env; fallback về COLLABS_OUTSIDE_MAX_RESULTS.
+    raw_target = f.get("outside_target_results")
+    if raw_target is None or str(raw_target).strip() == "":
+        raw_target = os.getenv("COLLABS_OUTSIDE_MAX_RESULTS", "80") or "80"
+    try:
+        max_results = int(raw_target)
+    except Exception:
+        max_results = int(os.getenv("COLLABS_OUTSIDE_MAX_RESULTS", "80") or "80")
+    max_results = max(10, min(30, max_results))
+    max_results = (max_results // 10) * 10
+    if max_results < 10:
+        max_results = 10
+    # Pool để cursor quay vòng; cho phép >300 nếu cần.
+    raw_pool = os.getenv("COLLABS_OUTSIDE_CURSOR_POOL", "300") or "300"
+    try:
+        cursor_pool = int(raw_pool)
+    except Exception:
+        cursor_pool = 300
+    cursor_pool = max(max_results, min(5000, cursor_pool))
+    verify_timeout_sec = int(os.getenv("COLLABS_OUTSIDE_VERIFY_TIMEOUT_SEC", "30") or "30")
+    if not query_list:
+        return []
+    if should_stop and should_stop():
+        return []
+    provider = (
+        "apify"
+        if (os.getenv("COLLABS_OUTSIDE_GOOGLE_ACTOR_ID") or "").strip()
+        else ("google_cse" if _google_cse_credentials()[0] and _google_cse_credentials()[1] else "bing")
+    )
+    # Google CSE có trần ~100 kết quả/query -> giới hạn pool hiệu lực để tránh batch rỗng.
+    effective_pool = min(cursor_pool, 100) if provider == "google_cse" else cursor_pool
+    cursor_offset = _load_outside_cursor(provider, query_text)
+    # Mỗi lần chạy lấy batch kế tiếp đúng bằng outside_target_results (max_results).
+    start_idx = cursor_offset % effective_pool
+    if start_idx + max_results > effective_pool:
+        # Chạm giới hạn pool thì quay về page đầu cho lần này.
+        start_idx = 0
+    end_idx = start_idx + max_results
+    start_page = (start_idx // 10) + 1
+    end_page = max(start_page, (end_idx + 9) // 10)
+    candidates: list[str] = []
+    seen_candidate: set[str] = set()
+    # Thứ tự ưu tiên: Apify Google actor → Google Custom Search JSON API → Bing RSS.
+    # CSE hỗ trợ cú pháp Google (inurl/OR/…) và không cần Apify; Bing chỉ fallback khi không cấu hình Google.
+    cse_key, cse_cx = _google_cse_credentials()
+    if provider == "apify":
+        fetch_budget = max(max_results, end_page * 10)
+        urls = _fetch_google_result_urls_via_apify(
+            query_text,
+            max_results=fetch_budget,
+            timeout_sec=180,
+            start_page=start_page,
+            end_page=end_page,
+            should_stop=should_stop,
+        )
+    elif provider == "google_cse" and cse_key and cse_cx:
+        fetch_budget = max(max_results, min(100, end_idx))
+        urls = _fetch_google_result_urls_via_custom_search_api(
+            query_text,
+            max_results=fetch_budget,
+            timeout_sec=verify_timeout_sec,
+            should_stop=should_stop,
+        )
+        urls = urls[start_idx:end_idx]
+    elif cse_key or cse_cx:
+        raise RuntimeError(
+            "Collabs ngoài Discovery: thiếu một trong hai — GOOGLE_CUSTOM_SEARCH_API_KEY và "
+            "GOOGLE_CUSTOM_SEARCH_ENGINE_ID (hoặc GOOGLE_CSE_API_KEY / GOOGLE_CSE_CX)."
+        )
+    else:
+        fetch_budget = max(max_results, end_idx)
+        urls = _fetch_bing_rss_result_urls(
+            query_text,
+            max_results=fetch_budget,
+            timeout_sec=verify_timeout_sec,
+            should_stop=should_stop,
+        )
+        urls = urls[start_idx:end_idx]
+    for u in urls:
+        if u in seen_candidate:
+            continue
+        seen_candidate.add(u)
+        candidates.append(u)
+
+    # Dedupe giữa các lần chạy (theo host). Bật bằng env:
+    # - COLLABS_OUTSIDE_DEDUP_PERSIST=1
+    # - (tuỳ chọn) COLLABS_OUTSIDE_DEDUP_FILE=.collabs_outside_seen_hosts.json
+    dedup_enabled = str(os.getenv("COLLABS_OUTSIDE_DEDUP_PERSIST", "")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+        "enable",
+        "enabled",
+    }
+    seen_hosts_persist: set[str] = set()
+    dedup_path = _outside_dedup_path()
+    if dedup_enabled:
+        try:
+            if dedup_path.exists():
+                payload = json.loads(dedup_path.read_text(encoding="utf-8-sig") or "{}")
+                arr = payload.get("hosts") if isinstance(payload, dict) else payload
+                if isinstance(arr, list):
+                    seen_hosts_persist = {host_key(x) for x in arr if host_key(x)}
+        except Exception:
+            seen_hosts_persist = set()
+
+    offers: list[dict] = []
+    seen_host: set[str] = set()
+    added_hosts: set[str] = set()
+    work_urls: list[str] = []
+    stopped_early = False
+    for url in candidates:
+        if should_stop and should_stop():
+            stopped_early = True
+            break
+        hk = host_key(url)
+        if not hk or hk in seen_host:
+            continue
+        if dedup_enabled and hk in seen_hosts_persist:
+            continue
+        seen_host.add(hk)
+        work_urls.append(url)
+
+    nw = int(os.getenv("COLLABS_OUTSIDE_VERIFY_WORKERS", "8") or "8")
+    nw = max(1, min(16, nw))
+
+    if work_urls:
+        if nw <= 1 or len(work_urls) <= 1:
+            for u in work_urls:
+                if should_stop and should_stop():
+                    stopped_early = True
+                    break
+                off = _outside_discovery_verify_and_build_offer(u, verify_timeout_sec, should_stop)
+                if off:
+                    offers.append(off)
+                    if dedup_enabled:
+                        added_hosts.add(host_key(off.get("url", "") or ""))
+        else:
+            ex = ThreadPoolExecutor(max_workers=nw)
+            try:
+                futures = {
+                    ex.submit(_outside_discovery_verify_and_build_offer, u, verify_timeout_sec, should_stop): i
+                    for i, u in enumerate(work_urls)
+                }
+                pending = set(futures.keys())
+                slots: list[dict | None] = [None] * len(work_urls)
+                while pending:
+                    done, pending = wait(pending, timeout=0.25, return_when=FIRST_COMPLETED)
+                    for fut in done:
+                        idx = futures.pop(fut, -1)
+                        if idx < 0:
+                            continue
+                        try:
+                            slots[idx] = fut.result()
+                        except Exception:
+                            slots[idx] = None
+                    if should_stop and should_stop():
+                        stopped_early = True
+                        break
+                for slot in slots:
+                    if not slot:
+                        continue
+                    offers.append(slot)
+                    if dedup_enabled:
+                        added_hosts.add(host_key(slot.get("url", "") or ""))
+            finally:
+                ex.shutdown(wait=False, cancel_futures=True)
+
+    if dedup_enabled and added_hosts:
+        try:
+            merged = sorted(set(seen_hosts_persist) | set(added_hosts))
+            # giữ tối đa 50k hosts để tránh file quá lớn
+            merged = merged[-50000:]
+            dedup_path.write_text(
+                json.dumps({"updatedAt": time.time(), "hosts": merged}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+    # Chỉ cập nhật cursor khi chạy xong batch (không hủy giữa chừng) để không bỏ lỡ URL kế tiếp.
+    if not stopped_early and not (should_stop and should_stop()):
+        _save_outside_cursor(provider, query_text, end_idx % effective_pool)
+    if isinstance(f, dict):
+        f[OUTSIDE_DISCOVERY_STATS_KEY] = {
+            "target_batch": max_results,
+            "candidate_urls": len(candidates),
+            "offers_verified": len(offers),
+        }
+    return offers
+
+
 # Trạng thái traffic so với ngưỡng (CSV + log)
 STATUS_TRAFFIC_OK = "ĐẠT"
 STATUS_TRAFFIC_FAIL = "CHƯA ĐẠT"
@@ -852,6 +2536,27 @@ REFERSION_CSV_HEADER = [
     "Offer ID",
 ]
 
+COLLABS_CSV_HEADER = [
+    "Trạng thái",
+    "Thương hiệu",
+    "Website",
+    "Link Apply",
+    "Hoa hồng mạng lưới",
+    "Thời gian giữ đơn",
+    "Danh mục",
+    "Đã lưu",
+    "Quốc gia mục tiêu",
+    "Traffic (hiển thị)",
+    "Traffic ước tính/tháng",
+    "Trang/lượt xem",
+    "Tỷ lệ thoát",
+    "Top quốc gia",
+    "Top từ khóa",
+    "Link logo",
+    "Offer ID",
+    "ID Shopify Store",
+]
+
 
 def build_uppromote_csv_row_vi(offer: dict, item: dict, status: str) -> list:
     eng = engagement_from_item(item)
@@ -952,6 +2657,39 @@ def build_refersion_csv_row(offer: dict, item: dict, status: str) -> list:
     ]
 
 
+def build_collabs_csv_row(offer: dict, item: dict, status: str) -> list:
+    eng = engagement_from_item(item)
+    estimated_monthly = estimated_monthly_visits_formatted(item, eng)
+    visits_display = visits_formatted_from_engagement(eng)
+    website = str(offer.get("url", "") or "").strip()
+    apply_url = str(offer.get("client_url", "") or "").strip()
+    if not apply_url and website:
+        p = urlparse(website if "://" in website else f"https://{website}")
+        if p.netloc:
+            base = f"{p.scheme or 'https'}://{p.netloc}"
+            apply_url = f"{base}/pages/collab"
+    return [
+        status,
+        offer.get("brand", ""),
+        website,
+        apply_url,
+        offer.get("offer", ""),
+        format_collabs_holding_period(offer.get("collabs_holding_period", "")),
+        offer.get("category", ""),
+        fmt_yes_no_bool_like(offer.get("collabs_saved")),
+        offer.get("collabs_target_countries", ""),
+        visits_display,
+        estimated_monthly,
+        eng.get("PagePerVisit", ""),
+        format_percent_cell(eng.get("BounceRate", "")),
+        top_countries_csv(item.get("TopCountryShares") or []),
+        top_keywords_csv(keyword_shares_from_item(item)),
+        offer.get("collabs_logo_url", ""),
+        offer.get("offer_id", ""),
+        offer.get("collabs_shopify_store_id", ""),
+    ]
+
+
 def write_xlsx_highlight_status(path: Path, header: list, rows: list, status_col: int = 0) -> None:
     """Ghi file Excel: dòng có trạng thái ĐẠT (hoặc GET) được tô nền xanh lá nhạt."""
     from openpyxl import Workbook
@@ -964,7 +2702,7 @@ def write_xlsx_highlight_status(path: Path, header: list, rows: list, status_col
     hyperlink_columns = {
         i + 1
         for i, name in enumerate(header_list)
-        if str(name).strip() in {"Website", "URL apply", "Link đăng ký"}
+        if str(name).strip() in {"Website", "URL apply", "Link đăng ký", "Link Apply"}
     }
     header_fill = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
     green = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
@@ -972,7 +2710,10 @@ def write_xlsx_highlight_status(path: Path, header: list, rows: list, status_col
         ws.cell(row=1, column=c).fill = header_fill
     ok_values = {STATUS_TRAFFIC_OK, "GET", "ĐẠT"}
     for row in rows:
-        cells = list(row)
+        cells = [
+            ("N/A" if (v is None or (isinstance(v, str) and not v.strip())) else v)
+            for v in list(row)
+        ]
         ws.append(cells)
         r = ws.max_row
         for c in hyperlink_columns:
@@ -1022,6 +2763,56 @@ def fetch_refersion_page(base_url: str, page: int) -> dict:
     if str(body.get("status") or "").lower() != "success":
         raise RuntimeError(f"Refersion API lỗi: {text[:300]}")
     return body if isinstance(body, dict) else {}
+
+
+def fetch_collabs_page(base_url: str, first: int, after: str | None = None) -> dict:
+    payload = {
+        "operationName": "BrandsQuery",
+        "query": COLLABS_BRANDS_QUERY,
+        "variables": {
+            "first": int(first),
+            "productCategories": [],
+            "brandValues": [],
+        },
+    }
+    if after:
+        payload["variables"]["after"] = str(after)
+    res = requests.post(base_url, headers=build_collabs_headers(), json=payload, timeout=60)
+    text = res.text
+    try:
+        body = res.json()
+    except Exception as exc:
+        raise RuntimeError(f"Collabs parse JSON lỗi (HTTP {res.status_code}): {text[:180]}") from exc
+    if not res.ok:
+        raise RuntimeError(f"Collabs HTTP {res.status_code}: {text[:300]}")
+    if body.get("errors"):
+        raise RuntimeError(f"Collabs GraphQL lỗi: {json.dumps(body.get('errors'), ensure_ascii=False)[:300]}")
+    return body if isinstance(body, dict) else {}
+
+
+def fetch_collabs_brand_profile(base_url: str, shopify_store_gid: str) -> dict:
+    gid = str(shopify_store_gid or "").strip()
+    if not gid:
+        return {}
+    payload = {
+        "operationName": "DiscoverBrandProfileQuery",
+        "query": COLLABS_BRAND_PROFILE_QUERY,
+        "variables": {
+            "shopifyStoreId": gid,
+        },
+    }
+    res = requests.post(base_url, headers=build_collabs_headers(), json=payload, timeout=60)
+    text = res.text
+    try:
+        body = res.json()
+    except Exception as exc:
+        raise RuntimeError(f"Collabs detail parse JSON lỗi (HTTP {res.status_code}): {text[:180]}") from exc
+    if not res.ok:
+        raise RuntimeError(f"Collabs detail HTTP {res.status_code}: {text[:300]}")
+    if body.get("errors"):
+        raise RuntimeError(f"Collabs detail GraphQL lỗi: {json.dumps(body.get('errors'), ensure_ascii=False)[:300]}")
+    data = body.get("data") if isinstance(body, dict) else {}
+    return data if isinstance(data, dict) else {}
 
 
 def fetch_all_goaffpro_offers() -> list:
@@ -1401,15 +3192,101 @@ def load_brand_average_prices() -> dict:
     return result
 
 
-def apify_call_actor(domains: list) -> str:
-    token = (os.getenv("APIFY_TOKEN") or "").strip()
-    if not token:
-        raise RuntimeError("Thiếu APIFY_TOKEN trong .env")
-    wait_secs = int(os.getenv("APIFY_WAIT_FOR_FINISH_SECS", "240") or "240")
-    url = f"https://api.apify.com/v2/acts/{ACTOR_ID}/runs?token={token}&waitForFinish={wait_secs}"
-    run_input = {"domains": domains, "proxyConfiguration": {"useApifyProxy": False}}
-    res = requests.post(url, json=run_input, timeout=wait_secs + 30)
+def _normalize_apify_actor_id(actor_id: str) -> str:
+    act = str(actor_id or "").strip()
+    if "/" in act and "~" not in act:
+        parts = [p for p in act.split("/") if p]
+        if len(parts) >= 2:
+            act = f"{parts[0]}~{parts[1]}"
+    return act
+
+
+class ApifyTokenFailover(Exception):
+    """Token Apify chính có thể hết quota / hết hạn — thử APIFY_TOKEN_BACKUP."""
+
+
+def apify_primary_token() -> str:
+    """
+    Token Apify chính (dùng cho Similarweb + Google Search Collabs ngoài Discovery).
+    COLLABS_OUTSIDE_APIFY_TOKEN chỉ còn để tương thích .env cũ khi APIFY_TOKEN trống.
+    """
+    return ((os.getenv("APIFY_TOKEN") or "").strip() or (os.getenv("COLLABS_OUTSIDE_APIFY_TOKEN") or "").strip())
+
+
+def apify_effective_token_candidates() -> list[str]:
+    """Chính rồi dự phòng (không trùng)."""
+    primary = apify_primary_token()
+    backup = (os.getenv("APIFY_TOKEN_BACKUP") or "").strip()
+    out: list[str] = []
+    if primary:
+        out.append(primary)
+    if backup and backup not in out:
+        out.append(backup)
+    return out
+
+
+def _apify_http_suggests_token_failover(status: int, body: str) -> bool:
+    if status in (401, 402, 403, 429):
+        return True
+    low = (body or "")[:1200].lower()
+    for hint in (
+        "quota",
+        "limit exceeded",
+        "insufficient credit",
+        "payment required",
+        "unauthorized",
+        "invalid token",
+        "token is invalid",
+        "expired",
+        "usage was exceeded",
+        "monthly usage",
+        "exceeded your",
+    ):
+        if hint in low:
+            return True
+    return status == 400 and any(x in low for x in ("quota", "limit", "credit", "token"))
+
+
+def _apify_store_actor_dataset_id_with_token(
+    actor_id: str, run_input: dict, *, wait_secs: int | None, token: str
+) -> str:
+    """Một lần chạy actor với token cố định (POST + poll)."""
+    ws = wait_secs if wait_secs is not None else int(os.getenv("APIFY_WAIT_FOR_FINISH_SECS", "240") or "240")
+    http_retries = int(os.getenv("APIFY_HTTP_RETRIES", "3") or "3")
+    if http_retries < 1:
+        http_retries = 1
+    connect_timeout_sec = float(os.getenv("APIFY_CONNECT_TIMEOUT_SECS", "20") or "20")
+    if connect_timeout_sec < 3:
+        connect_timeout_sec = 3.0
+
+    def _request_with_retry(method: str, req_url: str, *, json_payload=None, read_timeout_sec: float = 60.0):
+        last_exc: Exception | None = None
+        for attempt in range(1, http_retries + 1):
+            try:
+                return requests.request(
+                    method=method,
+                    url=req_url,
+                    json=json_payload,
+                    timeout=(connect_timeout_sec, max(5.0, float(read_timeout_sec))),
+                )
+            except requests.RequestException as exc:
+                last_exc = exc
+                if attempt >= http_retries:
+                    break
+                sleep_sec = min(6.0, 1.2 * attempt)
+                print(f"Apify request retry {attempt}/{http_retries} sau lỗi: {exc}")
+                time.sleep(sleep_sec)
+        raise RuntimeError(f"Apify request thất bại sau {http_retries} lần thử: {last_exc}")
+
+    act = _normalize_apify_actor_id(actor_id)
+    if not act:
+        raise RuntimeError("Thiếu actor id Apify.")
+    url = f"https://api.apify.com/v2/acts/{act}/runs?token={token}&waitForFinish={int(ws)}"
+    res = _request_with_retry("POST", url, json_payload=run_input, read_timeout_sec=float(ws) + 30.0)
     if not res.ok:
+        body = (res.text or "")[:800]
+        if _apify_http_suggests_token_failover(res.status_code, body):
+            raise ApifyTokenFailover(f"HTTP {res.status_code}: {body[:300]}")
         raise RuntimeError(f"Apify call actor lỗi HTTP {res.status_code}: {res.text[:300]}")
     body = res.json()
     data = body.get("data") or {}
@@ -1426,8 +3303,11 @@ def apify_call_actor(domains: list) -> str:
         if poll_idx > max_polls:
             raise RuntimeError(f"Apify run chưa hoàn tất sau {max_polls} lần poll (status={status})")
         poll_url = f"https://api.apify.com/v2/actor-runs/{run_id}?token={token}&waitForFinish={wait_poll_secs}"
-        poll_res = requests.get(poll_url, timeout=wait_poll_secs + 30)
+        poll_res = _request_with_retry("GET", poll_url, read_timeout_sec=wait_poll_secs + 30)
         if not poll_res.ok:
+            pb = (poll_res.text or "")[:800]
+            if _apify_http_suggests_token_failover(poll_res.status_code, pb):
+                raise ApifyTokenFailover(f"poll HTTP {poll_res.status_code}: {pb[:300]}")
             raise RuntimeError(f"Apify poll lỗi HTTP {poll_res.status_code}: {poll_res.text[:300]}")
         data = (poll_res.json() or {}).get("data") or data
         status = data.get("status")
@@ -1439,43 +3319,418 @@ def apify_call_actor(domains: list) -> str:
     dataset_id = data.get("defaultDatasetId")
     if not dataset_id:
         raise RuntimeError("Apify không trả về defaultDatasetId")
-    return dataset_id
+    return str(dataset_id)
+
+
+def _apify_store_actor_dataset_id(actor_id: str, run_input: dict, *, wait_secs: int | None = None) -> tuple[str, str]:
+    """
+    Chạy actor Apify Store (POST + poll), trả về (defaultDatasetId, token_đã_dùng).
+    Token chính (APIFY_TOKEN) hết quota/401… → tự thử APIFY_TOKEN_BACKUP nếu có.
+    """
+    candidates = apify_effective_token_candidates()
+    if not candidates:
+        raise RuntimeError(
+            "Thiếu APIFY_TOKEN trong .env (Similarweb và tìm Google Collabs ngoài Discovery dùng chung một token)."
+        )
+    last_fail: Exception | None = None
+    for idx, tok in enumerate(candidates):
+        try:
+            ds = _apify_store_actor_dataset_id_with_token(actor_id, run_input, wait_secs=wait_secs, token=tok)
+            if idx > 0:
+                print("Apify: đã dùng token dự phòng (APIFY_TOKEN_BACKUP) sau lỗi token chính.")
+            return ds, tok
+        except ApifyTokenFailover as exc:
+            last_fail = exc
+            if idx + 1 < len(candidates):
+                print(f"Apify token lỗi quota/quyền — chuyển sang token dự phòng: {exc}")
+                continue
+            raise RuntimeError(f"Apify: hết token thử (quota/quyền): {exc}") from exc
+    if last_fail:
+        raise RuntimeError(str(last_fail)) from last_fail
+    raise RuntimeError("Apify: không có token hợp lệ.")
+
+
+def apify_call_actor(domains: list) -> tuple[str, str]:
+    if not domains:
+        raise RuntimeError("Danh sách domain Apify rỗng")
+    return _apify_store_actor_dataset_id(
+        ACTOR_ID,
+        {"domains": list(domains), "proxyConfiguration": {"useApifyProxy": False}},
+    )
+
+
+def _similarweb_monthly_text_has_positive_visits(text: str) -> bool:
+    """Chuỗi dạng T1(577), T2(0) — chỉ coi là có traffic nếu có ít nhất một số trong ngoặc > 0."""
+    if not text or not str(text).strip():
+        return False
+    for m in re.finditer(r"\(([^)]+)\)", str(text)):
+        if parse_visits_value(m.group(1)) > 0:
+            return True
+    return False
+
+
+def _similarweb_item_has_traffic(item: dict | None) -> bool:
+    """
+    Có dữ liệu traffic *dùng được* (số visits > 0 hoặc monthly có tháng > 0).
+    Tránh coi chuỗi monthly chỉ toàn 0 / VisitsFormatted \"0\" là \"đã có traffic\" — khi đó vẫn cần fallback Radeance.
+    """
+    if not item:
+        return False
+    eng = engagement_from_item(item)
+    if parse_visits_from_engagement(eng) > 0:
+        return True
+    em = str(estimated_monthly_visits_formatted(item, eng) or "").strip()
+    if em and _similarweb_monthly_text_has_positive_visits(em):
+        return True
+    vf = str(visits_formatted_from_engagement(eng) or "").strip()
+    if vf and parse_visits_value(vf) > 0:
+        return True
+    return False
+
+
+def _format_visits_integer_display(v: float) -> str:
+    try:
+        n = int(round(float(v)))
+    except Exception:
+        return ""
+    if n <= 0:
+        return ""
+    return f"{n:,}"
+
+
+def _radeance_dataset_row_host_keys(raw: dict) -> set[str]:
+    """Các host chuẩn hoá có thể suy ra từ một dòng dataset radeance/similarweb-scraper."""
+    low = {str(k).strip().lower(): v for k, v in raw.items()}
+    keys: set[str] = set()
+    for cand in (
+        raw.get("searchUrl"),
+        raw.get("url"),
+        raw.get("domain"),
+        raw.get("website"),
+        low.get("searchurl"),
+        low.get("url"),
+        low.get("domain"),
+        low.get("website"),
+    ):
+        if isinstance(cand, str) and cand.strip():
+            hk = host_key(cand.strip())
+            if hk:
+                keys.add(hk)
+    return keys
+
+
+def normalize_radeance_similarweb_item(raw: dict) -> dict:
+    """
+    Chuẩn hoá một dòng dataset từ radeance/similarweb-scraper về shape gần actor Similarweb cũ
+    (Engagements, TopCountryShares, TopKeywordShares, EstimatedMonthlyVisits) để build_collabs_csv_row / lọc traffic hoạt động.
+    """
+    if not isinstance(raw, dict) or not raw:
+        return {}
+    low = {str(k).strip().lower(): v for k, v in raw.items()}
+    domain = str(raw.get("domain") or low.get("domain") or "").strip()
+    url = str(raw.get("url") or raw.get("searchUrl") or low.get("url") or low.get("searchurl") or "").strip()
+    if not url and domain:
+        d = domain.lstrip("/")
+        url = f"https://{d}" if d else ""
+    eng_in = raw.get("engagement") or raw.get("Engagement") or {}
+    if not isinstance(eng_in, dict):
+        eng_in = {}
+    total_vis = (
+        raw.get("totalVisits")
+        or raw.get("TotalVisits")
+        or low.get("totalvisits")
+        or raw.get("Visits")
+        or low.get("visits")
+    )
+    if total_vis is None:
+        total_vis = eng_in.get("visits") or eng_in.get("Visits")
+    visits_f = parse_visits_value(total_vis)
+    if visits_f <= 0:
+        for ak in (
+            "traffic",
+            "Traffic",
+            "estimatedTraffic",
+            "EstimatedTraffic",
+            "estimatedVisits",
+            "EstimatedVisits",
+            "lastMonthVisits",
+            "LastMonthVisits",
+            "pageViews",
+            "PageViews",
+            "globalVisits",
+            "GlobalVisits",
+        ):
+            v = raw.get(ak)
+            if v is None:
+                v = low.get(ak.lower())
+            if v is None:
+                continue
+            pv = parse_visits_value(v)
+            if pv > visits_f:
+                visits_f = pv
+    mv_arr = raw.get("monthlyVisits") or low.get("monthlyvisits")
+    if visits_f <= 0 and isinstance(mv_arr, list) and mv_arr:
+        best_mv = 0.0
+        for row in mv_arr:
+            if isinstance(row, dict):
+                lv = row.get("visits") or row.get("Visits")
+                if lv is not None:
+                    best_mv = max(best_mv, parse_visits_value(lv))
+        if best_mv > visits_f:
+            visits_f = best_mv
+    ppg = raw.get("pagesPerVisit")
+    if ppg is None:
+        ppg = eng_in.get("pagesPerVisit")
+    br = raw.get("bounceRate")
+    if br is None:
+        br = eng_in.get("bounceRate")
+    monthly_df = raw.get("monthlyVisitsDateFormat") or low.get("monthlyvisitsdateformat") or {}
+    if isinstance(monthly_df, str) and monthly_df.strip().startswith("{"):
+        try:
+            monthly_df = json.loads(monthly_df)
+        except Exception:
+            monthly_df = {}
+    if not isinstance(monthly_df, dict):
+        monthly_df = {}
+    if visits_f <= 0 and monthly_df:
+        try:
+            mx = max((parse_visits_value(v) for v in monthly_df.values()), default=0.0)
+            if mx > visits_f:
+                visits_f = mx
+        except Exception:
+            pass
+
+    top_country_shares: list[dict] = []
+    tcc_raw = raw.get("website_traffic_by_country") or raw.get("countryShare") or []
+    if isinstance(tcc_raw, list):
+        for row in tcc_raw[:12]:
+            if not isinstance(row, dict):
+                continue
+            code = str(row.get("country") or row.get("CountryCode") or "").strip().upper()
+            if not code:
+                continue
+            sh = row.get("share")
+            if sh is None:
+                sh = row.get("Value")
+            try:
+                fv = float(sh)
+            except Exception:
+                fv = 0.0
+            if 0 <= fv <= 1.0:
+                fv *= 100.0
+            top_country_shares.append({"CountryCode": code, "Value": fv})
+
+    top_kw: list[dict] = []
+    tk_raw = raw.get("topKeywords") or []
+    if isinstance(tk_raw, list):
+        for row in tk_raw:
+            if not isinstance(row, dict):
+                continue
+            kw = row.get("keyword") or row.get("Keyword") or row.get("Name")
+            if not kw:
+                continue
+            vol = row.get("searchVolume") or row.get("search_volume") or row.get("Volume")
+            est = row.get("estimatedValue") or row.get("estimated_value") or row.get("EstimatedValue")
+            cpc = row.get("cpc") if row.get("cpc") is not None else row.get("CPC")
+            try:
+                vol_i = int(round(float(vol))) if vol is not None and str(vol).strip() else 0
+            except Exception:
+                vol_i = 0
+            top_kw.append(
+                {
+                    "Name": str(kw),
+                    "Keyword": str(kw),
+                    "Volume": vol_i,
+                    "EstimatedValue": est,
+                    "Cpc": cpc,
+                }
+            )
+
+    hk_canon = host_key(url) if url else (host_key(domain) if domain else "")
+    site_field = hk_canon or (domain or "").strip() or host_key(str(raw.get("searchUrl") or ""))
+    return {
+        "SiteName": site_field,
+        "Domain": domain,
+        "Url": url or (f"https://{hk_canon}" if hk_canon else ""),
+        "Engagements": {
+            "Visits": visits_f,
+            "VisitsFormatted": _format_visits_integer_display(visits_f),
+            "PagePerVisit": ppg,
+            "BounceRate": br,
+        },
+        "EstimatedMonthlyVisits": monthly_df,
+        "TopCountryShares": top_country_shares,
+        "TopKeywordShares": top_kw,
+        "TopKeywords": top_kw,
+    }
+
+
+def merge_outside_similarweb_fallback_batch(part_domains: list, batch_items: list) -> tuple[list, int]:
+    """
+    Sau actor Similarweb mặc định: với mỗi domain trong batch, nếu không có traffic hợp lệ
+    thì gọi actor fallback (radeance/similarweb-scraper), chuẩn hoá và ghi đè vào map theo host.
+
+    Trả về (danh sách item theo thứ tự part_domains, số domain đã gọi fallback).
+    """
+    if not isinstance(part_domains, list) or not part_domains:
+        return (batch_items if isinstance(batch_items, list) else []), 0
+    batch_items = batch_items if isinstance(batch_items, list) else []
+
+    env_fb = os.getenv("COLLABS_OUTSIDE_SIMILARWEB_FALLBACK_ACTOR")
+    if env_fb is not None and not str(env_fb).strip():
+        fallback_actor = ""
+    else:
+        fallback_actor = (str(env_fb).strip() if env_fb else DEFAULT_OUTSIDE_SIMILARWEB_FALLBACK_ACTOR)
+
+    by_h: dict[str, dict] = {}
+    for it in batch_items:
+        if not isinstance(it, dict):
+            continue
+        k = host_key(apify_site_field(it))
+        if k:
+            by_h[k] = it
+
+    need: list[str] = []
+    seen_need: set[str] = set()
+    for d in part_domains:
+        hk = host_key(d)
+        if not hk:
+            continue
+        it = by_h.get(hk, {})
+        if _similarweb_item_has_traffic(it):
+            continue
+        if hk not in seen_need:
+            seen_need.add(hk)
+            need.append(hk)
+
+    if not need or not fallback_actor:
+        out = []
+        for d in part_domains:
+            hk = host_key(d)
+            if not hk:
+                continue
+            out.append(by_h.get(hk, {}))
+        return out, 0
+
+    urls = []
+    for hk in need:
+        urls.append(f"https://{hk}")
+
+    fb_wait = int(os.getenv("COLLABS_OUTSIDE_SIMILARWEB_WAIT_SECS", "360") or "360")
+    run_input = {
+        "urls": urls,
+        "include_base_data": True,
+        "include_similar_sites": False,
+        "include_indepth_data": False,
+        "output_mode": "individual",
+    }
+    try:
+        ds, fb_tok = _apify_store_actor_dataset_id(fallback_actor, run_input, wait_secs=fb_wait)
+        fb_items = apify_list_items(ds, token=fb_tok)
+    except Exception as exc:
+        print(f"Cảnh báo Similarweb fallback ({fallback_actor}): {exc}")
+        out = []
+        for d in part_domains:
+            hk = host_key(d)
+            if not hk:
+                continue
+            out.append(by_h.get(hk, {}))
+        return out, 0
+
+    for i, raw in enumerate(fb_items):
+        if not isinstance(raw, dict):
+            continue
+        norm = normalize_radeance_similarweb_item(raw)
+        if not norm:
+            continue
+        row_hosts = _radeance_dataset_row_host_keys(raw)
+        matched: str | None = None
+        for hk in need:
+            if hk in row_hosts:
+                matched = hk
+                break
+        if matched is None and i < len(need):
+            matched = need[i]
+        nk = host_key(apify_site_field(norm))
+        if matched:
+            by_h[matched] = norm
+        if nk:
+            by_h[nk] = norm
+
+    out = []
+    for d in part_domains:
+        hk = host_key(d)
+        if not hk:
+            continue
+        out.append(by_h.get(hk, {}))
+    return out, len(need)
 
 
 def check_apify_connection() -> str:
-    """Kiểm tra kết nối/tính hợp lệ APIFY_TOKEN trước khi chạy lọc."""
-    token = (os.getenv("APIFY_TOKEN") or "").strip()
-    if not token:
+    """Kiểm tra kết nối Apify; thử token chính rồi token dự phòng."""
+    candidates = apify_effective_token_candidates()
+    if not candidates:
         raise RuntimeError("Thiếu APIFY_TOKEN trong .env")
-    url = f"https://api.apify.com/v2/users/me?token={token}"
-    try:
-        res = requests.get(url, timeout=20)
-    except requests.RequestException as exc:
-        raise RuntimeError(f"Không kết nối được Apify: {exc}") from exc
-    if not res.ok:
-        raise RuntimeError(f"Apify connection check lỗi HTTP {res.status_code}: {res.text[:300]}")
-    try:
-        body = res.json()
-    except Exception as exc:
-        raise RuntimeError("Apify connection check trả về dữ liệu không hợp lệ.") from exc
-    data = body.get("data") or {}
-    username = (
-        str(data.get("username") or "").strip()
-        or str(data.get("email") or "").strip()
-        or str(data.get("id") or "").strip()
-        or "unknown-user"
-    )
-    return username
+    last_err = ""
+    for tok in candidates:
+        url = f"https://api.apify.com/v2/users/me?token={tok}"
+        try:
+            res = requests.get(url, timeout=20)
+        except requests.RequestException as exc:
+            last_err = str(exc)
+            continue
+        if not res.ok:
+            last_err = f"HTTP {res.status_code}: {res.text[:300]}"
+            if _apify_http_suggests_token_failover(res.status_code, res.text or ""):
+                continue
+            raise RuntimeError(f"Apify connection check lỗi HTTP {res.status_code}: {res.text[:300]}")
+        try:
+            body = res.json()
+        except Exception as exc:
+            raise RuntimeError("Apify connection check trả về dữ liệu không hợp lệ.") from exc
+        data = body.get("data") or {}
+        username = (
+            str(data.get("username") or "").strip()
+            or str(data.get("email") or "").strip()
+            or str(data.get("id") or "").strip()
+            or "unknown-user"
+        )
+        return username
+    raise RuntimeError(f"Apify connection check thất bại với mọi token đã cấu hình: {last_err}")
 
 
-def apify_list_items(dataset_id: str) -> list:
-    token = (os.getenv("APIFY_TOKEN") or "").strip()
+def apify_list_items(dataset_id: str, token: str | None = None) -> list:
+    tok = (str(token or "").strip() or apify_primary_token())
+    if not tok:
+        cand = apify_effective_token_candidates()
+        if not cand:
+            raise RuntimeError("Thiếu APIFY_TOKEN trong .env")
+        tok = cand[0]
+    http_retries = int(os.getenv("APIFY_HTTP_RETRIES", "3") or "3")
+    if http_retries < 1:
+        http_retries = 1
+    connect_timeout_sec = float(os.getenv("APIFY_CONNECT_TIMEOUT_SECS", "20") or "20")
+    if connect_timeout_sec < 3:
+        connect_timeout_sec = 3.0
+
+    def _get_with_retry(req_url: str, read_timeout_sec: float):
+        last_exc: Exception | None = None
+        for attempt in range(1, http_retries + 1):
+            try:
+                return requests.get(req_url, timeout=(connect_timeout_sec, max(5.0, float(read_timeout_sec))))
+            except requests.RequestException as exc:
+                last_exc = exc
+                if attempt >= http_retries:
+                    break
+                time.sleep(min(6.0, 1.2 * attempt))
+        raise RuntimeError(f"Apify list items request thất bại sau {http_retries} lần thử: {last_exc}")
+
     items = []
     offset = 0
     limit = 1000
     while True:
-        url = f"https://api.apify.com/v2/datasets/{dataset_id}/items?token={token}&offset={offset}&limit={limit}&clean=true"
-        res = requests.get(url, timeout=120)
+        url = f"https://api.apify.com/v2/datasets/{dataset_id}/items?token={tok}&offset={offset}&limit={limit}&clean=true"
+        res = _get_with_retry(url, read_timeout_sec=120)
         if not res.ok:
             raise RuntimeError(f"Apify list items lỗi HTTP {res.status_code}: {res.text[:300]}")
         chunk = res.json()
@@ -1520,8 +3775,8 @@ def main():
     )
     for idx, part in enumerate(chunked(domains, max_domains_per_run), start=1):
         print(f"Apify batch {idx}: {len(part)} domains")
-        dataset_id = apify_call_actor(part)
-        items.extend(apify_list_items(dataset_id))
+        dataset_id, apify_tok = apify_call_actor(part)
+        items.extend(apify_list_items(dataset_id, token=apify_tok))
 
     by_host = {}
     for item in items:

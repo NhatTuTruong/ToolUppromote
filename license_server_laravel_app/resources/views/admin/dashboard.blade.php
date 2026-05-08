@@ -11,6 +11,12 @@
         h1 { margin: 0; font-size: 22px; color: #0f172a; }
         h3 { margin: 0 0 12px; font-size: 17px; color: #111827; }
         .card { background: #fff; border: 1px solid #dbe2ee; border-radius: 10px; padding: 14px; margin-bottom: 14px; box-shadow: 0 6px 20px rgba(31, 41, 55, 0.04); }
+        .tabs { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0 14px; }
+        .tab-btn { border: 1px solid #c8d5ea; background: #fff; color: #0f172a; border-radius: 999px; padding: 8px 12px; font-weight: 800; font-size: 13px; cursor: pointer; }
+        .tab-btn:hover { background: #eef4ff; }
+        .tab-btn.active { background: #2563eb; border-color: #2563eb; color: #fff; }
+        .tab-panel { display: none; }
+        .tab-panel.active { display: block; }
         .grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
         .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
         label { display: block; font-size: 12px; color: #475569; margin-bottom: 4px; font-weight: 600; }
@@ -58,6 +64,33 @@
         <div class="msg ok">{{ session('success') }}</div>
     @endif
 
+    <div class="tabs" role="tablist" aria-label="Tabs quản trị">
+        <button type="button" class="tab-btn active" data-tab-target="tab-refersion" role="tab" aria-controls="tab-refersion" aria-selected="true">Token Refersion</button>
+        <button type="button" class="tab-btn" data-tab-target="tab-quick-key" role="tab" aria-controls="tab-quick-key" aria-selected="false">Thêm/Cập nhật key</button>
+        <button type="button" class="tab-btn" data-tab-target="tab-activations" role="tab" aria-controls="tab-activations" aria-selected="false">Activation</button>
+        <button type="button" class="tab-btn" data-tab-target="tab-keys" role="tab" aria-controls="tab-keys" aria-selected="false">Danh sách key</button>
+    </div>
+
+    <div id="tab-refersion" class="tab-panel active">
+    <div class="card">
+        <h3>Cập nhật Token Refersion</h3>
+        <form method="post" action="{{ route('admin.settings.refersion_token') }}">
+            @csrf
+            <div>
+                <label>Refersion token</label>
+                <input name="refersion_token" type="text" value="{{ $refersionToken }}" autocomplete="off" placeholder="Nhập token Refersion">
+            </div>
+            <div class="muted" style="margin-top:6px;">
+                Khi lưu, app client đã kích hoạt key sẽ tự đồng bộ token này vào phần Cài đặt.
+            </div>
+            <div style="margin-top:10px;">
+                <button type="submit" class="btn btn-primary">Lưu token</button>
+            </div>
+        </form>
+    </div>
+    </div>
+
+    <div id="tab-quick-key" class="tab-panel">
     <div class="card">
         <h3>Thêm hoặc cập nhật nhanh 1 key</h3>
         <form method="post" action="{{ route('admin.keys.store') }}">
@@ -83,12 +116,22 @@
                     <label><input type="checkbox" name="allowed_sources[]" value="uppromote" checked> Uppromote</label>
                     <label><input type="checkbox" name="allowed_sources[]" value="goaffpro" checked> Goaffpro</label>
                     <label><input type="checkbox" name="allowed_sources[]" value="refersion"> Refersion</label>
+                    <label><input type="checkbox" name="allowed_sources[]" value="collabs"> Shopify Collabs</label>
                 </div>
+            </div>
+            <div style="margin-top:8px;">
+                <label>Auto Apply Collabs (Apply Collab)</label>
+                <div class="check-row">
+                    <label><input type="checkbox" name="allow_auto_apply_collabs" value="1" checked> Apply Collab</label>
+                </div>
+                <div class="muted" style="margin-top:4px;">Tắt mục này sẽ ẩn các nút/chức năng Auto Apply Collabs trong app.</div>
             </div>
             <div style="margin-top:10px;"><button type="submit" class="btn btn-primary">Lưu key</button></div>
         </form>
     </div>
+    </div>
 
+    <div id="tab-activations" class="tab-panel">
     <div class="card">
         <h3>Activation đang hoạt động</h3>
         <div class="muted" style="margin-bottom:8px;">Usage theo ngày VN ({{ $usageDayVn }})</div>
@@ -136,7 +179,9 @@
             <a class="pg-btn {{ $activations->hasMorePages() ? '' : 'disabled' }}" href="{{ $activations->nextPageUrl() ?: '#' }}">Sau →</a>
         </div>
     </div>
+    </div>
 
+    <div id="tab-keys" class="tab-panel">
     <div class="card">
         <h3>Danh sách key</h3>
         <form method="get" action="{{ route('admin.dashboard') }}" class="search-row">
@@ -184,6 +229,12 @@
                                     <label><input type="checkbox" name="allowed_sources[]" value="uppromote" @checked(in_array('uppromote', $allowed, true))> Uppromote</label>
                                     <label><input type="checkbox" name="allowed_sources[]" value="goaffpro" @checked(in_array('goaffpro', $allowed, true))> Goaffpro</label>
                                     <label><input type="checkbox" name="allowed_sources[]" value="refersion" @checked(in_array('refersion', $allowed, true))> Refersion</label>
+                                    <label><input type="checkbox" name="allowed_sources[]" value="collabs" @checked(in_array('collabs', $allowed, true))> Shopify Collabs</label>
+                                </div>
+                            </div>
+                            <div style="margin-top:6px;">
+                                <div class="check-row">
+                                    <label><input type="checkbox" name="allow_auto_apply_collabs" value="1" @checked((bool) $k->allow_auto_apply_collabs)> Apply Collab</label>
                                 </div>
                             </div>
                             <div style="margin-top:6px;"><input name="notes" value="{{ $k->notes }}"></div>
@@ -206,6 +257,7 @@
             <a class="pg-btn {{ $keys->hasMorePages() ? '' : 'disabled' }}" href="{{ $keys->nextPageUrl() ?: '#' }}">Sau →</a>
         </div>
     </div>
+    </div>
 </div>
 <script>
     (function () {
@@ -226,6 +278,40 @@
             input.value = 'AFL1-' + randomBlock(4) + '-' + randomBlock(4) + '-' + randomBlock(4);
             input.focus();
         });
+    })();
+</script>
+<script>
+    (function () {
+        var btns = Array.prototype.slice.call(document.querySelectorAll('.tab-btn[data-tab-target]'));
+        var panels = Array.prototype.slice.call(document.querySelectorAll('.tab-panel'));
+        if (!btns.length || !panels.length) return;
+
+        function setActive(tabId, pushHash) {
+            btns.forEach(function (b) {
+                var isActive = b.getAttribute('data-tab-target') === tabId;
+                b.classList.toggle('active', isActive);
+                b.setAttribute('aria-selected', isActive ? 'true' : 'false');
+            });
+            panels.forEach(function (p) {
+                p.classList.toggle('active', p.id === tabId);
+            });
+            if (pushHash) {
+                try { window.location.hash = tabId; } catch (_) {}
+            }
+        }
+
+        btns.forEach(function (b) {
+            b.addEventListener('click', function () {
+                var id = b.getAttribute('data-tab-target') || '';
+                if (!id) return;
+                setActive(id, true);
+            });
+        });
+
+        var fromHash = (window.location.hash || '').replace('#', '').trim();
+        if (fromHash && document.getElementById(fromHash)) {
+            setActive(fromHash, false);
+        }
     })();
 </script>
 </body>

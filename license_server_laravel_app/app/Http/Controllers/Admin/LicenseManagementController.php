@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Admin;
 
 use App\Http\Controllers\Controller;
+use App\Models\AppSetting;
 use App\Models\LicenseActivation;
 use App\Models\LicenseKey;
 use Illuminate\Http\RedirectResponse;
@@ -56,7 +57,24 @@ class LicenseManagementController extends Controller
             'keys' => $keys,
             'activations' => $activations,
             'usageDayVn' => $todayVn,
+            'refersionToken' => AppSetting::getValue('refersion_token', ''),
         ]);
+    }
+
+    public function updateRefersionToken(Request $request): RedirectResponse
+    {
+        $data = $request->validate([
+            'refersion_token' => ['nullable', 'string', 'max:4000'],
+        ]);
+
+        $token = trim((string) ($data['refersion_token'] ?? ''));
+
+        AppSetting::query()->updateOrCreate(
+            ['key' => 'refersion_token'],
+            ['value' => $token]
+        );
+
+        return back()->with('success', 'Đã cập nhật Refersion token.');
     }
 
     public function storeKey(Request $request): RedirectResponse
@@ -66,7 +84,8 @@ class LicenseManagementController extends Controller
             'daily_limit' => ['nullable', 'integer', 'min:1'],
             'max_machines' => ['nullable', 'integer', 'min:1'],
             'allowed_sources' => ['required', 'array', 'min:1'],
-            'allowed_sources.*' => ['string', 'in:uppromote,goaffpro,refersion'],
+            'allowed_sources.*' => ['string', 'in:uppromote,goaffpro,refersion,collabs'],
+            'allow_auto_apply_collabs' => ['nullable', 'boolean'],
             'expires_at' => ['nullable', 'date'],
             'notes' => ['nullable', 'string', 'max:2000'],
         ]);
@@ -78,6 +97,7 @@ class LicenseManagementController extends Controller
         $model->daily_limit = $data['daily_limit'] ?? $model->daily_limit ?? (int) config('license.default_daily_limit', 500);
         $model->max_machines = $data['max_machines'] ?? $model->max_machines ?? (int) config('license.max_machines_per_key', 2);
         $model->allowed_sources = array_values(array_unique($data['allowed_sources'] ?? LicenseKey::DEFAULT_ALLOWED_SOURCES));
+        $model->allow_auto_apply_collabs = $request->boolean('allow_auto_apply_collabs', true);
         $model->expires_at = $data['expires_at'] ?? null;
         $model->notes = $data['notes'] ?? null;
         $model->save();
@@ -92,7 +112,7 @@ class LicenseManagementController extends Controller
             'daily_limit' => ['nullable', 'integer', 'min:1'],
             'max_machines' => ['nullable', 'integer', 'min:1'],
             'allowed_sources' => ['required', 'array', 'min:1'],
-            'allowed_sources.*' => ['string', 'in:uppromote,goaffpro,refersion'],
+            'allowed_sources.*' => ['string', 'in:uppromote,goaffpro,refersion,collabs'],
         ]);
 
         $dailyLimit = $data['daily_limit'] ?? (int) config('license.default_daily_limit', 500);
@@ -134,7 +154,8 @@ class LicenseManagementController extends Controller
             'daily_limit' => ['nullable', 'integer', 'min:1'],
             'max_machines' => ['nullable', 'integer', 'min:1'],
             'allowed_sources' => ['required', 'array', 'min:1'],
-            'allowed_sources.*' => ['string', 'in:uppromote,goaffpro,refersion'],
+            'allowed_sources.*' => ['string', 'in:uppromote,goaffpro,refersion,collabs'],
+            'allow_auto_apply_collabs' => ['nullable', 'boolean'],
             'expires_at' => ['nullable', 'date'],
             'notes' => ['nullable', 'string', 'max:2000'],
         ]);
@@ -144,6 +165,7 @@ class LicenseManagementController extends Controller
         $key->daily_limit = $data['daily_limit'] ?? null;
         $key->max_machines = $data['max_machines'] ?? null;
         $key->allowed_sources = array_values(array_unique($data['allowed_sources'] ?? []));
+        $key->allow_auto_apply_collabs = $request->boolean('allow_auto_apply_collabs');
         $key->expires_at = $data['expires_at'] ?? null;
         $key->notes = $data['notes'] ?? null;
         $key->save();

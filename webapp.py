@@ -1,11 +1,19 @@
 import os
-import threading
+import socket
+import subprocess
+import sys
 import time
+import json
+from shutil import which
+import threading
+from datetime import datetime
 from pathlib import Path
+from typing import Callable, Optional
 
 from flask import Flask, jsonify, render_template, request, send_file
 
 import filter as core
+import auto_apply as auto_apply_core
 from app import (
     ENV_PATH,
     apply_settings_for_run,
@@ -22,6 +30,28 @@ from runtime_paths import app_dir, bundle_dir
 
 BASE_DIR = app_dir()
 license_guard.set_paths(BASE_DIR)
+
+
+def _env_flag(name: str, default: bool = True) -> bool:
+    raw = str(os.getenv(name, "")).strip().lower()
+    if raw == "":
+        return bool(default)
+    if raw in {"1", "true", "yes", "y", "on", "enable", "enabled"}:
+        return True
+    if raw in {"0", "false", "no", "n", "off", "disable", "disabled"}:
+        return False
+    return bool(default)
+
+
+def auto_apply_collabs_enabled() -> bool:
+    # Feature flag: bật/tắt Auto Apply Collabs trên server + theo license key.
+    if not _env_flag("ENABLE_AUTO_APPLY_COLLABS", True):
+        return False
+    try:
+        lic = license_guard.license_status_payload()
+        return bool(lic.get("auto_apply_collabs_enabled", True))
+    except Exception:
+        return True
 
 
 class RunControl:
@@ -103,12 +133,159 @@ class AppState:
 
 
 STATE = AppState()
+
+
+class AutoApplyState:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.running = False
+        self.status = "Idle"
+        self.logs: list[str] = []
+        self.result: dict | None = None
+        self.error: str = ""
+        self.stop_event = threading.Event()
+        self.worker: threading.Thread | None = None
+        self.current_file: str = ""
+
+    def reset(self):
+        self.running = False
+        self.status = "Idle"
+        self.logs = []
+        self.result = None
+        self.error = ""
+        self.stop_event = threading.Event()
+        self.worker = None
+        self.current_file = ""
+
+    def add_log(self, msg: str):
+        with self.lock:
+            self.logs.append(str(msg))
+
+
+AUTO_APPLY_STATE = AutoApplyState()
+AUTO_APPLY_HISTORY_PATH = BASE_DIR / "auto-apply-history.json"
+AUTO_APPLY_HISTORY_LOCK = threading.Lock()
+
+
+def _load_auto_apply_history() -> list[dict]:
+    if not AUTO_APPLY_HISTORY_PATH.exists():
+        return []
+    try:
+        raw = AUTO_APPLY_HISTORY_PATH.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    try:
+        data = json.loads(raw or "[]")
+    except Exception:
+        return []
+    return data if isinstance(data, list) else []
+
+
+def _save_auto_apply_history(items: list[dict]) -> None:
+    try:
+        AUTO_APPLY_HISTORY_PATH.write_text(
+            json.dumps(items, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
+def _append_auto_apply_history(entry: dict) -> None:
+    with AUTO_APPLY_HISTORY_LOCK:
+        items = _load_auto_apply_history()
+        items.insert(0, entry)
+        # Giữ tối đa 200 phiên để file không phình to.
+        items = items[:200]
+        _save_auto_apply_history(items)
 _root = bundle_dir()
 app = Flask(
     __name__,
     template_folder=str(_root / "templates"),
     static_folder=str(_root / "static"),
 )
+
+def _is_tcp_port_open(host: str, port: int, timeout_sec: float = 0.35) -> bool:
+    try:
+        with socket.create_connection((host, int(port)), timeout=float(timeout_sec)):
+            return True
+    except OSError:
+        return False
+
+
+def _default_edge_paths_windows() -> list[str]:
+    paths = []
+    pf86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+    pf = os.environ.get("ProgramFiles", r"C:\Program Files")
+    paths.append(str(Path(pf86) / "Microsoft" / "Edge" / "Application" / "msedge.exe"))
+    paths.append(str(Path(pf) / "Microsoft" / "Edge" / "Application" / "msedge.exe"))
+    return paths
+
+
+def ensure_edge_cdp_running(
+    port: int = 9222,
+    user_data_dir: str = r"C:\edge-cdp",
+    edge_exe: str | None = None,
+    log: Optional[Callable[[str], None]] = None,
+    wait_sec: float = 12.0,
+) -> bool:
+    """
+    Khi bấm Auto Apply:
+    - Nếu CDP port đã mở: coi như Edge đã chạy -> OK.
+    - Nếu chưa mở: tự mở Edge với --remote-debugging-port + --user-data-dir rồi chờ port lên.
+    """
+
+    def _log(msg: str) -> None:
+        if log:
+            try:
+                log(str(msg))
+            except Exception:
+                pass
+
+    host = "127.0.0.1"
+    if _is_tcp_port_open(host, port):
+        _log(f"CDP đã sẵn sàng trên {host}:{port} (Edge đã mở).")
+        return True
+
+    if not sys.platform.startswith("win"):
+        _log("Không phải Windows: không tự mở Edge. Hãy tự mở browser CDP trước.")
+        return False
+
+    exe = (edge_exe or "").strip()
+    if not exe:
+        for p in _default_edge_paths_windows():
+            if Path(p).is_file():
+                exe = p
+                break
+    if not exe:
+        exe = which("msedge") or which("msedge.exe") or ""
+    if not exe:
+        _log("Không tìm thấy msedge.exe để mở Edge CDP.")
+        return False
+
+    args = [
+        exe,
+        f"--remote-debugging-port={int(port)}",
+        f"--user-data-dir={user_data_dir}",
+    ]
+
+    try:
+        creationflags = 0
+        if sys.platform.startswith("win"):
+            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+        subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=creationflags)
+    except Exception as exc:
+        _log(f"Lỗi mở Edge CDP: {exc}")
+        return False
+
+    deadline = time.monotonic() + float(wait_sec)
+    while time.monotonic() < deadline:
+        if _is_tcp_port_open(host, port):
+            _log(f"Edge CDP đã lên trên {host}:{port}.")
+            return True
+        time.sleep(0.25)
+    _log(f"Timeout chờ Edge CDP trên {host}:{port}.")
+    return False
 
 
 def _refresh_license_env_from_file() -> None:
@@ -125,6 +302,44 @@ def _refresh_license_env_from_file() -> None:
     ):
         if key in disk:
             os.environ[key] = str(disk.get(key) or "").strip()
+
+
+def _resolve_export_page_range(filters: dict, source: str) -> tuple[int, int]:
+    try:
+        start_page = int(filters.get("start_page") or 1)
+    except (TypeError, ValueError):
+        start_page = 1
+    if start_page < 1:
+        start_page = 1
+
+    end_raw = filters.get("end_page")
+    try:
+        if end_raw is None:
+            end_page = start_page
+        elif str(end_raw).strip() == "":
+            end_page = start_page
+        else:
+            end_page = int(end_raw)
+    except (TypeError, ValueError):
+        end_page = start_page
+
+    if end_page < start_page:
+        end_page = start_page
+
+    max_pages_cap = None
+    if source == "goaffpro":
+        max_pages_cap = core.goaffpro_max_pages_cap()
+    elif source == "refersion":
+        max_pages_cap = core.refersion_max_pages_cap()
+    elif source == "collabs":
+        max_pages_cap = core.collabs_max_pages_cap()
+    else:
+        max_pages_cap = core.uppromote_max_pages_cap()
+
+    if max_pages_cap is not None:
+        end_page = min(end_page, max_pages_cap)
+
+    return start_page, end_page
 
 
 def fetch_offers_uppromote(filters: dict) -> list:
@@ -337,6 +552,212 @@ def fetch_offers_refersion(filters: dict) -> list:
     return [core.map_refersion_offer(o) for o in raw_offers]
 
 
+def fetch_offers_collabs(filters: dict) -> list:
+    discovery_mode = str((filters or {}).get("discovery_mode") or "in_discovery").strip().lower()
+    if discovery_mode == "outside_discovery":
+        STATE.control.wait_if_paused()
+        if STATE.control.should_stop():
+            return []
+        dedup_enabled = str(os.getenv("COLLABS_OUTSIDE_DEDUP_PERSIST", "")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "y",
+            "on",
+            "enable",
+            "enabled",
+        }
+        cse_k = (os.getenv("GOOGLE_CUSTOM_SEARCH_API_KEY") or os.getenv("GOOGLE_CSE_API_KEY") or "").strip()
+        cse_cx = (os.getenv("GOOGLE_CUSTOM_SEARCH_ENGINE_ID") or os.getenv("GOOGLE_CSE_CX") or "").strip()
+        if (os.getenv("COLLABS_OUTSIDE_GOOGLE_ACTOR_ID") or "").strip():
+            prov = "Apify Google actor"
+        elif cse_k and cse_cx:
+            prov = "Google Custom Search JSON API"
+        else:
+            prov = "Bing RSS"
+        raw_target = (filters or {}).get("outside_target_results")
+        if raw_target is None or str(raw_target).strip() == "":
+            raw_target = os.getenv("COLLABS_OUTSIDE_MAX_RESULTS", "80") or "80"
+        try:
+            target_n = max(10, min(30, int(raw_target)))
+        except Exception:
+            target_n = 30
+        dedup_txt = "dedupe=ON" if dedup_enabled else "dedupe=OFF"
+        fcollab = dict(filters or {})
+        # Luôn sinh query mới mỗi lần lọc (không giữ _effective_outside_query từ request cũ).
+        fcollab.pop(core.EFFECTIVE_OUTSIDE_QUERY_KEY, None)
+        q_google = core.resolve_outside_discovery_query_string(fcollab)
+        fcollab[core.EFFECTIVE_OUTSIDE_QUERY_KEY] = q_google
+        STATE.add_log(
+            f"Collabs ngoài Discovery: Google query: {q_google!r} — đang tìm brand ({prov}, {dedup_txt}, target={target_n})..."
+        )
+        offers = core.discover_collabs_outside_discovery_offers(
+            fcollab, should_stop=STATE.control.should_stop
+        )
+        outside_stats = fcollab.pop(core.OUTSIDE_DISCOVERY_STATS_KEY, None)
+        if STATE.control.should_stop():
+            STATE.add_log("Collabs ngoài Discovery: đã dừng theo yêu cầu.")
+        else:
+            STATE.add_log(f"Collabs ngoài Discovery: đã tìm được {len(offers)} brand hợp lệ.")
+            if isinstance(outside_stats, dict):
+                tb = outside_stats.get("target_batch")
+                cu = outside_stats.get("candidate_urls")
+                STATE.add_log(
+                    f"Collabs ngoài Discovery: giải thích số lượng — target={tb} là tối đa "
+                    f"số URL lấy từ Google (theo cursor/query), không phải đảm bảo đủ brand; "
+                    f"lần này có {cu} URL ứng viên từ tìm kiếm, sau khi kiểm tra trang collab + Apply now + link signup "
+                    f"còn {len(offers)} brand."
+                )
+        return offers
+
+    base_url = (os.getenv("COLLABS_API_URL") or "").strip()
+    if not base_url:
+        raise RuntimeError("Thiếu COLLABS_API_URL trong cài đặt")
+    core.enforce_fixed_fetch_defaults()
+    max_pages_cap = core.collabs_max_pages_cap()
+    page_size = core.DEFAULT_COLLABS_LIMIT
+    max_discovery_pages_per_run = 3
+    max_discovery_records_per_run = page_size * max_discovery_pages_per_run
+    start_page = int(filters.get("start_page") or 1)
+    if start_page < 1:
+        start_page = 1
+    end_raw = filters.get("end_page")
+    if end_raw is None:
+        end_page = 1
+    elif str(end_raw).strip() == "":
+        end_page = None
+    else:
+        end_page = int(end_raw)
+    if end_page is not None and end_page < start_page:
+        end_page = start_page
+    if end_page is not None and max_pages_cap is not None:
+        end_page = min(end_page, max_pages_cap)
+    delay_ms = int(
+        os.getenv("COLLABS_PAGE_DELAY_MS", str(core.DEFAULT_COLLABS_PAGE_DELAY_MS))
+        or str(core.DEFAULT_COLLABS_PAGE_DELAY_MS)
+    )
+    detail_delay_ms = int(os.getenv("COLLABS_DETAIL_DELAY_MS", "100") or "100")
+    progress_floor = 0.0
+
+    def _set_progress_floor(v: float) -> None:
+        nonlocal progress_floor
+        try:
+            progress_floor = max(progress_floor, float(v))
+        except Exception:
+            return
+        with STATE.lock:
+            if progress_floor > STATE.progress:
+                STATE.progress = progress_floor
+
+    raw_nodes = []
+    after = None
+    page = 1
+    if start_page > 1:
+        STATE.add_log(f"Collabs: bắt đầu từ trang {start_page}")
+    forced_end_page = start_page + max_discovery_pages_per_run - 1
+    while True:
+        STATE.control.wait_if_paused()
+        if STATE.control.should_stop():
+            STATE.add_log("Đã dừng.")
+            return []
+        if page >= start_page:
+            STATE.add_log(f"Collabs trang {page}: đang tải...")
+        body = core.fetch_collabs_page(base_url, page_size, after=after)
+        data = body.get("data") or {}
+        search = data.get("brandsNetworkSearch") or {}
+        nodes = search.get("nodes") or []
+        if not isinstance(nodes, list):
+            nodes = []
+        if not nodes:
+            if page >= start_page:
+                STATE.add_log(f"Collabs trang {page}: hết dữ liệu, dừng phân trang.")
+            break
+        if page >= start_page:
+            raw_nodes.extend(nodes)
+            STATE.add_log(f"Collabs trang {page}: +{len(nodes)} brand (tổng {len(raw_nodes)})")
+            if len(raw_nodes) >= max_discovery_records_per_run:
+                raw_nodes = raw_nodes[:max_discovery_records_per_run]
+                STATE.add_log(
+                    f"Collabs: đạt giới hạn mỗi lần lọc {max_discovery_records_per_run} brand "
+                    f"(~{max_discovery_pages_per_run} trang), dừng phân trang."
+                )
+                break
+            # Hiển thị tiến trình ngay trong pha crawl trang Collabs (0-25%).
+            seen_pages = max(1, page - start_page + 1)
+            _set_progress_floor(min(25.0, 5.0 + (seen_pages * 2.0)))
+        info = search.get("pageInfo") or {}
+        has_next = bool(info.get("hasNextPage"))
+        after = info.get("endCursor")
+        if end_page is not None and page >= end_page:
+            STATE.add_log(f"Collabs: đã tới trang kết thúc đã chọn: {end_page}")
+            break
+        if page >= forced_end_page:
+            STATE.add_log(
+                f"Collabs: chỉ lấy tối đa {max_discovery_pages_per_run} trang liên tiếp mỗi lần "
+                f"(trang {start_page} → {forced_end_page})."
+            )
+            break
+        if not has_next:
+            break
+        if max_pages_cap is not None and page >= max_pages_cap:
+            STATE.add_log(f"Collabs: đã tới giới hạn trang trong cài đặt: {max_pages_cap}")
+            break
+        page += 1
+        if delay_ms > 0:
+            time.sleep(delay_ms / 1000)
+    offers = []
+    total_raw = len(raw_nodes)
+    redirect_timeout_sec = int(os.getenv("COLLABS_REDIRECT_TIMEOUT_SEC", "20") or "20")
+    redirect_delay_ms = int(os.getenv("COLLABS_REDIRECT_DELAY_MS", "50") or "50")
+    signup_timeout_sec = int(os.getenv("COLLABS_SIGNUP_TIMEOUT_SEC", "20") or "20")
+    signup_delay_ms = int(os.getenv("COLLABS_SIGNUP_DELAY_MS", "50") or "50")
+    signup_by_host = {}
+    for idx, node in enumerate(raw_nodes, start=1):
+        STATE.control.wait_if_paused()
+        if STATE.control.should_stop():
+            STATE.add_log("Đã dừng.")
+            return []
+        detail_brand = {}
+        gid = core.collabs_shopify_store_gid(node)
+        if gid:
+            try:
+                detail_data = core.fetch_collabs_brand_profile(base_url, gid)
+                detail_brand = detail_data.get("brand") if isinstance(detail_data.get("brand"), dict) else {}
+            except Exception as exc:
+                STATE.add_log(f"Lỗi detail collabs ({gid}): {exc}")
+        mapped = core.map_collabs_brand(node, detail_brand)
+        before_url = str(mapped.get("url") or "").strip()
+        if before_url:
+            final_url = core.resolve_redirected_url(before_url, timeout_sec=redirect_timeout_sec)
+            if final_url and final_url != before_url:
+                mapped["url"] = final_url
+                STATE.add_log(f"Collabs redirect: {before_url} -> {final_url}")
+        effective_url = str(mapped.get("url") or "").strip()
+        hk = core.host_key(effective_url)
+        signup_url = ""
+        if hk:
+            signup_url = signup_by_host.get(hk, "")
+            if not signup_url:
+                signup_url = core.discover_collabs_signup_url(effective_url, timeout_sec=signup_timeout_sec)
+                signup_by_host[hk] = signup_url
+        if signup_url:
+            mapped["client_url"] = signup_url
+            STATE.add_log(f"Collabs signup: {hk} -> {signup_url}")
+        offers.append(mapped)
+        if idx % 10 == 0 or idx == total_raw:
+            STATE.add_log(f"Collabs detail: {idx}/{total_raw}")
+        if total_raw > 0:
+            # Pha detail Collabs: 25% -> 55%
+            _set_progress_floor(25.0 + (idx / total_raw) * 30.0)
+        if detail_delay_ms > 0:
+            time.sleep(detail_delay_ms / 1000)
+        if redirect_delay_ms > 0:
+            time.sleep(redirect_delay_ms / 1000)
+        if signup_delay_ms > 0:
+            time.sleep(signup_delay_ms / 1000)
+    return offers
+
+
 def run_pipeline(settings: dict, min_traffic: int, filters: dict, source: str = "uppromote"):
     apply_settings_for_run(settings)
     core.enforce_fixed_fetch_defaults()
@@ -354,6 +775,10 @@ def run_pipeline(settings: dict, min_traffic: int, filters: dict, source: str = 
         STATE.add_log("Đang tải offer từ Refersion...")
         offers = fetch_offers_refersion(filters)
         snapshot_path = BASE_DIR / "refersion-offers-last.json"
+    elif src == "collabs":
+        STATE.add_log("Đang tải offer từ Shopify Collabs...")
+        offers = fetch_offers_collabs(filters)
+        snapshot_path = BASE_DIR / "collabs-offers-last.json"
     else:
         STATE.add_log("Đang tải offer từ Uppromote...")
         offers = fetch_offers_uppromote(filters)
@@ -361,6 +786,10 @@ def run_pipeline(settings: dict, min_traffic: int, filters: dict, source: str = 
 
     if STATE.control.should_stop():
         STATE.add_log("Đã dừng.")
+        return
+
+    if not offers:
+        STATE.add_log("Không có offer trong phạm vi trang đã chọn.")
         return
 
     cap = license_guard.export_offer_cap(len(offers), src)
@@ -389,6 +818,9 @@ def run_pipeline(settings: dict, min_traffic: int, filters: dict, source: str = 
     if not domains:
         raise RuntimeError("Không có tên miền: thêm URL từ offer hoặc file domain.txt.")
 
+    collabs_discovery_mode = str((filters or {}).get("discovery_mode") or "in_discovery").strip().lower()
+    outside_similarweb_fallback = src == "collabs" and collabs_discovery_mode == "outside_discovery"
+
     STATE.add_log(f"Chạy Apify cho {len(domains)} tên miền...")
     items = []
     chunk_size = int(
@@ -401,8 +833,16 @@ def run_pipeline(settings: dict, min_traffic: int, filters: dict, source: str = 
             STATE.add_log("Đã dừng.")
             return
         STATE.add_log(f"Apify đợt {idx}: {len(part)} tên miền")
-        dataset_id = core.apify_call_actor(part)
-        items.extend(core.apify_list_items(dataset_id))
+        dataset_id, apify_tok = core.apify_call_actor(part)
+        batch = core.apify_list_items(dataset_id, token=apify_tok)
+        if outside_similarweb_fallback:
+            batch, n_fb = core.merge_outside_similarweb_fallback_batch(part, batch)
+            if n_fb:
+                STATE.add_log(
+                    f"Collabs ngoài Discovery: Similarweb fallback Apify cho {n_fb} domain "
+                    f"(thiếu traffic từ actor mặc định; xem COLLABS_OUTSIDE_SIMILARWEB_FALLBACK_ACTOR trong .env)."
+                )
+        items.extend(batch)
 
     by_host = {}
     for item in items:
@@ -411,12 +851,27 @@ def run_pipeline(settings: dict, min_traffic: int, filters: dict, source: str = 
         if key:
             by_host[key] = item
 
-    net_prefix = "goaffpro" if src == "goaffpro" else ("refersion" if src == "refersion" else "uppromote")
-    xlsx_path = BASE_DIR / f"{net_prefix}_{int(time.time())}.xlsx"
+    net_prefix = (
+        "goaffpro"
+        if src == "goaffpro"
+        else ("refersion" if src == "refersion" else ("collabs" if src == "collabs" else "uppromote"))
+    )
+    export_start_page, export_end_page = _resolve_export_page_range(filters, src)
+    now = datetime.now()
+    date_part = f"{now.day}-{now.month}-{now.year}"
+    time_part = f"{now.hour}-{now.minute:02d}"
+    if src == "collabs" and collabs_discovery_mode == "outside_discovery":
+        # File riêng cho luồng search Google ngoài Discovery.
+        xlsx_name = f"collabs_google_{now.month}-{now.year}_{time_part}.xlsx"
+    else:
+        xlsx_name = f"{net_prefix}_page{export_start_page}-{export_end_page}_{date_part}_{time_part}.xlsx"
+    xlsx_path = BASE_DIR / xlsx_name
     if src == "goaffpro":
         header = list(core.GOAFF_CSV_HEADER)
     elif src == "refersion":
         header = list(core.REFERSION_CSV_HEADER)
+    elif src == "collabs":
+        header = list(core.COLLABS_CSV_HEADER)
     else:
         header = list(core.UPPROMOTE_CSV_HEADER_VI)
 
@@ -477,6 +932,8 @@ def run_pipeline(settings: dict, min_traffic: int, filters: dict, source: str = 
                 row = core.build_goaff_csv_row(offer, item, status)
             elif src == "refersion":
                 row = core.build_refersion_csv_row(offer, item, status)
+            elif src == "collabs":
+                row = core.build_collabs_csv_row(offer, item, status)
             else:
                 row = core.build_uppromote_csv_row_vi(offer, item, status)
             exported_rows.append(row)
@@ -498,7 +955,8 @@ def run_pipeline(settings: dict, min_traffic: int, filters: dict, source: str = 
             )
             STATE.add_log(block)
             with STATE.lock:
-                STATE.progress = (idx / total_offers) * 100
+                # Không cho tiến trình tụt lùi nếu trước đó đã cập nhật từ pha fetch/detail.
+                STATE.progress = max(STATE.progress, (idx / total_offers) * 100)
             _w = STATE.wait_log_displayed(STATE.log_count())
             if _w == "stop":
                 STATE.add_log("Đã nhận lệnh dừng — lưu các dòng đã xử lý ra file…")
@@ -535,7 +993,7 @@ def _worker(settings: dict, min_traffic: int, filters: dict, source: str = "uppr
 
 @app.get("/")
 def index():
-    return render_template("index.html")
+    return render_template("index.html", auto_apply_collabs_enabled=auto_apply_collabs_enabled())
 
 
 @app.get("/api/settings")
@@ -594,7 +1052,7 @@ def api_run():
     except (TypeError, ValueError):
         min_traffic = 9000.0
     source = (payload.get("source") or "uppromote").strip().lower()
-    if source not in ("uppromote", "goaffpro", "refersion"):
+    if source not in ("uppromote", "goaffpro", "refersion", "collabs"):
         source = "uppromote"
 
     core.load_env_file(ENV_PATH)
@@ -641,6 +1099,67 @@ def api_stop():
         STATE.status = "Đang dừng"
     STATE.add_log("Đang dừng...")
     return jsonify({"ok": True})
+
+
+@app.post("/api/collabs-outside/reset")
+def api_collabs_outside_reset():
+    removed: list[str] = []
+    errors: list[str] = []
+    for p in (core._outside_cursor_path(), core._outside_dedup_path()):
+        try:
+            if p.exists():
+                p.unlink()
+                removed.append(p.name)
+        except Exception as exc:
+            errors.append(f"{p.name}: {exc}")
+    if errors:
+        return jsonify({"ok": False, "error": "; ".join(errors), "removed": removed}), 500
+    return jsonify({"ok": True, "removed": removed})
+
+@app.post("/api/edge-cdp/start")
+def api_edge_cdp_start():
+    """
+    Mở Edge ở chế độ CDP để sẵn sàng Auto Apply.
+    - Nếu port đã mở: trả ok (Edge đã chạy).
+    - Nếu chưa: tự mở Edge với user-data-dir cố định rồi chờ lên.
+    """
+    logs: list[str] = []
+    ok = ensure_edge_cdp_running(
+        port=9222,
+        user_data_dir=r"C:\edge-cdp",
+        edge_exe=r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        log=lambda m: logs.append(str(m)),
+        wait_sec=12.0,
+    )
+    if not ok:
+        return _no_cache_json({"ok": False, "error": "Không mở được Edge CDP.", "logs": logs}), 500
+    cdp_url = "http://127.0.0.1:9222"
+    # Mở sẵn tab Collabs để user login/ready cho Auto Apply.
+    try:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            browser = p.chromium.connect_over_cdp(cdp_url)
+            try:
+                context = browser.contexts[0] if browser.contexts else browser.new_context()
+                page = context.new_page()
+                try:
+                    page.goto("https://collabs.shopify.com/", wait_until="domcontentloaded", timeout=45000)
+                    logs.append("Đã mở tab: https://collabs.shopify.com/")
+                except Exception as exc:
+                    logs.append(f"[Cảnh báo] Không mở được tab Collabs: {exc}")
+                try:
+                    page.close()
+                except Exception:
+                    pass
+            finally:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+    except Exception as exc:
+        logs.append(f"[Cảnh báo] Không thể kết nối CDP để mở tab Collabs: {exc}")
+    return _no_cache_json({"ok": True, "cdp_url": cdp_url, "logs": logs})
 
 
 def _no_cache_json(data):
@@ -692,6 +1211,7 @@ def api_results():
         + list(BASE_DIR.glob("uppromote_*.xlsx"))
         + list(BASE_DIR.glob("goaffpro_*.xlsx"))
         + list(BASE_DIR.glob("refersion_*.xlsx"))
+        + list(BASE_DIR.glob("collabs_*.xlsx"))
     )
     for p in sorted(globs, key=lambda x: x.stat().st_mtime, reverse=True):
         if p.name in seen:
@@ -716,6 +1236,7 @@ def _allowed_export_basename(name: str) -> bool:
         or name.startswith("uppromote_")
         or name.startswith("goaffpro_")
         or name.startswith("refersion_")
+        or name.startswith("collabs_")
     )
 
 
@@ -765,6 +1286,311 @@ def api_delete_result():
     except OSError as exc:
         return jsonify({"ok": False, "error": str(exc)}), 500
     return jsonify({"ok": True})
+
+
+@app.post("/api/auto-apply")
+def api_auto_apply():
+    if not auto_apply_collabs_enabled():
+        return jsonify({"ok": False, "error": "Auto Apply Collabs đang tắt trên server."}), 403
+    payload = request.get_json(force=True) or {}
+    name = str(payload.get("name") or "").strip()
+    safe_name = Path(name).name
+    full = _safe_result_file_path(safe_name)
+    if full is None:
+        return jsonify({"ok": False, "error": "Tên file không hợp lệ."}), 400
+    if not full.is_file():
+        return jsonify({"ok": False, "error": "Không tìm thấy file."}), 404
+
+    profile_in = payload.get("profile") or {}
+    profile = {
+        "full_name": str(profile_in.get("full_name") or "").strip(),
+        "first_name": str(profile_in.get("first_name") or "").strip(),
+        "last_name": str(profile_in.get("last_name") or "").strip(),
+        "email": str(profile_in.get("email") or "").strip(),
+        "phone": str(profile_in.get("phone") or "").strip(),
+        "website": str(profile_in.get("website") or "").strip(),
+        "instagram": str(profile_in.get("instagram") or "").strip(),
+        "tiktok": str(profile_in.get("tiktok") or "").strip(),
+        "youtube": str(profile_in.get("youtube") or "").strip(),
+        "message": str(profile_in.get("message") or "").strip(),
+        "business_type": str(profile_in.get("business_type") or "").strip(),
+        "dob": str(profile_in.get("dob") or "").strip(),
+        "shipping_location": str(profile_in.get("shipping_location") or "").strip() or "United States",
+        "purchase_before_choice": str(profile_in.get("purchase_before_choice") or "").strip() or "Yes",
+        "identify": profile_in.get("identify") if isinstance(profile_in.get("identify"), list) else [],
+        "brands_worked": str(profile_in.get("brands_worked") or "").strip(),
+        "successful_partnership": str(profile_in.get("successful_partnership") or "").strip(),
+        "content_inspires": str(profile_in.get("content_inspires") or "").strip(),
+        "hope_gain": str(profile_in.get("hope_gain") or "").strip(),
+        "how_found": str(profile_in.get("how_found") or "").strip(),
+        "city_country": str(profile_in.get("city_country") or "").strip(),
+        "demographic": str(profile_in.get("demographic") or "").strip(),
+        "growth_strategy": str(profile_in.get("growth_strategy") or "").strip(),
+        "children_age": str(profile_in.get("children_age") or "").strip(),
+        "ugc_content": str(profile_in.get("ugc_content") or "").strip(),
+        "content_ideas": str(profile_in.get("content_ideas") or "").strip(),
+        "why_fit": str(profile_in.get("why_fit") or "").strip(),
+        "purchase_love": str(profile_in.get("purchase_love") or "").strip(),
+        "why_join": str(profile_in.get("why_join") or "").strip(),
+        "generic_short": str(profile_in.get("generic_short") or "").strip(),
+        "generic_long": str(profile_in.get("generic_long") or "").strip(),
+    }
+    # chuẩn hóa identify
+    if not isinstance(profile["identify"], list):
+        profile["identify"] = []
+    profile["identify"] = [str(x or "").strip() for x in profile["identify"] if str(x or "").strip()]
+    if not profile["identify"]:
+        profile["identify"] = ["Prefer not to say"]
+    if not profile["full_name"] and not profile["first_name"] and not profile["email"]:
+        return (
+            jsonify({"ok": False, "error": "Cần ít nhất 1 trong các trường: Họ tên, First name hoặc Email."}),
+            400,
+        )
+
+    auto_submit = bool(payload.get("auto_submit"))
+    use_cdp = bool(payload.get("use_cdp"))
+    cdp_url = str(payload.get("cdp_url") or "").strip() or "http://127.0.0.1:9222"
+    if not use_cdp:
+        return (
+            jsonify(
+                {
+                    "ok": False,
+                    "error": (
+                        "Auto Apply hiện chỉ chạy trên trình duyệt thật đã login (CDP). "
+                        "Vui lòng bật tùy chọn dùng trình duyệt đang mở."
+                    ),
+                }
+            ),
+            400,
+        )
+    # Cưỡng chế: luôn bắt buộc login Shopify Collabs trước khi chạy Auto Apply.
+    login_first = True
+    apply_mode = str(payload.get("apply_mode") or "only_dat").strip() or "only_dat"
+    try:
+        row_start = int(payload.get("row_start")) if str(payload.get("row_start") or "").strip() else None
+    except (TypeError, ValueError):
+        row_start = None
+    try:
+        row_end = int(payload.get("row_end")) if str(payload.get("row_end") or "").strip() else None
+    except (TypeError, ValueError):
+        row_end = None
+
+    links = auto_apply_core.extract_apply_links_from_xlsx(
+        full,
+        apply_mode=apply_mode,
+        row_start=row_start,
+        row_end=row_end,
+    )
+    if not links:
+        return jsonify({"ok": False, "error": "Không tìm thấy cột/link apply trong file."}), 400
+
+    # Giữ endpoint cũ để tương thích: chạy dạng blocking (không có nút Hủy).
+    logs: list[str] = []
+    try:
+        ensure_edge_cdp_running(
+            port=9222,
+            user_data_dir=r"C:\edge-cdp",
+            edge_exe=r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            log=lambda m: logs.append(str(m)),
+        )
+        result = auto_apply_core.run_auto_apply(
+            links=links,
+            profile=profile,
+            auto_submit=auto_submit,
+            cdp_url=cdp_url,
+            login_first=login_first,
+            log=lambda m: logs.append(str(m)),
+        )
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc), "logs": logs}), 500
+    return jsonify({"ok": True, "result": result, "logs": logs})
+
+
+def _auto_apply_worker(
+    *,
+    links: list[str],
+    profile: dict,
+    auto_submit: bool,
+    cdp_url: str,
+    login_first: bool,
+    file_name: str,
+):
+    st = AUTO_APPLY_STATE
+    started_local = datetime.now()
+    try:
+        st.add_log("Đang kiểm tra/mở Edge CDP...")
+        ensure_edge_cdp_running(
+            port=9222,
+            user_data_dir=r"C:\edge-cdp",
+            edge_exe=r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            log=st.add_log,
+        )
+        st.add_log("Bắt đầu Auto Apply...")
+        result = auto_apply_core.run_auto_apply(
+            links=links,
+            profile=profile,
+            auto_submit=auto_submit,
+            cdp_url=cdp_url,
+            login_first=login_first,
+            should_stop=lambda: st.stop_event.is_set(),
+            log=st.add_log,
+        )
+        with st.lock:
+            st.result = result
+            st.status = "Done"
+        submitted_items = result.get("submitted_items") if isinstance(result, dict) else []
+        if not isinstance(submitted_items, list):
+            submitted_items = []
+        attempted_items = result.get("attempted_items") if isinstance(result, dict) else []
+        if not isinstance(attempted_items, list):
+            attempted_items = []
+        _append_auto_apply_history(
+            {
+                "file": str(file_name or ""),
+                "started_at": started_local.isoformat(timespec="seconds"),
+                "started_at_display": started_local.strftime("%d/%m/%Y %H:%M:%S"),
+                "email": str(profile.get("email") or "").strip(),
+                "submitted_count": int(result.get("submitted") or 0) if isinstance(result, dict) else 0,
+                "submitted_items": [
+                    {
+                        "brand": str((it or {}).get("brand") or "").strip(),
+                        "email": str((it or {}).get("email") or "").strip() or str(profile.get("email") or "").strip(),
+                        "link": str((it or {}).get("link") or "").strip(),
+                    }
+                    for it in submitted_items
+                    if isinstance(it, dict)
+                ],
+                "attempted_items": [
+                    {
+                        "brand": str((it or {}).get("brand") or "").strip(),
+                        "domain": str((it or {}).get("domain") or "").strip(),
+                        "email": str((it or {}).get("email") or "").strip() or str(profile.get("email") or "").strip(),
+                        "link": str((it or {}).get("link") or "").strip(),
+                        "submitted": bool((it or {}).get("submitted")),
+                        "note": str((it or {}).get("note") or "").strip(),
+                    }
+                    for it in attempted_items
+                    if isinstance(it, dict)
+                ],
+            }
+        )
+    except Exception as exc:
+        with st.lock:
+            st.error = str(exc)
+            st.status = "Error"
+        st.add_log(f"LỖI: {exc}")
+    finally:
+        with st.lock:
+            st.running = False
+
+
+@app.post("/api/auto-apply/start")
+def api_auto_apply_start():
+    if not auto_apply_collabs_enabled():
+        return jsonify({"ok": False, "error": "Auto Apply Collabs đang tắt trên server."}), 403
+    payload = request.get_json(force=True) or {}
+    name = str(payload.get("name") or "").strip()
+    safe_name = Path(name).name
+    full = _safe_result_file_path(safe_name)
+    if full is None:
+        return jsonify({"ok": False, "error": "Tên file không hợp lệ."}), 400
+    if not full.is_file():
+        return jsonify({"ok": False, "error": "Không tìm thấy file."}), 404
+
+    profile_in = payload.get("profile") or {}
+    profile = profile_in if isinstance(profile_in, dict) else {}
+    auto_submit = bool(payload.get("auto_submit"))
+    use_cdp = bool(payload.get("use_cdp"))
+    cdp_url = str(payload.get("cdp_url") or "").strip() or "http://127.0.0.1:9222"
+    if not use_cdp:
+        return jsonify({"ok": False, "error": "Auto Apply hiện chỉ chạy qua CDP (trình duyệt đang mở)."}), 400
+    login_first = True
+    apply_mode = str(payload.get("apply_mode") or "only_dat").strip() or "only_dat"
+    try:
+        row_start = int(payload.get("row_start")) if str(payload.get("row_start") or "").strip() else None
+    except (TypeError, ValueError):
+        row_start = None
+    try:
+        row_end = int(payload.get("row_end")) if str(payload.get("row_end") or "").strip() else None
+    except (TypeError, ValueError):
+        row_end = None
+
+    links = auto_apply_core.extract_apply_links_from_xlsx(
+        full,
+        apply_mode=apply_mode,
+        row_start=row_start,
+        row_end=row_end,
+    )
+    if not links:
+        return jsonify({"ok": False, "error": "Không tìm thấy cột/link apply trong file."}), 400
+
+    st = AUTO_APPLY_STATE
+    with st.lock:
+        if st.running:
+            return jsonify({"ok": False, "error": "Auto Apply đang chạy sẵn."}), 400
+        st.reset()
+        st.running = True
+        st.status = "Running"
+        st.current_file = safe_name
+        st.worker = threading.Thread(
+            target=_auto_apply_worker,
+            kwargs={
+                "links": links,
+                "profile": profile,
+                "auto_submit": auto_submit,
+                "cdp_url": cdp_url,
+                "login_first": login_first,
+                "file_name": safe_name,
+            },
+            daemon=True,
+        )
+        st.worker.start()
+    return jsonify({"ok": True, "total_links": len(links)})
+
+
+@app.post("/api/auto-apply/stop")
+def api_auto_apply_stop():
+    if not auto_apply_collabs_enabled():
+        return jsonify({"ok": False, "error": "Auto Apply Collabs đang tắt trên server."}), 403
+    st = AUTO_APPLY_STATE
+    with st.lock:
+        if not st.running:
+            return jsonify({"ok": False, "error": "Auto Apply không đang chạy."}), 400
+        st.stop_event.set()
+        st.status = "Stopping"
+    st.add_log("Đang hủy Auto Apply...")
+    return jsonify({"ok": True})
+
+
+@app.get("/api/auto-apply/status")
+def api_auto_apply_status():
+    if not auto_apply_collabs_enabled():
+        return _no_cache_json({"running": False, "status": "Disabled", "file": "", "logs": [], "result": None, "error": ""})
+    st = AUTO_APPLY_STATE
+    with st.lock:
+        return _no_cache_json(
+            {
+                "running": st.running,
+                "status": st.status,
+                "file": st.current_file,
+                "logs": list(st.logs[-200:]),
+                "result": st.result,
+                "error": st.error,
+            }
+        )
+
+
+@app.get("/api/auto-apply/history")
+def api_auto_apply_history():
+    if not auto_apply_collabs_enabled():
+        return _no_cache_json({"items": []})
+    file_name = str(request.args.get("name") or "").strip()
+    safe_name = Path(file_name).name if file_name else ""
+    with AUTO_APPLY_HISTORY_LOCK:
+        items = _load_auto_apply_history()
+    if safe_name:
+        items = [it for it in items if str((it or {}).get("file") or "") == safe_name]
+    return _no_cache_json({"items": items[:100]})
 
 
 if __name__ == "__main__":

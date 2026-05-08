@@ -9,7 +9,7 @@ class LicenseKey extends Model
 {
     public const DEFAULT_ALLOWED_SOURCES = ['uppromote', 'goaffpro'];
 
-    public const SUPPORTED_SOURCES = ['uppromote', 'goaffpro', 'refersion'];
+    public const SUPPORTED_SOURCES = ['uppromote', 'goaffpro', 'refersion', 'collabs'];
 
     protected $fillable = [
         'license_key',
@@ -18,6 +18,7 @@ class LicenseKey extends Model
         'daily_limit',
         'max_machines',
         'allowed_sources',
+        'allow_auto_apply_collabs',
         'expires_at',
         'notes',
     ];
@@ -25,6 +26,7 @@ class LicenseKey extends Model
     protected $casts = [
         'expires_at' => 'datetime',
         'allowed_sources' => 'array',
+        'allow_auto_apply_collabs' => 'boolean',
     ];
 
     public function activations(): HasMany

@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 import time
+import uuid
 
 try:
     import requests
@@ -25,8 +26,8 @@ FREE_TRIAL_UP_LIMIT = 3
 FREE_TRIAL_GP_LIMIT = 3
 DEFAULT_LICENSED_EXPORTS_PER_DAY = 500
 # Chu kỳ quota theo VN: reset đúng 00:00 mỗi ngày lịch.
-SUPPORTED_SOURCES = {"uppromote", "goaffpro", "refersion"}
-ALL_SOURCES = ["uppromote", "goaffpro", "refersion"]
+SUPPORTED_SOURCES = {"uppromote", "goaffpro", "refersion", "collabs"}
+ALL_SOURCES = ["uppromote", "goaffpro", "refersion", "collabs"]
 DEFAULT_LICENSED_SOURCES = ["uppromote", "goaffpro"]
 
 
@@ -53,7 +54,11 @@ def normalize_allowed_sources(raw) -> list[str]:
 
 def source_label(source: str) -> str:
     s = normalize_source(source)
-    return "Goaffpro" if s == "goaffpro" else ("Refersion" if s == "refersion" else "Uppromote")
+    return (
+        "Goaffpro"
+        if s == "goaffpro"
+        else ("Refersion" if s == "refersion" else ("Shopify Collabs" if s == "collabs" else "Uppromote"))
+    )
 
 
 # Giờ Việt Nam cố định UTC+7 (không DST).
@@ -62,6 +67,7 @@ _TZ_VN = timezone(timedelta(hours=7), "UTC+7")
 _LICENSE_PATH: Path | None = None
 _FREE_USAGE_PATH: Path | None = None
 _LICENSED_USAGE_PATH: Path | None = None
+_ENV_PATH: Path | None = None
 
 
 def calendar_day_vietnam() -> str:
@@ -70,10 +76,11 @@ def calendar_day_vietnam() -> str:
 
 
 def set_paths(base_dir: Path) -> None:
-    global _LICENSE_PATH, _FREE_USAGE_PATH, _LICENSED_USAGE_PATH
+    global _LICENSE_PATH, _FREE_USAGE_PATH, _LICENSED_USAGE_PATH, _ENV_PATH
     _LICENSE_PATH = base_dir / ".aff_license.json"
     _FREE_USAGE_PATH = base_dir / ".aff_free_usage.json"
     _LICENSED_USAGE_PATH = base_dir / ".aff_licensed_usage.json"
+    _ENV_PATH = base_dir / ".env"
 
 
 def _paths_ok() -> bool:
@@ -82,6 +89,40 @@ def _paths_ok() -> bool:
         and _FREE_USAGE_PATH is not None
         and _LICENSED_USAGE_PATH is not None
     )
+
+
+def _set_refersion_token_local(token: str) -> None:
+    """
+    Đồng bộ REFERSION_TOKEN vào môi trường chạy hiện tại + file .env cục bộ.
+    Bỏ qua khi token rỗng.
+    """
+    value = str(token or "").strip()
+    if not value:
+        return
+    os.environ["REFERSION_TOKEN"] = value
+    if _ENV_PATH is None:
+        return
+    try:
+        lines = _ENV_PATH.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        lines = []
+
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    new_line = f'REFERSION_TOKEN="{escaped}"'
+    updated = False
+    out: list[str] = []
+    for line in lines:
+        if line.startswith("REFERSION_TOKEN="):
+            out.append(new_line)
+            updated = True
+            continue
+        out.append(line)
+    if not updated:
+        out.append(new_line)
+    try:
+        _ENV_PATH.write_text("\n".join(out).rstrip() + "\n", encoding="utf-8")
+    except OSError:
+        return
 
 
 def license_api_base_url() -> str:
@@ -227,8 +268,10 @@ def _activate_via_license_server(norm_key: str) -> tuple[bool, str]:
     hint = str(data.get("key_hint") or (norm_key[-6:] if len(norm_key) >= 6 else norm_key))
     daily_limit = int(data.get("daily_limit") or licensed_exports_per_day())
     expires_at = str(data.get("expires_at") or "")
+    allow_auto_apply_collabs = bool(data.get("allow_auto_apply_collabs", True))
     usage_day = str(data.get("usage_day") or calendar_day_vietnam())
     used_today = max(0, int(data.get("used_today") or 0))
+    _set_refersion_token_local(str(data.get("refersion_token") or ""))
     st = load_license_state()
     st["this_install"] = {
         "activation_id": activation_id,
@@ -236,6 +279,7 @@ def _activate_via_license_server(norm_key: str) -> tuple[bool, str]:
         "machine_fingerprint": mfp,
         "daily_limit": max(1, daily_limit),
         "allowed_sources": normalize_allowed_sources(data.get("allowed_sources")),
+        "allow_auto_apply_collabs": allow_auto_apply_collabs,
         "expires_at": expires_at,
         "activated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
@@ -317,10 +361,12 @@ def _sync_this_install_from_server() -> tuple[bool, str]:
     daily_limit = int(remote_data.get("daily_limit") or _effective_daily_limit())
     usage_day = str(remote_data.get("usage_day") or calendar_day_vietnam())
     used_today = max(0, int(remote_data.get("used_today") or 0))
+    _set_refersion_token_local(str(remote_data.get("refersion_token") or ""))
     st["this_install"] = {
         **inst,
         "daily_limit": max(1, daily_limit),
         "allowed_sources": normalize_allowed_sources(remote_data.get("allowed_sources") or inst.get("allowed_sources")),
+        "allow_auto_apply_collabs": bool(remote_data.get("allow_auto_apply_collabs", inst.get("allow_auto_apply_collabs", True))),
         "expires_at": str(remote_data.get("expires_at") or inst.get("expires_at") or ""),
         "machine_fingerprint": mfp,
     }
@@ -337,9 +383,27 @@ def _load_json(path: Path) -> dict:
 
 
 def _atomic_write(path: Path, data: dict) -> None:
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(path)
+    payload = json.dumps(data, ensure_ascii=False, indent=2)
+    # Dùng tên file tạm unique để tránh va chạm khi nhiều luồng/process cùng ghi.
+    # Trên Windows, os.replace có thể tạm thời lỗi WinError 32 nếu file đang bị giữ lock.
+    last_exc: Exception | None = None
+    for attempt in range(8):
+        tmp = path.with_suffix(path.suffix + f".{uuid.uuid4().hex}.tmp")
+        try:
+            tmp.write_text(payload, encoding="utf-8")
+            os.replace(tmp, path)
+            return
+        except OSError as exc:
+            last_exc = exc
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except OSError:
+                pass
+            # Backoff ngắn để vượt qua lock ngắn hạn từ process/AV/indexer.
+            time.sleep(0.03 * (attempt + 1))
+    if last_exc:
+        raise last_exc
 
 
 def load_license_state() -> dict:
@@ -677,6 +741,7 @@ def license_status_payload() -> dict:
     st = load_license_state()
     inst = st.get("this_install") or {}
     allowed_sources = normalize_allowed_sources(inst.get("allowed_sources"))
+    auto_apply_collabs_flag = bool(inst.get("allow_auto_apply_collabs", True)) if licensed else True
     srv = bool(license_api_base_url())
     activation_mode = "remote" if licensed else "none"
     rem_up = free_exports_remaining_today("uppromote")
@@ -729,6 +794,8 @@ def license_status_payload() -> dict:
         "max_machines_per_key": None,
         "activation_id": inst.get("activation_id") if licensed else None,
         "allowed_sources": allowed_sources if licensed else list(ALL_SOURCES),
+        "auto_apply_collabs_enabled": auto_apply_collabs_flag,
+        "refersion_token": (os.getenv("REFERSION_TOKEN") or "").strip(),
         "message": msg,
     }
 

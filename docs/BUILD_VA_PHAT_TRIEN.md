@@ -174,7 +174,8 @@ Chi tiết tham số và hành vi file output: đọc phần docstring đầu fi
 
 | Biến | Vai trò |
 |------|---------|
-| `APIFY_TOKEN` | Token Apify (actor Similarweb / traffic). |
+| `APIFY_TOKEN` | Token Apify chính: Similarweb + Google Search (Collabs ngoài Discovery), một token cho cả hai. |
+| `APIFY_TOKEN_BACKUP` | (Tuỳ chọn) Token dự phòng khi token chính hết quota / lỗi quyền. |
 | `UPPROMOTE_API_URL`, `UPPROMOTE_BEARER_TOKEN` | API Uppromote. |
 | `GOAFFPRO_API_URL`, `GOAFFPRO_BEARER_TOKEN` | API Goaffpro. |
 | `AFF_LICENSE_HMAC_SECRET` | Secret ký và kiểm tra key bán; bắt buộc nếu cho khách nhập key. |

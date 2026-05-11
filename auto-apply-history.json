@@ -1,5 +1,430 @@
 [
   {
+    "file": "collabs_import_11-5-2026_16-38-51.xlsx",
+    "started_at": "2026-05-11T16:39:03",
+    "started_at_display": "11/05/2026 16:39:03",
+    "email": "nhatdt2020@gmail.com",
+    "submitted_count": 11,
+    "submitted_items": [
+      {
+        "brand": "jbeverlyhills.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://jbeverlyhills.com/pages/collab"
+      },
+      {
+        "brand": "theherosjournal.co",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://theherosjournal.co/pages/collab"
+      },
+      {
+        "brand": "catalystcase.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://catalystcase.com/pages/collab"
+      },
+      {
+        "brand": "rukahair.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://rukahair.com/pages/collab"
+      },
+      {
+        "brand": "takemonday.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://takemonday.com/pages/collab"
+      },
+      {
+        "brand": "luca-s.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://luca-s.com/pages/collab"
+      },
+      {
+        "brand": "tandjscents.co.uk",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://tandjscents.co.uk/pages/collab"
+      },
+      {
+        "brand": "dlnskstore.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://dlnskstore.com/pages/collab"
+      },
+      {
+        "brand": "mymanu.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://mymanu.com/pages/collab"
+      },
+      {
+        "brand": "cinloco.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://cinloco.com/pages/collab"
+      }
+    ],
+    "attempted_items": [
+      {
+        "brand": "jbeverlyhills.com",
+        "domain": "jbeverlyhills.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://jbeverlyhills.com/pages/collab",
+        "submitted": true,
+        "note": "submitted"
+      },
+      {
+        "brand": "theherosjournal.co",
+        "domain": "theherosjournal.co",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://theherosjournal.co/pages/collab",
+        "submitted": true,
+        "note": "submitted"
+      },
+      {
+        "brand": "oceansbalance.com",
+        "domain": "oceansbalance.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://oceansbalance.com/pages/collab",
+        "submitted": false,
+        "note": "no_fields_detected"
+      },
+      {
+        "brand": "catalystcase.com",
+        "domain": "catalystcase.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://catalystcase.com/pages/collab",
+        "submitted": true,
+        "note": "submitted"
+      },
+      {
+        "brand": "rukahair.com",
+        "domain": "rukahair.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://rukahair.com/pages/collab",
+        "submitted": true,
+        "note": "submitted"
+      },
+      {
+        "brand": "takemonday.com",
+        "domain": "takemonday.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://takemonday.com/pages/collab",
+        "submitted": true,
+        "note": "submitted"
+      },
+      {
+        "brand": "luca-s.com",
+        "domain": "luca-s.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://luca-s.com/pages/collab",
+        "submitted": true,
+        "note": "submitted"
+      },
+      {
+        "brand": "tandjscents.co.uk",
+        "domain": "tandjscents.co.uk",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://tandjscents.co.uk/pages/collab",
+        "submitted": true,
+        "note": "submitted"
+      },
+      {
+        "brand": "dlnskstore.com",
+        "domain": "dlnskstore.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://dlnskstore.com/pages/collab",
+        "submitted": true,
+        "note": "submitted"
+      },
+      {
+        "brand": "mymanu.com",
+        "domain": "mymanu.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://mymanu.com/pages/collab",
+        "submitted": true,
+        "note": "submitted"
+      },
+      {
+        "brand": "cinloco.com",
+        "domain": "cinloco.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://cinloco.com/pages/collab",
+        "submitted": true,
+        "note": "submitted"
+      },
+      {
+        "brand": "Collabs – Inovelli",
+        "domain": "inovelli.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://inovelli.com/pages/collab",
+        "submitted": false,
+        "note": "not_in_collabs_after_apply"
+      }
+    ]
+  },
+  {
+    "file": "collabs_import_9-5-2026_22-27-32.xlsx",
+    "started_at": "2026-05-09T22:29:10",
+    "started_at_display": "09/05/2026 22:29:10",
+    "email": "nhatdt2020@gmail.com",
+    "submitted_count": 2,
+    "submitted_items": [
+      {
+        "brand": "surfercat.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://surfercat.com/pages/collab"
+      },
+      {
+        "brand": "axis-y.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://www.axis-y.com/pages/collab"
+      }
+    ],
+    "attempted_items": [
+      {
+        "brand": "surfercat.com",
+        "domain": "surfercat.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://surfercat.com/pages/collab",
+        "submitted": true,
+        "note": "submitted"
+      },
+      {
+        "brand": "axis-y.com",
+        "domain": "axis-y.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://www.axis-y.com/pages/collab",
+        "submitted": true,
+        "note": "submitted"
+      }
+    ]
+  },
+  {
+    "file": "collabs_import_9-5-2026_22-27-32.xlsx",
+    "started_at": "2026-05-09T22:27:43",
+    "started_at_display": "09/05/2026 22:27:43",
+    "email": "nhatdt2020@gmail.com",
+    "submitted_count": 2,
+    "submitted_items": [
+      {
+        "brand": "surfercat.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://surfercat.com/pages/collab"
+      },
+      {
+        "brand": "axis-y.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://www.axis-y.com/pages/collab"
+      }
+    ],
+    "attempted_items": [
+      {
+        "brand": "surfercat.com",
+        "domain": "surfercat.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://surfercat.com/pages/collab",
+        "submitted": true,
+        "note": "submitted"
+      },
+      {
+        "brand": "axis-y.com",
+        "domain": "axis-y.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://www.axis-y.com/pages/collab",
+        "submitted": true,
+        "note": "submitted"
+      }
+    ]
+  },
+  {
+    "file": "collabs_import_9-5-2026_22-24-19.xlsx",
+    "started_at": "2026-05-09T22:25:26",
+    "started_at_display": "09/05/2026 22:25:26",
+    "email": "nhatdt2020@gmail.com",
+    "submitted_count": 0,
+    "submitted_items": [],
+    "attempted_items": [
+      {
+        "brand": "Shopify Collabs · Oops! Nothing to see here.",
+        "domain": "collabs.shopify.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://collabs.shopify.com/brands/<...>/signup",
+        "submitted": false,
+        "note": "no_fields_detected"
+      }
+    ]
+  },
+  {
+    "file": "collabs_import_9-5-2026_22-24-19.xlsx",
+    "started_at": "2026-05-09T22:24:58",
+    "started_at_display": "09/05/2026 22:24:58",
+    "email": "nhatdt2020@gmail.com",
+    "submitted_count": 0,
+    "submitted_items": [],
+    "attempted_items": [
+      {
+        "brand": "Shopify Collabs · Oops! Nothing to see here.",
+        "domain": "collabs.shopify.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://collabs.shopify.com/brands/<...>/signup",
+        "submitted": false,
+        "note": "no_fields_detected"
+      }
+    ]
+  },
+  {
+    "file": "collabs_import_9-5-2026_22-06-15.xlsx",
+    "started_at": "2026-05-09T22:06:36",
+    "started_at_display": "09/05/2026 22:06:36",
+    "email": "nhatdt2020@gmail.com",
+    "submitted_count": 4,
+    "submitted_items": [
+      {
+        "brand": "shopluckyinlove.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://shopluckyinlove.com/pages/collab"
+      },
+      {
+        "brand": "cestnormal.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://cestnormal.com/pages/collab"
+      },
+      {
+        "brand": "gayprideapparel.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://gayprideapparel.com/pages/collab"
+      },
+      {
+        "brand": "hatch-green-chile.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://www.hatch-green-chile.com/pages/collab"
+      }
+    ],
+    "attempted_items": [
+      {
+        "brand": "Shopify Collabs · You don’t meet the requirements, yet",
+        "domain": "calisbooks.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://www.calisbooks.com/pages/collab",
+        "submitted": false,
+        "note": "no_fields_detected"
+      },
+      {
+        "brand": "shopluckyinlove.com",
+        "domain": "shopluckyinlove.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://shopluckyinlove.com/pages/collab",
+        "submitted": true,
+        "note": "submitted"
+      },
+      {
+        "brand": "cestnormal.com",
+        "domain": "cestnormal.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://cestnormal.com/pages/collab",
+        "submitted": true,
+        "note": "submitted"
+      },
+      {
+        "brand": "Shopify Collabs · You don’t meet the requirements, yet",
+        "domain": "lashaffair.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://lashaffair.com/pages/collab",
+        "submitted": false,
+        "note": "no_fields_detected"
+      },
+      {
+        "brand": "gayprideapparel.com",
+        "domain": "gayprideapparel.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://gayprideapparel.com/pages/collab",
+        "submitted": true,
+        "note": "submitted"
+      },
+      {
+        "brand": "hatch-green-chile.com",
+        "domain": "hatch-green-chile.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://www.hatch-green-chile.com/pages/collab",
+        "submitted": true,
+        "note": "submitted"
+      }
+    ]
+  },
+  {
+    "file": "collabs_import_9-5-2026_21-56-43.xlsx",
+    "started_at": "2026-05-09T21:57:02",
+    "started_at_display": "09/05/2026 21:57:02",
+    "email": "nhatdt2020@gmail.com",
+    "submitted_count": 4,
+    "submitted_items": [
+      {
+        "brand": "shopluckyinlove.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://shopluckyinlove.com/pages/collab"
+      },
+      {
+        "brand": "cestnormal.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://cestnormal.com/pages/collab"
+      },
+      {
+        "brand": "gayprideapparel.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://gayprideapparel.com/pages/collab"
+      },
+      {
+        "brand": "hatch-green-chile.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://www.hatch-green-chile.com/pages/collab"
+      }
+    ],
+    "attempted_items": [
+      {
+        "brand": "Shopify Collabs · You don’t meet the requirements, yet",
+        "domain": "calisbooks.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://www.calisbooks.com/pages/collab",
+        "submitted": false,
+        "note": "no_fields_detected"
+      },
+      {
+        "brand": "shopluckyinlove.com",
+        "domain": "shopluckyinlove.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://shopluckyinlove.com/pages/collab",
+        "submitted": true,
+        "note": "submitted"
+      },
+      {
+        "brand": "cestnormal.com",
+        "domain": "cestnormal.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://cestnormal.com/pages/collab",
+        "submitted": true,
+        "note": "submitted"
+      },
+      {
+        "brand": "Shopify Collabs · You don’t meet the requirements, yet",
+        "domain": "lashaffair.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://lashaffair.com/pages/collab",
+        "submitted": false,
+        "note": "no_fields_detected"
+      },
+      {
+        "brand": "gayprideapparel.com",
+        "domain": "gayprideapparel.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://gayprideapparel.com/pages/collab",
+        "submitted": true,
+        "note": "submitted"
+      },
+      {
+        "brand": "hatch-green-chile.com",
+        "domain": "hatch-green-chile.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://www.hatch-green-chile.com/pages/collab",
+        "submitted": true,
+        "note": "submitted"
+      }
+    ]
+  },
+  {
     "file": "collabs_google_5-2026_14-16.xlsx",
     "started_at": "2026-05-06T14:49:49",
     "started_at_display": "06/05/2026 14:49:49",

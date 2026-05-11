@@ -4,6 +4,7 @@ import subprocess
 import sys
 import time
 import json
+from io import BytesIO
 from shutil import which
 import threading
 from datetime import datetime
@@ -1225,6 +1226,122 @@ def api_results():
             }
         )
     return jsonify({"files": files})
+
+
+@app.get("/api/auto-collabs/files")
+def api_auto_collabs_files():
+    files = []
+    for p in sorted(BASE_DIR.glob("collabs_import_*.xlsx"), key=lambda x: x.stat().st_mtime, reverse=True):
+        files.append(
+            {
+                "name": p.name,
+                "size": p.stat().st_size,
+                "modified": int(p.stat().st_mtime),
+            }
+        )
+    return jsonify({"files": files})
+
+
+@app.post("/api/auto-collabs/import")
+def api_auto_collabs_import():
+    if "file" not in request.files:
+        return jsonify({"ok": False, "error": "Thiếu file upload."}), 400
+    upl = request.files.get("file")
+    if not upl:
+        return jsonify({"ok": False, "error": "Thiếu file upload."}), 400
+    original_name = str(getattr(upl, "filename", "") or "").strip()
+    ext = Path(original_name).suffix.lower()
+    if ext != ".xlsx":
+        return jsonify({"ok": False, "error": "Chỉ hỗ trợ file .xlsx."}), 400
+
+    now = datetime.now()
+    safe_name = f"collabs_import_{now.day}-{now.month}-{now.year}_{now.hour}-{now.minute:02d}-{now.second:02d}.xlsx"
+    full = BASE_DIR / safe_name
+    try:
+        upl.save(str(full))
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"Không lưu được file: {exc}"}), 500
+
+    try:
+        links = auto_apply_core.extract_apply_links_from_xlsx(full, apply_mode="all")
+    except Exception as exc:
+        try:
+            if full.exists():
+                full.unlink()
+        except OSError:
+            pass
+        return jsonify({"ok": False, "error": f"Không đọc được file Excel: {exc}"}), 400
+    if not links:
+        try:
+            if full.exists():
+                full.unlink()
+        except OSError:
+            pass
+        return jsonify({"ok": False, "error": "Không tìm thấy link hợp lệ trong file Excel."}), 400
+
+    return jsonify({"ok": True, "name": safe_name, "total_links": len(links)})
+
+
+@app.get("/api/auto-collabs/template")
+def api_auto_collabs_template():
+    """
+    Trả file Excel mẫu để user điền link đăng ký Collabs rồi import.
+    Không lưu file lên đĩa: tạo workbook trong memory.
+    """
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import PatternFill
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"Thiếu thư viện openpyxl để tạo file mẫu: {exc}"}), 500
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Auto Collabs"
+
+    header = ["Trạng thái", "Link đăng ký"]
+    ws.append(header)
+
+    # Gợi ý: nếu user muốn chỉ apply hàng ĐẠT thì điền "ĐẠT" vào cột Trạng thái.
+    ws.append(["ĐẠT", "https://collabs.shopify.com/brands/<...>/signup"])
+    ws.append(["", "https://collabs.shopify.com/brands/<...>/signup"])
+
+    # Style đơn giản cho header + highlight "ĐẠT"
+    fill_head = PatternFill("solid", fgColor="1F2937")  # slate-800
+    fill_head_font = "FFFFFF"
+    for cell in ws[1]:
+        try:
+            cell.fill = fill_head
+            cell.font = cell.font.copy(color=fill_head_font, bold=True)
+        except Exception:
+            pass
+    fill_dat = PatternFill("solid", fgColor="DCFCE7")  # green-100
+    for row in ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=1, max_col=1):
+        c = row[0]
+        if str(c.value or "").strip().lower() == "đạt":
+            try:
+                c.fill = fill_dat
+            except Exception:
+                pass
+
+    # set width
+    try:
+        ws.column_dimensions["A"].width = 14
+        ws.column_dimensions["B"].width = 70
+    except Exception:
+        pass
+
+    bio = BytesIO()
+    wb.save(bio)
+    bio.seek(0)
+    safe_name = "auto-collabs-template.xlsx"
+    return send_file(
+        bio,
+        as_attachment=True,
+        download_name=safe_name,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        max_age=0,
+        conditional=False,
+    )
 
 
 def _allowed_export_basename(name: str) -> bool:

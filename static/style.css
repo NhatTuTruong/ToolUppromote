@@ -216,6 +216,40 @@ input, select {
 .btn.danger { background: var(--danger); border-color: #f87171; }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
+/* File picker (ẩn input file gốc, hiển thị name đẹp) */
+.file-picker-input {
+  position: absolute;
+  left: -9999px;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+.file-picker-row {
+  align-items: center;
+  flex-wrap: wrap;
+}
+.file-picker-name {
+  flex: 1;
+  min-width: 220px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  border-radius: 10px;
+  border: 1px dashed var(--line);
+  background: rgba(15, 23, 40, 0.6);
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-picker-name.is-picked {
+  border-style: solid;
+  color: var(--text);
+  border-color: #38539a;
+  background: #0f1728;
+}
+
 .progress-wrap { margin-top: 16px; display: flex; align-items: center; gap: 10px; }
 .progress-bar { flex: 1; height: 12px; border-radius: 999px; background: #0b1324; border: 1px solid var(--line); overflow: hidden; }
 #progressInner,

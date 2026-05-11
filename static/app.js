@@ -267,6 +267,7 @@ const TAB_SOURCE_MAP = {
   runGoaffproTab: "goaffpro",
   runRefersionTab: "refersion",
   runCollabsTab: "collabs",
+  autoCollabsTab: "collabs",
 };
 
 function normalizeAllowedSourcesFromLicense(lic) {
@@ -301,9 +302,24 @@ function applyLicenseSourceVisibility(lic) {
     if (!source) return;
     el.style.display = allowed.has(source) ? "" : "none";
   });
+
+  // Nếu server tắt Auto Apply Collabs, ẩn riêng tab Auto Collabs (dù license cho Collabs).
+  // Lý do: tab này chỉ có ý nghĩa khi auto-apply feature bật.
+  try {
+    const enabled = isAutoApplyCollabsEnabled();
+    const autoBtn = document.querySelector('.tab-btn[data-tab="autoCollabsTab"]');
+    const autoPanel = document.getElementById("autoCollabsTab");
+    if (autoBtn) autoBtn.style.display = enabled ? "" : "none";
+    if (autoPanel) autoPanel.style.display = enabled ? "" : "none";
+  } catch (_) {
+    /* ignore */
+  }
+
   const activeBtn = document.querySelector(".tab-btn.active");
   const activeTab = activeBtn ? activeBtn.dataset.tab : null;
-  if (activeTab && TAB_SOURCE_MAP[activeTab] && !allowed.has(TAB_SOURCE_MAP[activeTab])) {
+  const activeBlockedByLicense = activeTab && TAB_SOURCE_MAP[activeTab] && !allowed.has(TAB_SOURCE_MAP[activeTab]);
+  const activeBlockedByFeature = activeTab === "autoCollabsTab" && !isAutoApplyCollabsEnabled();
+  if (activeBlockedByLicense || activeBlockedByFeature) {
     const fallback = document.querySelector('.tab-btn[data-tab="settingsTab"]');
     if (fallback) switchTab("settingsTab");
   }
@@ -482,7 +498,7 @@ async function pollStatus() {
           alert(`Auto Apply đã dừng.\nFile: ${aaFile}`);
         }
         // refresh lại list để nút Hủy -> Auto Apply
-        await loadResults();
+        await Promise.all([loadResults(), loadAutoCollabsFiles()]);
       }
     }
 
@@ -491,7 +507,7 @@ async function pollStatus() {
     if (!st.running && !aaRunningForStop && state.pollTimer) {
       clearInterval(state.pollTimer);
       state.pollTimer = null;
-      await loadResults();
+      await Promise.all([loadResults(), loadAutoCollabsFiles()]);
       await loadLicense();
     }
   } finally {
@@ -798,7 +814,7 @@ async function deleteResultFile(name) {
     alert(data.error || "Không xóa được file.");
     return;
   }
-  await loadResults();
+  await Promise.all([loadResults(), loadAutoCollabsFiles()]);
 }
 
 async function openEdgeForAutoApply() {
@@ -1155,7 +1171,7 @@ async function stopAutoApply() {
     alert(data.error || "Không hủy được Auto Apply.");
     return;
   }
-  await loadResults();
+  await Promise.all([loadResults(), loadAutoCollabsFiles()]);
 }
 
 async function fetchAutoApplyStatus() {
@@ -1469,62 +1485,145 @@ async function loadResults() {
   const data = await res.json();
   const list = $("resultFileList");
   list.innerHTML = "";
-  (data.files || []).forEach((f) => {
-    const row = document.createElement("div");
-    row.className = "file-row";
-    const actions = document.createElement("div");
-    actions.className = "file-actions";
-    const btnDl = document.createElement("button");
-    btnDl.type = "button";
-    btnDl.className = "btn sm primary";
-    btnDl.textContent = "Tải xuống";
-    btnDl.addEventListener("click", () => downloadResultFile(f.name));
-    const btnDel = document.createElement("button");
-    btnDel.type = "button";
-    btnDel.className = "btn sm danger";
-    btnDel.textContent = "Xóa";
-    btnDel.addEventListener("click", () => deleteResultFile(f.name));
-    const isRunning = !!aa?.running;
-    const sameFile = String(aa?.file || "") === String(f.name || "");
-    const isCollabsResult = /^collabs_/i.test(String(f.name || ""));
-    const btnHistory = document.createElement("button");
-    btnHistory.type = "button";
-    btnHistory.className = "btn sm";
-    btnHistory.textContent = "Lịch sử Apply";
-    btnHistory.addEventListener("click", () => openApplyHistory(f.name));
-    actions.appendChild(btnDl);
-    if (isAutoApplyCollabsEnabled() && isCollabsResult) {
-      const btnAutoApply = document.createElement("button");
-      btnAutoApply.type = "button";
-      btnAutoApply.className = "btn sm";
-      if (isRunning && sameFile) {
-        btnAutoApply.textContent = "Hủy";
-        btnAutoApply.className = "btn sm danger";
-        btnAutoApply.addEventListener("click", () => stopAutoApply());
-      } else {
-        btnAutoApply.textContent = "Auto Apply";
-        btnAutoApply.addEventListener("click", () => autoApplyFromResultFile(f.name));
-      }
-      btnAutoApply.disabled = isRunning && !sameFile;
-      actions.appendChild(btnAutoApply);
-      actions.appendChild(btnHistory);
+  (data.files || []).forEach((f) => list.appendChild(buildResultLikeFileRow(f, aa, /^collabs_/i.test(String(f.name || "")))));
+}
+
+function buildResultLikeFileRow(f, aa, enableAutoApply) {
+  const row = document.createElement("div");
+  row.className = "file-row";
+  const actions = document.createElement("div");
+  actions.className = "file-actions";
+  const btnDl = document.createElement("button");
+  btnDl.type = "button";
+  btnDl.className = "btn sm primary";
+  btnDl.textContent = "Tải xuống";
+  btnDl.addEventListener("click", () => downloadResultFile(f.name));
+  const btnDel = document.createElement("button");
+  btnDel.type = "button";
+  btnDel.className = "btn sm danger";
+  btnDel.textContent = "Xóa";
+  btnDel.addEventListener("click", () => deleteResultFile(f.name));
+  const isRunning = !!aa?.running;
+  const sameFile = String(aa?.file || "") === String(f.name || "");
+  const btnHistory = document.createElement("button");
+  btnHistory.type = "button";
+  btnHistory.className = "btn sm";
+  btnHistory.textContent = "Lịch sử Apply";
+  btnHistory.addEventListener("click", () => openApplyHistory(f.name));
+  actions.appendChild(btnDl);
+  if (isAutoApplyCollabsEnabled() && enableAutoApply) {
+    const btnAutoApply = document.createElement("button");
+    btnAutoApply.type = "button";
+    btnAutoApply.className = "btn sm";
+    if (isRunning && sameFile) {
+      btnAutoApply.textContent = "Hủy";
+      btnAutoApply.className = "btn sm danger";
+      btnAutoApply.addEventListener("click", () => stopAutoApply());
+    } else {
+      btnAutoApply.textContent = "Auto Apply";
+      btnAutoApply.addEventListener("click", () => autoApplyFromResultFile(f.name));
     }
-    actions.appendChild(btnDel);
-    const nameEl = document.createElement("div");
-    nameEl.textContent = f.name;
-    const sizeEl = document.createElement("div");
-    sizeEl.className = "file-meta";
-    sizeEl.textContent = `${(f.size || 0).toLocaleString("vi-VN")} byte`;
-    const dt = new Date((f.modified || 0) * 1000);
-    const timeEl = document.createElement("div");
-    timeEl.className = "file-meta";
-    timeEl.textContent = isNaN(dt.getTime()) ? "" : dt.toLocaleString("vi-VN");
-    row.appendChild(actions);
-    row.appendChild(nameEl);
-    row.appendChild(sizeEl);
-    row.appendChild(timeEl);
-    list.appendChild(row);
-  });
+    btnAutoApply.disabled = isRunning && !sameFile;
+    actions.appendChild(btnAutoApply);
+    actions.appendChild(btnHistory);
+  }
+  actions.appendChild(btnDel);
+  const nameEl = document.createElement("div");
+  nameEl.textContent = f.name;
+  const sizeEl = document.createElement("div");
+  sizeEl.className = "file-meta";
+  sizeEl.textContent = `${(f.size || 0).toLocaleString("vi-VN")} byte`;
+  const dt = new Date((f.modified || 0) * 1000);
+  const timeEl = document.createElement("div");
+  timeEl.className = "file-meta";
+  timeEl.textContent = isNaN(dt.getTime()) ? "" : dt.toLocaleString("vi-VN");
+  row.appendChild(actions);
+  row.appendChild(nameEl);
+  row.appendChild(sizeEl);
+  row.appendChild(timeEl);
+  return row;
+}
+
+async function importAutoCollabsFile() {
+  const input = $("autoCollabsFileInput");
+  if (!input || !input.files || !input.files[0]) {
+    alert("Chọn file .xlsx trước khi import.");
+    return;
+  }
+  const form = new FormData();
+  form.append("file", input.files[0]);
+  const btn = $("importAutoCollabsBtn");
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch("/api/auto-collabs/import", {
+      method: "POST",
+      body: form,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) {
+      alert(data.error || "Import file thất bại.");
+      return;
+    }
+    input.value = "";
+    syncAutoCollabsPickedFileUI();
+    await loadAutoCollabsFiles();
+    alert(`Import thành công: ${data.name}\nTổng link hợp lệ: ${data.total_links || 0}`);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function syncAutoCollabsPickedFileUI() {
+  const input = $("autoCollabsFileInput");
+  const nameEl = $("autoCollabsPickedName");
+  if (!nameEl) return;
+  const file = input && input.files && input.files[0] ? input.files[0] : null;
+  if (!file) {
+    nameEl.textContent = "Chưa chọn file nào";
+    nameEl.classList.remove("is-picked");
+    return;
+  }
+  nameEl.textContent = file.name || "Đã chọn 1 file";
+  nameEl.classList.add("is-picked");
+}
+
+async function loadAutoCollabsFiles() {
+  const [res, aa] = await Promise.all([
+    fetch("/api/auto-collabs/files", { cache: "no-store" }),
+    isAutoApplyCollabsEnabled() ? fetchAutoApplyStatus() : Promise.resolve({}),
+  ]);
+  const data = await res.json().catch(() => ({}));
+  const list = $("autoCollabsFileList");
+  if (!list) return;
+  list.innerHTML = "";
+  const files = Array.isArray(data.files) ? data.files : [];
+  files.forEach((f) => list.appendChild(buildResultLikeFileRow(f, aa, true)));
+}
+
+async function downloadAutoCollabsTemplate() {
+  const origin = window.location.origin || "";
+  const url = `${origin}/api/auto-collabs/template?t=${Date.now()}`;
+  const iframe = document.createElement("iframe");
+  iframe.setAttribute("sandbox", "allow-downloads allow-same-origin");
+  iframe.style.cssText =
+    "position:fixed;width:0;height:0;border:none;opacity:0;pointer-events:none;left:-9999px";
+  iframe.src = url;
+  document.body.appendChild(iframe);
+  window.setTimeout(() => {
+    try {
+      iframe.remove();
+    } catch (_) {}
+  }, 120000);
+
+  window.setTimeout(() => {
+    const a = document.createElement("a");
+    a.href = url;
+    a.setAttribute("download", "auto-collabs-template.xlsx");
+    a.rel = "noopener noreferrer";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }, 200);
 }
 
 function bindEvents() {
@@ -1558,6 +1657,22 @@ function bindEvents() {
     } catch (_) {}
     loadResults();
   });
+  const importAutoCollabsBtn = $("importAutoCollabsBtn");
+  if (importAutoCollabsBtn) importAutoCollabsBtn.addEventListener("click", importAutoCollabsFile);
+  const refreshAutoCollabsBtn = $("refreshAutoCollabsBtn");
+  if (refreshAutoCollabsBtn) refreshAutoCollabsBtn.addEventListener("click", loadAutoCollabsFiles);
+  const autoCollabsFileInput = $("autoCollabsFileInput");
+  if (autoCollabsFileInput) autoCollabsFileInput.addEventListener("change", syncAutoCollabsPickedFileUI);
+  const downloadAutoCollabsTemplateBtn = $("downloadAutoCollabsTemplateBtn");
+  if (downloadAutoCollabsTemplateBtn) {
+    downloadAutoCollabsTemplateBtn.addEventListener("click", (e) => {
+      try {
+        e.preventDefault();
+        e.stopPropagation();
+      } catch (_) {}
+      downloadAutoCollabsTemplate();
+    });
+  }
   const edgeBtn = $("openEdgeCdpBtn");
   if (edgeBtn) {
     edgeBtn.addEventListener("click", (e) => {
@@ -1597,6 +1712,7 @@ async function init() {
   await loadSettings();
   await loadLicense();
   await loadResults();
+  await loadAutoCollabsFiles();
   await pollStatus();
 }
 

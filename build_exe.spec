@@ -18,6 +18,8 @@ hiddenimports = [
     "app",
     "webapp",
     "runtime_paths",
+    "edge_cdp",
+    "auto_apply_child",
 ]
 
 for pkg in ("webview",):

@@ -1,15 +1,28 @@
 import os
-import socket
+import re
+import multiprocessing
+import queue as pyqueue
 import subprocess
 import sys
 import time
 import json
+import uuid
 from io import BytesIO
-from shutil import which
 import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
+
+from edge_cdp import (
+    EDGE_CDP_ACCOUNT_MAX,
+    cdp_url_host_port,
+    default_user_data_dir_for_port,
+    ensure_edge_cdp_running,
+    port_for_collabs_account,
+    cdp_url_for_collabs_account,
+)
+
+from auto_apply_child import run_auto_apply_in_subprocess
 
 from flask import Flask, jsonify, render_template, request, send_file
 
@@ -136,7 +149,36 @@ class AppState:
 STATE = AppState()
 
 
+class AutoApplyJob:
+    """Một slot song song: subprocess + meta (log chi tiết trong logs của job)."""
+
+    def __init__(
+        self,
+        job_id: str,
+        *,
+        cdp_url: str,
+        edge_user_data_dir: str,
+        profile_email: str,
+        links: list[str],
+        process: multiprocessing.Process,
+        stop_event: multiprocessing.synchronize.Event,
+    ):
+        self.job_id = job_id
+        self.cdp_url = cdp_url
+        self.edge_user_data_dir = edge_user_data_dir
+        self.profile_email = profile_email
+        self.links = links
+        self.process = process
+        self.stop_event = stop_event
+        self.logs: list[str] = []
+        self.status = "Running"
+        self.result: dict | None = None
+        self.error: str = ""
+
+
 class AutoApplyState:
+    """Nhiều job song song (multiprocessing); tương thích API cũ (logs/file/running)."""
+
     def __init__(self):
         self.lock = threading.Lock()
         self.running = False
@@ -147,6 +189,15 @@ class AutoApplyState:
         self.stop_event = threading.Event()
         self.worker: threading.Thread | None = None
         self.current_file: str = ""
+        # --- multi ---
+        self.batch_id: str = ""
+        self.mp_ctx: multiprocessing.context.BaseContext | None = None
+        self.shared_log_queue: multiprocessing.Queue | None = None
+        self.shared_result_queue: multiprocessing.Queue | None = None
+        self.jobs: dict[str, AutoApplyJob] = {}
+        self.parallel_link_split: str = ""
+        self.account_mode: str = ""
+        self.sequential_multi: bool = False
 
     def reset(self):
         self.running = False
@@ -157,6 +208,14 @@ class AutoApplyState:
         self.stop_event = threading.Event()
         self.worker = None
         self.current_file = ""
+        self.batch_id = ""
+        self.mp_ctx = None
+        self.shared_log_queue = None
+        self.shared_result_queue = None
+        self.jobs = {}
+        self.parallel_link_split = ""
+        self.account_mode = ""
+        self.sequential_multi = False
 
     def add_log(self, msg: str):
         with self.lock:
@@ -199,94 +258,14 @@ def _append_auto_apply_history(entry: dict) -> None:
         # Giữ tối đa 200 phiên để file không phình to.
         items = items[:200]
         _save_auto_apply_history(items)
+
+
 _root = bundle_dir()
 app = Flask(
     __name__,
     template_folder=str(_root / "templates"),
     static_folder=str(_root / "static"),
 )
-
-def _is_tcp_port_open(host: str, port: int, timeout_sec: float = 0.35) -> bool:
-    try:
-        with socket.create_connection((host, int(port)), timeout=float(timeout_sec)):
-            return True
-    except OSError:
-        return False
-
-
-def _default_edge_paths_windows() -> list[str]:
-    paths = []
-    pf86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
-    pf = os.environ.get("ProgramFiles", r"C:\Program Files")
-    paths.append(str(Path(pf86) / "Microsoft" / "Edge" / "Application" / "msedge.exe"))
-    paths.append(str(Path(pf) / "Microsoft" / "Edge" / "Application" / "msedge.exe"))
-    return paths
-
-
-def ensure_edge_cdp_running(
-    port: int = 9222,
-    user_data_dir: str = r"C:\edge-cdp",
-    edge_exe: str | None = None,
-    log: Optional[Callable[[str], None]] = None,
-    wait_sec: float = 12.0,
-) -> bool:
-    """
-    Khi bấm Auto Apply:
-    - Nếu CDP port đã mở: coi như Edge đã chạy -> OK.
-    - Nếu chưa mở: tự mở Edge với --remote-debugging-port + --user-data-dir rồi chờ port lên.
-    """
-
-    def _log(msg: str) -> None:
-        if log:
-            try:
-                log(str(msg))
-            except Exception:
-                pass
-
-    host = "127.0.0.1"
-    if _is_tcp_port_open(host, port):
-        _log(f"CDP đã sẵn sàng trên {host}:{port} (Edge đã mở).")
-        return True
-
-    if not sys.platform.startswith("win"):
-        _log("Không phải Windows: không tự mở Edge. Hãy tự mở browser CDP trước.")
-        return False
-
-    exe = (edge_exe or "").strip()
-    if not exe:
-        for p in _default_edge_paths_windows():
-            if Path(p).is_file():
-                exe = p
-                break
-    if not exe:
-        exe = which("msedge") or which("msedge.exe") or ""
-    if not exe:
-        _log("Không tìm thấy msedge.exe để mở Edge CDP.")
-        return False
-
-    args = [
-        exe,
-        f"--remote-debugging-port={int(port)}",
-        f"--user-data-dir={user_data_dir}",
-    ]
-
-    try:
-        creationflags = 0
-        if sys.platform.startswith("win"):
-            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
-        subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=creationflags)
-    except Exception as exc:
-        _log(f"Lỗi mở Edge CDP: {exc}")
-        return False
-
-    deadline = time.monotonic() + float(wait_sec)
-    while time.monotonic() < deadline:
-        if _is_tcp_port_open(host, port):
-            _log(f"Edge CDP đã lên trên {host}:{port}.")
-            return True
-        time.sleep(0.25)
-    _log(f"Timeout chờ Edge CDP trên {host}:{port}.")
-    return False
 
 
 def _refresh_license_env_from_file() -> None:
@@ -1117,25 +1096,10 @@ def api_collabs_outside_reset():
         return jsonify({"ok": False, "error": "; ".join(errors), "removed": removed}), 500
     return jsonify({"ok": True, "removed": removed})
 
-@app.post("/api/edge-cdp/start")
-def api_edge_cdp_start():
-    """
-    Mở Edge ở chế độ CDP để sẵn sàng Auto Apply.
-    - Nếu port đã mở: trả ok (Edge đã chạy).
-    - Nếu chưa: tự mở Edge với user-data-dir cố định rồi chờ lên.
-    """
-    logs: list[str] = []
-    ok = ensure_edge_cdp_running(
-        port=9222,
-        user_data_dir=r"C:\edge-cdp",
-        edge_exe=r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-        log=lambda m: logs.append(str(m)),
-        wait_sec=12.0,
-    )
-    if not ok:
-        return _no_cache_json({"ok": False, "error": "Không mở được Edge CDP.", "logs": logs}), 500
-    cdp_url = "http://127.0.0.1:9222"
-    # Mở sẵn tab Collabs để user login/ready cho Auto Apply.
+
+def _open_collabs_tab_over_cdp(cdp_url: str, logs: list[str], label: str = "") -> None:
+    """Kết nối CDP tạm thời, mở tab Collabs, đóng kết nối (không tắt Edge của user)."""
+    prefix = f"{label} " if label else ""
     try:
         from playwright.sync_api import sync_playwright
 
@@ -1146,9 +1110,9 @@ def api_edge_cdp_start():
                 page = context.new_page()
                 try:
                     page.goto("https://collabs.shopify.com/", wait_until="domcontentloaded", timeout=45000)
-                    logs.append("Đã mở tab: https://collabs.shopify.com/")
+                    logs.append(f"{prefix}Đã mở tab Collabs: {cdp_url}")
                 except Exception as exc:
-                    logs.append(f"[Cảnh báo] Không mở được tab Collabs: {exc}")
+                    logs.append(f"{prefix}[Cảnh báo] Không mở được tab Collabs: {exc}")
                 try:
                     page.close()
                 except Exception:
@@ -1159,8 +1123,73 @@ def api_edge_cdp_start():
                 except Exception:
                     pass
     except Exception as exc:
-        logs.append(f"[Cảnh báo] Không thể kết nối CDP để mở tab Collabs: {exc}")
-    return _no_cache_json({"ok": True, "cdp_url": cdp_url, "logs": logs})
+        logs.append(f"{prefix}[Cảnh báo] Không kết nối CDP để mở tab: {exc}")
+
+
+@app.post("/api/edge-cdp/start")
+def api_edge_cdp_start():
+    """
+    Mở Edge CDP cho một hoặc nhiều tài khoản (tối đa 10).
+    Body JSON (tuỳ chọn):
+      account_indices: [1,2,3] — Tài khoản 1 → cổng 9222, TK2 → 9223, … (mặc định [1]).
+    Mỗi tài khoản = profile Edge riêng, khớp Auto Apply đa tài khoản.
+    """
+    payload = request.get_json(force=True, silent=True) or {}
+    raw = payload.get("account_indices")
+    indices: list[int] = []
+    if isinstance(raw, list) and len(raw) > 0:
+        for x in raw:
+            try:
+                i = int(x)
+            except (TypeError, ValueError):
+                continue
+            if 1 <= i <= 10:
+                indices.append(i)
+        indices = sorted(set(indices))
+    if not indices:
+        indices = [1]
+
+    logs: list[str] = []
+    edge_exe = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+    opened: list[dict] = []
+    host = "127.0.0.1"
+    all_ok = True
+    for acc in indices:
+        try:
+            port = port_for_collabs_account(acc)
+        except ValueError as exc:
+            logs.append(str(exc))
+            all_ok = False
+            opened.append({"account": acc, "port": None, "cdp_url": "", "ok": False, "error": str(exc)})
+            continue
+        udir = default_user_data_dir_for_port(port)
+        cdp_url = cdp_url_for_collabs_account(acc, host=host)
+        logs.append(f"Tài khoản {acc}: CDP {cdp_url} — profile {udir}")
+        ok = ensure_edge_cdp_running(
+            port=port,
+            user_data_dir=udir,
+            edge_exe=edge_exe,
+            log=lambda m, a=acc: logs.append(f"[TK{a}] {m}"),
+            wait_sec=12.0,
+            host=host,
+        )
+        opened.append({"account": acc, "port": port, "cdp_url": cdp_url, "ok": ok})
+        if not ok:
+            all_ok = False
+            continue
+        _open_collabs_tab_over_cdp(cdp_url, logs, label=f"[TK{acc}]")
+
+    if not all_ok:
+        return _no_cache_json(
+            {
+                "ok": False,
+                "error": "Một hoặc nhiều Edge không mở được. Xem logs.",
+                "logs": logs,
+                "opened": opened,
+            }
+        ), 500
+    primary = cdp_url_for_collabs_account(indices[0], host=host)
+    return _no_cache_json({"ok": True, "cdp_url": primary, "opened": opened, "logs": logs})
 
 
 def _no_cache_json(data):
@@ -1504,11 +1533,14 @@ def api_auto_apply():
     # Giữ endpoint cũ để tương thích: chạy dạng blocking (không có nút Hủy).
     logs: list[str] = []
     try:
+        host, port = cdp_url_host_port(cdp_url)
+        udir = default_user_data_dir_for_port(port)
         ensure_edge_cdp_running(
-            port=9222,
-            user_data_dir=r"C:\edge-cdp",
+            port=port,
+            user_data_dir=udir,
             edge_exe=r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
             log=lambda m: logs.append(str(m)),
+            host=host,
         )
         result = auto_apply_core.run_auto_apply(
             links=links,
@@ -1523,6 +1555,610 @@ def api_auto_apply():
     return jsonify({"ok": True, "result": result, "logs": logs})
 
 
+_EDGE_EXE_AUTO = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+
+
+def _normalize_parallel_slots(payload: dict) -> list[dict]:
+    default_cdp = str(payload.get("cdp_url") or "").strip() or "http://127.0.0.1:9222"
+    raw = payload.get("parallel_slots")
+    if isinstance(raw, list) and len(raw) > 0:
+        out: list[dict] = []
+        for it in raw:
+            if not isinstance(it, dict):
+                continue
+            out.append(
+                {
+                    "cdp_url": str(it.get("cdp_url") or "").strip() or default_cdp,
+                    "edge_user_data_dir": str(it.get("edge_user_data_dir") or "").strip(),
+                    "email_override": str(it.get("email_override") or "").strip(),
+                }
+            )
+        if not out:
+            return [{"cdp_url": default_cdp, "edge_user_data_dir": "", "email_override": ""}]
+        return out
+    top_ud = str(payload.get("edge_user_data_dir") or "").strip()
+    return [{"cdp_url": default_cdp, "edge_user_data_dir": top_ud, "email_override": ""}]
+
+
+def _normalize_account_mode(raw) -> str:
+    s = str(raw or "").strip().lower()
+    if s in ("multi", "da_tai_khoan", "many"):
+        return "multi"
+    return "single"
+
+
+def _normalize_collabs_account_indices_list(raw_list) -> tuple[list[int], str]:
+    """Giữ thứ tự, bỏ trùng; mỗi phần tử 1..EDGE_CDP_ACCOUNT_MAX."""
+    if not isinstance(raw_list, list):
+        return [], "collabs_account_indices phải là mảng số."
+    out: list[int] = []
+    seen: set[int] = set()
+    for x in raw_list:
+        try:
+            i = int(x)
+        except (TypeError, ValueError):
+            return [], "Mỗi phần tử collabs_account_indices phải là số nguyên."
+        if i < 1 or i > EDGE_CDP_ACCOUNT_MAX:
+            return [], f"Tài khoản phải từ 1 đến {EDGE_CDP_ACCOUNT_MAX}."
+        if i not in seen:
+            seen.add(i)
+            out.append(i)
+    return out, ""
+
+
+def _parse_multi_collabs_account_spec(spec: str) -> list[int]:
+    """
+    - Có dấu phẩy: danh sách, vd 1,4,7 (thứ tự giữ nguyên, bỏ trùng).
+    - Một dải a-b: vd 1-5 (hai đầu 1..MAX).
+    - Chỉ số nguyên n (không phẩy, không gạch): legacy — tài khoản 1..n, 2 <= n <= MAX.
+    """
+    s = str(spec or "").strip()
+    if not s:
+        return []
+    if "," in s:
+        parts = [p.strip() for p in s.split(",") if str(p).strip()]
+        out: list[int] = []
+        seen: set[int] = set()
+        for p in parts:
+            try:
+                i = int(p, 10)
+            except ValueError:
+                return []
+            if i < 1 or i > EDGE_CDP_ACCOUNT_MAX:
+                return []
+            if i not in seen:
+                seen.add(i)
+                out.append(i)
+        return out
+    m = re.match(r"^(\d+)\s*-\s*(\d+)$", s)
+    if m:
+        a, b = int(m.group(1)), int(m.group(2))
+        if a > b:
+            a, b = b, a
+        if a < 1 or b > EDGE_CDP_ACCOUNT_MAX:
+            return []
+        return list(range(a, b + 1))
+    if s.isdigit():
+        n = int(s, 10)
+        if n < 2 or n > EDGE_CDP_ACCOUNT_MAX:
+            return []
+        return list(range(1, n + 1))
+    return []
+
+
+def _collabs_account_indices_from_payload(payload: dict, legacy_count: int) -> tuple[list[int], str]:
+    """Chọn danh sách tài khoản Collabs cho chế độ multi (lần lượt)."""
+    raw_list = payload.get("collabs_account_indices")
+    if isinstance(raw_list, list) and len(raw_list) > 0:
+        out, err = _normalize_collabs_account_indices_list(raw_list)
+        if err:
+            return [], err
+        if len(out) < 2:
+            return [], "Đa tài khoản cần ít nhất 2 tài khoản trong collabs_account_indices."
+        return out, ""
+    spec = str(
+        payload.get("multi_account_spec") or payload.get("multi_collabs_account_spec") or ""
+    ).strip()
+    if spec:
+        out = _parse_multi_collabs_account_spec(spec)
+        if not out:
+            return (
+                [],
+                "Tài khoản không hợp lệ. Dùng dải (vd: 1-5), danh sách (vd: 1,4,7), hoặc số 2-10 (tài khoản 1→n).",
+            )
+        if len(out) < 2:
+            return [], "Đa tài khoản cần ít nhất 2 tài khoản (vd: 1-2 hoặc 1,2)."
+        return out, ""
+    n = int(legacy_count)
+    n = max(2, min(EDGE_CDP_ACCOUNT_MAX, n))
+    return list(range(1, n + 1)), ""
+
+
+def _normalize_collabs_account_profile_map(payload: dict, indices: list[int]) -> tuple[dict[int, dict], str]:
+    raw = payload.get("collabs_account_profile_map")
+    if raw is None:
+        # Backward-compatible: map email cũ { "1": "a@x.com" }
+        raw = payload.get("collabs_account_email_map")
+    if raw is None:
+        return {}, ""
+    if not isinstance(raw, dict):
+        return {}, "collabs_account_profile_map phải là object dạng {\"1\":{\"email\":\"...\"}}."
+    allowed = set(int(x) for x in (indices or []))
+    out: dict[int, dict] = {}
+
+    def _norm(v) -> str:
+        t = str(v or "").strip()
+        if not t:
+            return ""
+        if t.lower() == "no":
+            return ""
+        return t
+
+    for k, v in raw.items():
+        try:
+            acc = int(k)
+        except (TypeError, ValueError):
+            return {}, f"Key tài khoản không hợp lệ trong collabs_account_profile_map: {k}"
+        if acc < 1 or acc > EDGE_CDP_ACCOUNT_MAX:
+            return {}, f"Tài khoản trong collabs_account_profile_map phải từ 1 đến {EDGE_CDP_ACCOUNT_MAX}."
+        if allowed and acc not in allowed:
+            continue
+        if isinstance(v, dict):
+            em = _norm(v.get("email"))
+            full_name = _norm(v.get("full_name"))
+            phone = _norm(v.get("phone"))
+            website = _norm(v.get("website"))
+            instagram = _norm(v.get("instagram"))
+        else:
+            # Legacy string value = email
+            em = _norm(v)
+            full_name = ""
+            phone = ""
+            website = ""
+            instagram = ""
+        if em and "@" not in em:
+            return {}, f"Email không hợp lệ cho TK{acc}: {em}"
+        prof = {
+            "email": em,
+            "full_name": full_name,
+            "phone": phone,
+            "website": website,
+            "instagram": instagram,
+        }
+        if any(str(x).strip() for x in prof.values()):
+            out[acc] = prof
+    return out, ""
+
+
+def _slots_from_collabs_account_indices(indices: list[int], profile_map: dict[int, dict] | None = None) -> list[dict]:
+    host = "127.0.0.1"
+    pmap = profile_map or {}
+    return [
+        {
+            "cdp_url": cdp_url_for_collabs_account(acc, host=host),
+            "edge_user_data_dir": "",
+            "email_override": str((pmap.get(acc) or {}).get("email") or ""),
+            "profile_override": dict(pmap.get(acc) or {}),
+        }
+        for acc in indices
+    ]
+
+
+def _profile_for_slot(base: dict, email_override: str, profile_override: Optional[dict] = None) -> dict:
+    p = dict(base) if isinstance(base, dict) else {}
+    em = str(email_override or "").strip()
+    if em:
+        p["email"] = em
+    ov = dict(profile_override) if isinstance(profile_override, dict) else {}
+    for k in ("email", "full_name", "phone", "website", "instagram"):
+        v = str(ov.get(k) or "").strip()
+        if v and v.lower() != "no":
+            p[k] = v
+    return p
+
+
+def _append_auto_apply_run_to_history(file_name: str, started_local: datetime, profile: dict, result: dict) -> None:
+    submitted_items = result.get("submitted_items") if isinstance(result, dict) else []
+    if not isinstance(submitted_items, list):
+        submitted_items = []
+    attempted_items = result.get("attempted_items") if isinstance(result, dict) else []
+    if not isinstance(attempted_items, list):
+        attempted_items = []
+    entry: dict = {
+        "file": str(file_name or ""),
+        "started_at": started_local.isoformat(timespec="seconds"),
+        "started_at_display": started_local.strftime("%d/%m/%Y %H:%M:%S"),
+        "email": str(profile.get("email") or "").strip(),
+        "submitted_count": int(result.get("submitted") or 0) if isinstance(result, dict) else 0,
+        "submitted_items": [
+            {
+                "brand": str((it or {}).get("brand") or "").strip(),
+                "email": str((it or {}).get("email") or "").strip() or str(profile.get("email") or "").strip(),
+                "link": str((it or {}).get("link") or "").strip(),
+            }
+            for it in submitted_items
+            if isinstance(it, dict)
+        ],
+        "attempted_items": [
+            {
+                "brand": str((it or {}).get("brand") or "").strip(),
+                "domain": str((it or {}).get("domain") or "").strip(),
+                "email": str((it or {}).get("email") or "").strip() or str(profile.get("email") or "").strip(),
+                "link": str((it or {}).get("link") or "").strip(),
+                "submitted": bool((it or {}).get("submitted")),
+                "note": str((it or {}).get("note") or "").strip(),
+            }
+            for it in attempted_items
+            if isinstance(it, dict)
+        ],
+    }
+    if isinstance(result, dict) and result.get("parallel"):
+        entry["parallel"] = True
+        entry["batch_id"] = str(result.get("batch_id") or "")
+        pj = result.get("parallel_jobs")
+        if isinstance(pj, dict):
+            entry["parallel_jobs"] = pj
+    if isinstance(result, dict) and result.get("sequential_multi"):
+        entry["sequential_multi"] = True
+        entry["accounts"] = int(result.get("accounts") or 0)
+    _append_auto_apply_history(entry)
+
+
+def _merge_parallel_auto_apply_results(
+    *,
+    links: list[str],
+    results: dict[str, dict],
+    errors: dict[str, str],
+    batch_id: str,
+    job_order: list[str],
+    parallel_link_split: str = "round_robin",
+) -> dict:
+    filled = 0
+    submitted = 0
+    submitted_items: list[dict] = []
+    attempted_items: list[dict] = []
+    parallel_jobs: dict[str, dict] = {}
+    for jid in job_order:
+        r = results.get(jid)
+        err = errors.get(jid, "")
+        if isinstance(r, dict):
+            filled += int(r.get("filled") or 0)
+            submitted += int(r.get("submitted") or 0)
+            for it in r.get("submitted_items") or []:
+                if isinstance(it, dict):
+                    submitted_items.append(dict(it))
+            for it in r.get("attempted_items") or []:
+                if isinstance(it, dict):
+                    attempted_items.append(dict(it))
+            parallel_jobs[jid] = {
+                "ok": True,
+                "error": "",
+                "filled": int(r.get("filled") or 0),
+                "submitted": int(r.get("submitted") or 0),
+            }
+        else:
+            parallel_jobs[jid] = {"ok": False, "error": err or "Lỗi", "filled": 0, "submitted": 0}
+    return {
+        "total": len(links),
+        "filled": filled,
+        "submitted": submitted,
+        "submitted_items": submitted_items,
+        "attempted_items": attempted_items,
+        "parallel": True,
+        "batch_id": batch_id,
+        "parallel_jobs": parallel_jobs,
+        "parallel_link_split": str(parallel_link_split or "round_robin"),
+    }
+
+
+def _normalize_parallel_link_split(raw) -> str:
+    s = str(raw or "").strip().lower()
+    if s in ("sequential", "chunks", "contiguous", "theo_thu_tu", "order", "lan_luot"):
+        return "sequential"
+    return "round_robin"
+
+
+def _split_links_for_parallel_jobs(links: list[str], n_slots: int, mode: str) -> list[list[str]]:
+    """
+    Chia links thành đúng n_slots phần.
+    - round_robin: slot i nhận links[i::n] (xen kẽ).
+    - sequential: slot i nhận một khối liên tiếp theo thứ tự file (slot 0 = đầu list, …).
+    """
+    if n_slots <= 0:
+        return []
+    mode_n = _normalize_parallel_link_split(mode)
+    L = len(links)
+    if mode_n == "sequential":
+        out: list[list[str]] = []
+        for i in range(n_slots):
+            a = (i * L) // n_slots
+            b = ((i + 1) * L) // n_slots
+            out.append(links[a:b])
+        return out
+    return [links[i::n_slots] for i in range(n_slots)]
+
+
+def _parallel_auto_apply_supervisor(
+    *,
+    parallel_slots: list[dict],
+    links: list[str],
+    base_profile: dict,
+    auto_submit: bool,
+    login_first: bool,
+    file_name: str,
+    started_local: datetime,
+    parallel_link_split: str = "round_robin",
+) -> None:
+    st = AUTO_APPLY_STATE
+    n = len(parallel_slots)
+    split_mode = _normalize_parallel_link_split(parallel_link_split)
+    batch_id = (st.batch_id or "").strip() or uuid.uuid4().hex[:10]
+    ctx = multiprocessing.get_context("spawn")
+    log_q: multiprocessing.Queue = ctx.Queue()
+    res_q: multiprocessing.Queue = ctx.Queue()
+    children: list[tuple[str, multiprocessing.Process, AutoApplyJob]] = []
+    job_order: list[str] = []
+    link_slices = _split_links_for_parallel_jobs(links, n, split_mode)
+    try:
+        split_label = "theo thứ tự (khối liên tiếp)" if split_mode == "sequential" else "round-robin (xen kẽ)"
+        st.add_log(f"Khởi động {n} tiến trình Auto Apply song song (batch {batch_id}), chia link: {split_label}.")
+        for i, slot in enumerate(parallel_slots):
+            jid = f"j{i + 1}-{uuid.uuid4().hex[:6]}"
+            sub_links = link_slices[i] if i < len(link_slices) else []
+            if not sub_links:
+                st.add_log(f"[slot {i + 1}] Không có link sau khi chia — bỏ slot.")
+                continue
+            prof = _profile_for_slot(
+                base_profile,
+                str(slot.get("email_override") or ""),
+                profile_override=slot.get("profile_override"),
+            )
+            cdp = str(slot.get("cdp_url") or "").strip()
+            _, port = cdp_url_host_port(cdp)
+            udir = str(slot.get("edge_user_data_dir") or "").strip() or default_user_data_dir_for_port(port)
+            stop_ev = ctx.Event()
+            proc = ctx.Process(
+                target=run_auto_apply_in_subprocess,
+                kwargs={
+                    "job_id": jid,
+                    "links": sub_links,
+                    "profile": prof,
+                    "auto_submit": auto_submit,
+                    "cdp_url": cdp,
+                    "login_first": login_first,
+                    "file_name": file_name,
+                    "edge_user_data_dir": udir,
+                    "log_queue": log_q,
+                    "stop_event": stop_ev,
+                    "result_queue": res_q,
+                },
+            )
+            job = AutoApplyJob(
+                jid,
+                cdp_url=cdp,
+                edge_user_data_dir=udir,
+                profile_email=str(prof.get("email") or ""),
+                links=sub_links,
+                process=proc,
+                stop_event=stop_ev,
+            )
+            children.append((jid, proc, job))
+            job_order.append(jid)
+        with st.lock:
+            st.mp_ctx = ctx
+            st.shared_log_queue = log_q
+            st.shared_result_queue = res_q
+            st.jobs = {jid: job for jid, _, job in children}
+        for jid, proc, _job in children:
+            proc.start()
+        results: dict[str, dict] = {}
+        errors: dict[str, str] = {}
+        expected = {jid for jid, _, _ in children}
+        if not expected:
+            with st.lock:
+                st.status = "Error"
+                st.error = "Không khởi chạy được job nào (kiểm tra parallel_slots / link)."
+            return
+        while True:
+            if st.stop_event.is_set():
+                for _jid, _proc, job in children:
+                    job.stop_event.set()
+            while True:
+                try:
+                    jid, msg = log_q.get_nowait()
+                except pyqueue.Empty:
+                    break
+                with st.lock:
+                    j = st.jobs.get(jid)
+                    if j:
+                        j.logs.append(str(msg))
+                        if len(j.logs) > 500:
+                            j.logs = j.logs[-500:]
+                st.add_log(f"[{jid}] {msg}")
+            while True:
+                try:
+                    item = res_q.get_nowait()
+                except pyqueue.Empty:
+                    break
+                if not isinstance(item, dict):
+                    continue
+                jid2 = str(item.get("job_id") or "").strip()
+                if item.get("ok"):
+                    r = item.get("result")
+                    results[jid2] = r if isinstance(r, dict) else {}
+                    with st.lock:
+                        if jid2 in st.jobs:
+                            st.jobs[jid2].result = results[jid2]
+                            st.jobs[jid2].status = "Done"
+                else:
+                    err = str(item.get("error") or "").strip() or "Lỗi không xác định."
+                    errors[jid2] = err
+                    with st.lock:
+                        if jid2 in st.jobs:
+                            st.jobs[jid2].error = err
+                            st.jobs[jid2].status = "Error"
+            all_dead = all(not p.is_alive() for _jid, p, _ in children)
+            for jid, p, job in children:
+                if not p.is_alive() and job.status == "Running" and jid not in results and jid not in errors:
+                    errors[jid] = "Tiến trình kết thúc không trả kết quả."
+                    job.status = "Error"
+                    job.error = errors[jid]
+                    st.add_log(f"[{jid}] {errors[jid]}")
+            got = set(results) | set(errors)
+            if all_dead and expected.issubset(got):
+                break
+            time.sleep(0.12)
+        merged = _merge_parallel_auto_apply_results(
+            links=links,
+            results=results,
+            errors=errors,
+            batch_id=batch_id,
+            job_order=job_order,
+            parallel_link_split=split_mode,
+        )
+        with st.lock:
+            st.result = merged
+            if errors and not results:
+                st.status = "Error"
+                st.error = "; ".join(f"{k}: {v}" for k, v in sorted(errors.items()))
+            else:
+                st.status = "Done"
+                if errors and results:
+                    st.error = "Một số slot lỗi: " + "; ".join(f"{k}: {v}" for k, v in sorted(errors.items()))
+        _append_auto_apply_run_to_history(file_name, started_local, base_profile, merged)
+    except Exception as exc:
+        with st.lock:
+            st.error = str(exc)
+            st.status = "Error"
+        st.add_log(f"LỖI (parallel): {exc}")
+    finally:
+        for _jid, p, _job in children:
+            if p.is_alive():
+                p.join(timeout=4)
+            if p.is_alive():
+                try:
+                    p.terminate()
+                except Exception:
+                    pass
+        with st.lock:
+            st.running = False
+
+
+def _sequential_multi_apply_worker(
+    *,
+    slots: list[dict],
+    links: list[str],
+    base_profile: dict,
+    auto_submit: bool,
+    login_first: bool,
+    file_name: str,
+    started_local: datetime,
+) -> None:
+    """
+    Đa tài khoản lần lượt: mỗi slot chạy lại toàn bộ danh sách link (cùng file brand),
+    sau khi chờ login Collabs (login_first) trên Edge của slot đó.
+    """
+    st = AUTO_APPLY_STATE
+    n = len(slots)
+    total_filled = 0
+    total_submitted = 0
+    submitted_items: list[dict] = []
+    attempted_items: list[dict] = []
+    per_slot: list[dict] = []
+    L = len(links)
+    try:
+        st.add_log(
+            f"Đa tài khoản (lần lượt): {n} phiên Edge — mỗi tài khoản apply lại cả {L} link trong file."
+        )
+        for i, slot in enumerate(slots):
+            if st.stop_event.is_set():
+                st.add_log("Đã nhận lệnh hủy — dừng trước khi sang tài khoản kế.")
+                break
+            if L == 0:
+                break
+            sub_links = list(links)
+            cdp = str(slot.get("cdp_url") or "").strip()
+            _, port = cdp_url_host_port(cdp)
+            udir = str(slot.get("edge_user_data_dir") or "").strip() or default_user_data_dir_for_port(port)
+            prof = _profile_for_slot(
+                base_profile,
+                str(slot.get("email_override") or ""),
+                profile_override=slot.get("profile_override"),
+            )
+            st.add_log(
+                f"=== Tài khoản {i + 1}/{n} — CDP {cdp} — {L} link (lặp lại cả danh sách) — "
+                "nếu chưa login Collabs, hãy đăng nhập trong cửa sổ Edge vừa mở ==="
+            )
+            st.add_log("Đang kiểm tra/mở Edge CDP…")
+            host, p = cdp_url_host_port(cdp)
+            ensure_edge_cdp_running(
+                port=p,
+                user_data_dir=udir,
+                edge_exe=_EDGE_EXE_AUTO,
+                log=st.add_log,
+                host=host,
+            )
+            st.add_log(f"Bắt đầu Auto Apply cho tài khoản {i + 1}/{n}…")
+            result = auto_apply_core.run_auto_apply(
+                links=sub_links,
+                profile=prof,
+                auto_submit=auto_submit,
+                cdp_url=cdp,
+                login_first=login_first,
+                should_stop=lambda: st.stop_event.is_set(),
+                log=st.add_log,
+            )
+            if not isinstance(result, dict):
+                result = {}
+            fi = int(result.get("filled") or 0)
+            su = int(result.get("submitted") or 0)
+            total_filled += fi
+            total_submitted += su
+            for it in result.get("submitted_items") or []:
+                if isinstance(it, dict):
+                    submitted_items.append(dict(it))
+            for it in result.get("attempted_items") or []:
+                if isinstance(it, dict):
+                    attempted_items.append(dict(it))
+            per_slot.append(
+                {
+                    "index": i + 1,
+                    "cdp_url": cdp,
+                    "edge_user_data_dir": udir,
+                    "email": str(prof.get("email") or ""),
+                    "links": L,
+                    "filled": fi,
+                    "submitted": su,
+                    "skipped": False,
+                }
+            )
+            st.add_log(f"--- Xong tài khoản {i + 1}/{n}: đã điền {fi}, đã submit {su} ---")
+        merged = {
+            "total": L,
+            "total_brand_runs": L * n,
+            "filled": total_filled,
+            "submitted": total_submitted,
+            "submitted_items": submitted_items,
+            "attempted_items": attempted_items,
+            "sequential_multi": True,
+            "accounts": n,
+            "per_slot": per_slot,
+            "batch_id": str(st.batch_id or ""),
+        }
+        with st.lock:
+            st.result = merged
+            st.status = "Done"
+        _append_auto_apply_run_to_history(file_name, started_local, base_profile, merged)
+    except Exception as exc:
+        with st.lock:
+            st.error = str(exc)
+            st.status = "Error"
+        st.add_log(f"LỖI (đa tài khoản lần lượt): {exc}")
+    finally:
+        with st.lock:
+            st.running = False
+
+
 def _auto_apply_worker(
     *,
     links: list[str],
@@ -1531,18 +2167,22 @@ def _auto_apply_worker(
     cdp_url: str,
     login_first: bool,
     file_name: str,
+    edge_user_data_dir: str = "",
 ):
     st = AUTO_APPLY_STATE
     started_local = datetime.now()
     try:
-        st.add_log("Đang kiểm tra/mở Edge CDP...")
+        st.add_log("Đang kiểm tra/mở Edge CDP…")
+        host, port = cdp_url_host_port(cdp_url)
+        udir = str(edge_user_data_dir or "").strip() or default_user_data_dir_for_port(port)
         ensure_edge_cdp_running(
-            port=9222,
-            user_data_dir=r"C:\edge-cdp",
-            edge_exe=r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            port=port,
+            user_data_dir=udir,
+            edge_exe=_EDGE_EXE_AUTO,
             log=st.add_log,
+            host=host,
         )
-        st.add_log("Bắt đầu Auto Apply...")
+        st.add_log("Bắt đầu Auto Apply…")
         result = auto_apply_core.run_auto_apply(
             links=links,
             profile=profile,
@@ -1555,42 +2195,7 @@ def _auto_apply_worker(
         with st.lock:
             st.result = result
             st.status = "Done"
-        submitted_items = result.get("submitted_items") if isinstance(result, dict) else []
-        if not isinstance(submitted_items, list):
-            submitted_items = []
-        attempted_items = result.get("attempted_items") if isinstance(result, dict) else []
-        if not isinstance(attempted_items, list):
-            attempted_items = []
-        _append_auto_apply_history(
-            {
-                "file": str(file_name or ""),
-                "started_at": started_local.isoformat(timespec="seconds"),
-                "started_at_display": started_local.strftime("%d/%m/%Y %H:%M:%S"),
-                "email": str(profile.get("email") or "").strip(),
-                "submitted_count": int(result.get("submitted") or 0) if isinstance(result, dict) else 0,
-                "submitted_items": [
-                    {
-                        "brand": str((it or {}).get("brand") or "").strip(),
-                        "email": str((it or {}).get("email") or "").strip() or str(profile.get("email") or "").strip(),
-                        "link": str((it or {}).get("link") or "").strip(),
-                    }
-                    for it in submitted_items
-                    if isinstance(it, dict)
-                ],
-                "attempted_items": [
-                    {
-                        "brand": str((it or {}).get("brand") or "").strip(),
-                        "domain": str((it or {}).get("domain") or "").strip(),
-                        "email": str((it or {}).get("email") or "").strip() or str(profile.get("email") or "").strip(),
-                        "link": str((it or {}).get("link") or "").strip(),
-                        "submitted": bool((it or {}).get("submitted")),
-                        "note": str((it or {}).get("note") or "").strip(),
-                    }
-                    for it in attempted_items
-                    if isinstance(it, dict)
-                ],
-            }
-        )
+        _append_auto_apply_run_to_history(file_name, started_local, profile, result)
     except Exception as exc:
         with st.lock:
             st.error = str(exc)
@@ -1599,6 +2204,21 @@ def _auto_apply_worker(
     finally:
         with st.lock:
             st.running = False
+
+
+def _auto_apply_jobs_snapshot_unlocked(st: AutoApplyState) -> dict[str, dict]:
+    snap: dict[str, dict] = {}
+    for jid, j in st.jobs.items():
+        snap[jid] = {
+            "cdp_url": j.cdp_url,
+            "edge_user_data_dir": j.edge_user_data_dir,
+            "email": j.profile_email,
+            "links": len(j.links),
+            "status": j.status,
+            "error": j.error,
+            "logs_tail": list(j.logs[-80:]),
+        }
+    return snap
 
 
 @app.post("/api/auto-apply/start")
@@ -1641,6 +2261,59 @@ def api_auto_apply_start():
     if not links:
         return jsonify({"ok": False, "error": "Không tìm thấy cột/link apply trong file."}), 400
 
+    DEFAULT_CDP = "http://127.0.0.1:9222"
+    payload_cdp = str(payload.get("cdp_url") or "").strip() or DEFAULT_CDP
+
+    parallel_link_split = _normalize_parallel_link_split(payload.get("parallel_link_split"))
+    explicit_account_mode = "account_mode" in payload
+    account_mode = _normalize_account_mode(payload.get("account_mode"))
+    multi_parallel = bool(payload.get("multi_parallel"))
+    try:
+        multi_browser_count = int(payload.get("multi_browser_count"))
+    except (TypeError, ValueError):
+        multi_browser_count = 2
+    multi_browser_count = max(2, min(EDGE_CDP_ACCOUNT_MAX, multi_browser_count))
+
+    raw_slots = payload.get("parallel_slots")
+    has_custom_slots = isinstance(raw_slots, list) and len(raw_slots) >= 2
+
+    slots: list[dict] = []
+    use_parallel_supervisor = False
+    use_sequential_multi = False
+
+    if explicit_account_mode and account_mode == "multi":
+        indices, spec_err = _collabs_account_indices_from_payload(payload, multi_browser_count)
+        if spec_err:
+            return jsonify({"ok": False, "error": spec_err}), 400
+        profile_map, profile_map_err = _normalize_collabs_account_profile_map(payload, indices)
+        if profile_map_err:
+            return jsonify({"ok": False, "error": profile_map_err}), 400
+        slots = _slots_from_collabs_account_indices(indices, profile_map=profile_map)
+        use_sequential_multi = True
+    elif explicit_account_mode and account_mode == "single":
+        slots = [{"cdp_url": DEFAULT_CDP, "edge_user_data_dir": "", "email_override": ""}]
+    elif not explicit_account_mode and has_custom_slots and multi_parallel:
+        account_mode = "multi"
+        slots = _normalize_parallel_slots(payload)
+        use_parallel_supervisor = True
+    elif not explicit_account_mode and has_custom_slots:
+        account_mode = "multi"
+        slots = _normalize_parallel_slots(payload)
+        use_sequential_multi = True
+    else:
+        slots = [
+            {
+                "cdp_url": payload_cdp,
+                "edge_user_data_dir": str(payload.get("edge_user_data_dir") or "").strip(),
+                "email_override": "",
+            }
+        ]
+
+    if use_parallel_supervisor and len(slots) < 2:
+        return jsonify({"ok": False, "error": "Chế độ song song cần ít nhất 2 slot CDP trong parallel_slots."}), 400
+    if use_sequential_multi and len(slots) < 2:
+        return jsonify({"ok": False, "error": "Đa tài khoản cần ít nhất 2 phiên Edge."}), 400
+
     st = AUTO_APPLY_STATE
     with st.lock:
         if st.running:
@@ -1649,20 +2322,102 @@ def api_auto_apply_start():
         st.running = True
         st.status = "Running"
         st.current_file = safe_name
+        st.batch_id = uuid.uuid4().hex[:12]
+        st.account_mode = account_mode
+        st.sequential_multi = use_sequential_multi
+
+        if use_parallel_supervisor:
+            st.parallel_link_split = parallel_link_split
+            st.worker = threading.Thread(
+                target=_parallel_auto_apply_supervisor,
+                kwargs={
+                    "parallel_slots": slots,
+                    "links": links,
+                    "base_profile": profile,
+                    "auto_submit": auto_submit,
+                    "login_first": login_first,
+                    "file_name": safe_name,
+                    "started_local": datetime.now(),
+                    "parallel_link_split": parallel_link_split,
+                },
+                daemon=True,
+            )
+            st.worker.start()
+            return jsonify(
+                {
+                    "ok": True,
+                    "total_links": len(links),
+                    "parallel": True,
+                    "parallel_jobs": len(slots),
+                    "batch_id": st.batch_id,
+                    "parallel_link_split": parallel_link_split,
+                    "account_mode": "multi",
+                    "multi_parallel": True,
+                }
+            )
+
+        if use_sequential_multi:
+            st.parallel_link_split = "sequential"
+            st.worker = threading.Thread(
+                target=_sequential_multi_apply_worker,
+                kwargs={
+                    "slots": slots,
+                    "links": links,
+                    "base_profile": profile,
+                    "auto_submit": auto_submit,
+                    "login_first": login_first,
+                    "file_name": safe_name,
+                    "started_local": datetime.now(),
+                },
+                daemon=True,
+            )
+            st.worker.start()
+            return jsonify(
+                {
+                    "ok": True,
+                    "total_links": len(links),
+                    "parallel": False,
+                    "sequential_multi": True,
+                    "accounts": len(slots),
+                    "batch_id": st.batch_id,
+                    "account_mode": "multi",
+                    "multi_parallel": False,
+                }
+            )
+
+        slot0 = slots[0]
+        one_profile = _profile_for_slot(
+            profile,
+            str(slot0.get("email_override") or ""),
+            profile_override=slot0.get("profile_override"),
+        )
+        one_cdp = str(slot0.get("cdp_url") or "").strip() or cdp_url
+        one_udir = str(slot0.get("edge_user_data_dir") or "").strip()
+        st.parallel_link_split = ""
         st.worker = threading.Thread(
             target=_auto_apply_worker,
             kwargs={
                 "links": links,
-                "profile": profile,
+                "profile": one_profile,
                 "auto_submit": auto_submit,
-                "cdp_url": cdp_url,
+                "cdp_url": one_cdp,
                 "login_first": login_first,
                 "file_name": safe_name,
+                "edge_user_data_dir": one_udir,
             },
             daemon=True,
         )
         st.worker.start()
-    return jsonify({"ok": True, "total_links": len(links)})
+        return jsonify(
+            {
+                "ok": True,
+                "total_links": len(links),
+                "parallel": False,
+                "sequential_multi": False,
+                "batch_id": st.batch_id,
+                "account_mode": account_mode,
+            }
+        )
 
 
 @app.post("/api/auto-apply/stop")
@@ -1675,16 +2430,39 @@ def api_auto_apply_stop():
             return jsonify({"ok": False, "error": "Auto Apply không đang chạy."}), 400
         st.stop_event.set()
         st.status = "Stopping"
-    st.add_log("Đang hủy Auto Apply...")
+        jobs_copy = list(st.jobs.values())
+    for job in jobs_copy:
+        try:
+            job.stop_event.set()
+        except Exception:
+            pass
+    st.add_log("Đang hủy Auto Apply…")
     return jsonify({"ok": True})
 
 
 @app.get("/api/auto-apply/status")
 def api_auto_apply_status():
     if not auto_apply_collabs_enabled():
-        return _no_cache_json({"running": False, "status": "Disabled", "file": "", "logs": [], "result": None, "error": ""})
+        return _no_cache_json(
+            {
+                "running": False,
+                "status": "Disabled",
+                "file": "",
+                "logs": [],
+                "result": None,
+                "error": "",
+                "parallel": False,
+                "jobs": {},
+                "batch_id": "",
+                "parallel_link_split": "",
+                "account_mode": "",
+                "sequential_multi": False,
+            }
+        )
     st = AUTO_APPLY_STATE
     with st.lock:
+        jobs_snap = _auto_apply_jobs_snapshot_unlocked(st)
+        parallel = len(jobs_snap) > 0
         return _no_cache_json(
             {
                 "running": st.running,
@@ -1693,6 +2471,12 @@ def api_auto_apply_status():
                 "logs": list(st.logs[-200:]),
                 "result": st.result,
                 "error": st.error,
+                "parallel": parallel,
+                "jobs": jobs_snap,
+                "batch_id": st.batch_id,
+                "parallel_link_split": str(st.parallel_link_split or ""),
+                "account_mode": str(st.account_mode or ""),
+                "sequential_multi": bool(st.sequential_multi),
             }
         )
 
@@ -1711,5 +2495,6 @@ def api_auto_apply_history():
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     # threaded=True: worker chạy pipeline không chặn request /api/logs (log theo thời gian thực)
     app.run(host="127.0.0.1", port=5050, debug=False, threaded=True)

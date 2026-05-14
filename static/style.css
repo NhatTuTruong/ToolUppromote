@@ -32,6 +32,7 @@ body {
 
 .tab-panel { display: none; }
 .tab-panel.active { display: block; }
+.hidden { display: none !important; }
 
 .card {
   background: rgba(17, 26, 45, 0.95);
@@ -152,7 +153,7 @@ body {
 }
 .form-grid label { display: flex; flex-direction: column; gap: 6px; color: var(--muted); font-size: 13px; }
 .form-field-label { min-width: 0; }
-.form-field-caption { display: block; }
+.form-field-caption { display: block; font-size: 12px; padding-top: 10px; }
 .secret-field-row {
   display: flex;
   flex-direction: row;
@@ -270,6 +271,7 @@ input, select {
 }
 
 .results-head { display: flex; justify-content: space-between; align-items: center; }
+.results-head-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .muted { color: var(--muted); }
 .file-list { margin-top: 8px; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
 .file-row {
@@ -308,6 +310,88 @@ input, select {
   padding: 18px;
 }
 .modal-card h3 { margin: 0 0 14px; }
+
+/* Popup chọn tài khoản Edge CDP — gọn, checkbox nhỏ */
+#edgeCdpAccountsModal .modal-card.edge-cdp-modal-card {
+  width: min(380px, 100%);
+  max-width: 380px;
+  padding: 12px 14px 10px;
+}
+#edgeCdpAccountsModal .modal-card.edge-cdp-modal-card h3 {
+  margin: 0 0 4px;
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+.edge-cdp-modal-hint {
+  margin: 0 0 8px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--muted);
+}
+.edge-cdp-acc-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 4px 6px;
+  margin-bottom: 10px;
+}
+@media (max-width: 400px) {
+  .edge-cdp-acc-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+.edge-cdp-acc-row {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 3px;
+  margin: 0;
+  padding: 5px 2px 4px;
+  border-radius: 8px;
+  cursor: pointer;
+  text-align: center;
+  font-size: 10px;
+  line-height: 1.15;
+  color: var(--text);
+  border: 1px solid transparent;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.edge-cdp-acc-row:hover {
+  background: rgba(79, 124, 255, 0.08);
+  border-color: var(--line);
+}
+.edge-cdp-acc-row input[type="checkbox"] {
+  width: 12px;
+  height: 12px;
+  min-width: 12px;
+  min-height: 12px;
+  margin: 0;
+  padding: 0;
+  flex-shrink: 0;
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+.edge-cdp-acc-num {
+  font-weight: 600;
+  font-size: 11px;
+}
+.edge-cdp-acc-port {
+  display: block;
+  color: var(--muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.edge-cdp-modal-actions {
+  margin-top: 2px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+  gap: 8px;
+}
+.edge-cdp-modal-actions .btn {
+  padding: 7px 12px;
+  font-size: 13px;
+}
+
 .modal-card textarea {
   width: 100%;
   border: 1px solid var(--line);

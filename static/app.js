@@ -61,6 +61,9 @@ const AUTO_APPLY_DEFAULTS = {
   aa_purchase_before_choice: "Yes",
   aa_row_start: "1",
   aa_row_end: "",
+  aa_account_mode: "single",
+  aa_multi_account_count: "1-2",
+  aa_multi_account_emails: "",
 };
 const LS_AUTO_APPLY_HISTORY = "aff_auto_apply_history_v1";
 
@@ -138,6 +141,146 @@ const FILTER_SYNC_PAIRS_RF = [
 
 function $(id) {
   return document.getElementById(id);
+}
+
+function syncAutoApplyAccountModeUI() {
+  const sel = $("aa_account_mode");
+  const wrap = $("aa_multi_count_wrap");
+  const mode = sel && sel.value === "multi" ? "multi" : "single";
+  if (wrap) wrap.classList.toggle("hidden", mode !== "multi");
+}
+
+const COLLABS_ACCOUNT_MAX = 10;
+
+/** Đa tài khoản: dải 1-5, danh sách 1,4,7, hoặc số n (tài khoản 1..n). */
+function parseCollabsAccountSelection(raw) {
+  const s = String(raw || "").trim();
+  if (!s) {
+    return { ok: false, indices: [], error: "Nhập tài khoản (vd: 1-5 hoặc 1,4,7)." };
+  }
+  if (s.includes(",")) {
+    const parts = s.split(",").map((p) => p.trim()).filter(Boolean);
+    if (!parts.length) {
+      return { ok: false, indices: [], error: "Danh sách không hợp lệ." };
+    }
+    const idx = [];
+    const seen = new Set();
+    for (const p of parts) {
+      if (!/^\d+$/.test(p)) {
+        return {
+          ok: false,
+          indices: [],
+          error: `Phần "${p}" không hợp lệ. Chỉ dùng số 1–${COLLABS_ACCOUNT_MAX}, cách nhau bởi dấu phẩy.`,
+        };
+      }
+      const n = parseInt(p, 10);
+      if (n < 1 || n > COLLABS_ACCOUNT_MAX) {
+        return { ok: false, indices: [], error: `Tài khoản phải từ 1 đến ${COLLABS_ACCOUNT_MAX}.` };
+      }
+      if (!seen.has(n)) {
+        seen.add(n);
+        idx.push(n);
+      }
+    }
+    if (idx.length < 2) {
+      return { ok: false, indices: [], error: "Đa tài khoản cần ít nhất 2 tài khoản." };
+    }
+    return { ok: true, indices: idx, error: "" };
+  }
+  if (s.includes("-")) {
+    const m = s.match(/^(\d+)\s*-\s*(\d+)$/);
+    if (!m) {
+      return {
+        ok: false,
+        indices: [],
+        error: "Dải không hợp lệ. Dùng đúng dạng 1-5 (hai số, một dấu gạch).",
+      };
+    }
+    let a = parseInt(m[1], 10);
+    let b = parseInt(m[2], 10);
+    if (a > b) [a, b] = [b, a];
+    if (a < 1 || b > COLLABS_ACCOUNT_MAX) {
+      return { ok: false, indices: [], error: `Dải phải nằm trong 1–${COLLABS_ACCOUNT_MAX}.` };
+    }
+    const idx = [];
+    for (let i = a; i <= b; i += 1) idx.push(i);
+    if (idx.length < 2) {
+      return {
+        ok: false,
+        indices: [],
+        error: "Đa tài khoản cần ít nhất 2 tài khoản (vd: 1-2, không dùng 5-5).",
+      };
+    }
+    return { ok: true, indices: idx, error: "" };
+  }
+  if (/^\d+$/.test(s)) {
+    const n = parseInt(s, 10);
+    if (!Number.isFinite(n) || n < 2 || n > COLLABS_ACCOUNT_MAX) {
+      return {
+        ok: false,
+        indices: [],
+        error: `Nhập số từ 2–${COLLABS_ACCOUNT_MAX} (tài khoản 1→n), hoặc dải/danh sách.`,
+      };
+    }
+    const idx = [];
+    for (let i = 1; i <= n; i += 1) idx.push(i);
+    return { ok: true, indices: idx, error: "" };
+  }
+  return {
+    ok: false,
+    indices: [],
+    error: "Không hiểu định dạng. Dùng 1-5 hoặc 1,4,7 hoặc số 2-10.",
+  };
+}
+
+/** Parse profile theo tài khoản, mỗi dòng: 1=email|Họ tên|SĐT|Website|Instagram */
+function parseCollabsAccountProfileMap(raw, selectedIndices) {
+  const s = String(raw || "").trim();
+  const out = {};
+  if (!s) return { ok: true, map: out, error: "" };
+  const allowed = new Set(Array.isArray(selectedIndices) ? selectedIndices : []);
+  const lines = s.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+  for (const line of lines) {
+    const eqPos = line.indexOf("=");
+    if (eqPos <= 0) {
+      return {
+        ok: false,
+        map: {},
+        error: `Dòng "${line}" không hợp lệ. Dùng dạng 1=email|Họ tên|SĐT|Website|Instagram.`,
+      };
+    }
+    const lhs = line.slice(0, eqPos).trim();
+    const rhs = line.slice(eqPos + 1).trim();
+    if (!/^\d+$/.test(lhs)) {
+      return { ok: false, map: {}, error: `Tài khoản "${lhs}" không hợp lệ.` };
+    }
+    const idx = parseInt(lhs, 10);
+    if (idx < 1 || idx > COLLABS_ACCOUNT_MAX) {
+      return { ok: false, map: {}, error: `Tài khoản phải từ 1 đến ${COLLABS_ACCOUNT_MAX}.` };
+    }
+    // TK không nằm trong "Tài khoản / trình duyệt": bỏ qua dòng, không báo lỗi.
+    if (allowed.size && !allowed.has(idx)) {
+      continue;
+    }
+    const cols = rhs.split("|");
+    while (cols.length < 5) cols.push("NO");
+    const asValue = (v) => {
+      const t = String(v || "").trim();
+      if (!t) return "";
+      if (t.toUpperCase() === "NO") return "";
+      return t;
+    };
+    const email = asValue(cols[0]);
+    const full_name = asValue(cols[1]);
+    const phone = asValue(cols[2]);
+    const website = asValue(cols[3]);
+    const instagram = asValue(cols[4]);
+    if (email && !email.includes("@")) {
+      return { ok: false, map: {}, error: `Email cho TK${idx} không hợp lệ.` };
+    }
+    out[String(idx)] = { email, full_name, phone, website, instagram };
+  }
+  return { ok: true, map: out, error: "" };
 }
 
 /** Ô Token Apify / URL / Bearer: mặc định đóng (type=password che ký tự); bấm mắt để sửa; lưu hoặc load lại → đóng. Giá trị .value không đổi khi đóng/mở. */
@@ -483,14 +626,28 @@ async function pollStatus() {
         state.autoApply.lastResultSig = sig;
         if (hasRunToken) state.autoApply.notifiedToken = state.autoApply.runToken;
         if (r && typeof r === "object") {
+          const parNote =
+            r.parallel && r.parallel_jobs && typeof r.parallel_jobs === "object"
+              ? ` (${Object.keys(r.parallel_jobs).length} slot song song)`
+              : "";
           appendLocalApplyHistory({
             file: aaFile,
             started_at_display: new Date().toLocaleString("vi-VN"),
             email: "",
             submitted_items: Array.isArray(r.submitted_items) ? r.submitted_items : [],
           });
+          const splitHint =
+            r.sequential_multi && r.accounts && r.total_brand_runs
+              ? `\nĐa tài khoản (lần lượt): ${r.accounts} tài khoản × ${r.total || 0} brand ≈ ${r.total_brand_runs} lượt chạy.`
+              : r.sequential_multi && r.accounts
+                ? `\nĐa tài khoản (lần lượt): ${r.accounts} phiên, mỗi phiên lặp lại cả danh sách brand.`
+                : r.parallel_link_split === "sequential"
+                  ? "\nChia link: theo thứ tự (khối liên tiếp)."
+                  : r.parallel && r.parallel_link_split
+                    ? "\nChia link: round-robin."
+                    : "";
           alert(
-            `Auto Apply xong.\nFile: ${aaFile}\nTổng link: ${r.total || 0}\nĐã điền form: ${r.filled || 0}\nĐã submit: ${r.submitted || 0}`
+            `Auto Apply xong.${parNote}${splitHint}\nFile: ${aaFile}\nTổng link: ${r.total || 0}\nĐã điền form: ${r.filled || 0}\nĐã submit: ${r.submitted || 0}`
           );
         } else if (err) {
           alert(`Auto Apply dừng/lỗi.\nFile: ${aaFile}\nLỗi: ${err}`);
@@ -817,17 +974,46 @@ async function deleteResultFile(name) {
   await Promise.all([loadResults(), loadAutoCollabsFiles()]);
 }
 
-async function openEdgeForAutoApply() {
+function closeEdgeCdpAccountPicker() {
+  const modal = $("edgeCdpAccountsModal");
+  if (modal) modal.classList.add("hidden");
+}
+
+function showEdgeCdpAccountPicker() {
+  const modal = $("edgeCdpAccountsModal");
+  if (modal) modal.classList.remove("hidden");
+}
+
+async function submitOpenEdgeCdpAccounts() {
+  const indices = [];
+  for (let i = 1; i <= 10; i += 1) {
+    const cb = $(`edge_cdp_acc_${i}`);
+    if (cb && cb.checked) indices.push(i);
+  }
+  if (!indices.length) {
+    alert("Chọn ít nhất một tài khoản.");
+    return;
+  }
   try {
-    const res = await fetch("/api/edge-cdp/start", { method: "POST" });
+    const res = await fetch("/api/edge-cdp/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ account_indices: indices }),
+    });
     const data = await res.json().catch(() => ({}));
     if (!res.ok || !data.ok) {
       const detail = Array.isArray(data.logs) && data.logs.length ? `\n\nLog:\n${data.logs.join("\n")}` : "";
       alert((data.error || "Không mở được Edge CDP.") + detail);
       return;
     }
+    const opened = Array.isArray(data.opened) ? data.opened : [];
+    const summary =
+      opened.length > 0
+        ? opened.map((o) => `Tài khoản ${o.account}: ${o.cdp_url || ""}`).join("\n")
+        : `CDP: ${data.cdp_url || ""}`;
     const detail = Array.isArray(data.logs) && data.logs.length ? `\n\nLog:\n${data.logs.join("\n")}` : "";
-    alert(`Edge đã sẵn sàng cho Auto Apply.\nCDP: ${data.cdp_url || "http://127.0.0.1:9222"}` + detail);
+    alert(`Edge đã sẵn sàng cho Auto Apply.\n${summary}` + detail);
+    closeEdgeCdpAccountPicker();
   } catch (e) {
     alert(String(e?.message || e || "Lỗi mở Edge CDP."));
   }
@@ -871,6 +1057,9 @@ function collectAutoApplyProfile() {
   const genericShortEl = $("aa_generic_short");
   const genericLongEl = $("aa_generic_long");
   const messageEl = $("aa_message");
+  const accountModeEl = $("aa_account_mode");
+  const multiAccountCountEl = $("aa_multi_account_count");
+  const multiAccountEmailsEl = $("aa_multi_account_emails");
   const btnCancel = $("aa_cancel_btn");
   const btnSave = $("aa_save_btn");
   const btnConfirm = $("aa_confirm_btn");
@@ -906,6 +1095,9 @@ function collectAutoApplyProfile() {
     !genericShortEl ||
     !genericLongEl ||
     !messageEl ||
+    !accountModeEl ||
+    !multiAccountCountEl ||
+    !multiAccountEmailsEl ||
     !btnCancel ||
     !btnSave ||
     !btnConfirm
@@ -914,6 +1106,15 @@ function collectAutoApplyProfile() {
     return Promise.resolve(null);
   }
 
+  // Luôn mặc định "1 tài khoản" khi mở popup.
+  accountModeEl.value = "single";
+  const savedCount =
+    read("aa_multi_account_count").trim() ||
+    read("aa_multi_browser_count").trim() ||
+    "2";
+  multiAccountCountEl.value = savedCount;
+  multiAccountEmailsEl.value = read("aa_multi_account_emails") || "";
+  syncAutoApplyAccountModeUI();
   fullNameEl.value = read("aa_full_name");
   emailEl.value = read("aa_email");
   phoneEl.value = read("aa_phone");
@@ -1033,6 +1234,9 @@ function collectAutoApplyProfile() {
       keep("aa_generic_short", generic_short);
       keep("aa_generic_long", generic_long);
       keep("aa_message", message);
+      keep("aa_account_mode", String(accountModeEl.value || "single"));
+      keep("aa_multi_account_count", String(multiAccountCountEl.value || "2").trim() || "2");
+      keep("aa_multi_account_emails", String(multiAccountEmailsEl.value || "").trim());
     };
 
     const onSave = () => {
@@ -1071,6 +1275,29 @@ function collectAutoApplyProfile() {
       const generic_short = String(genericShortEl.value || "").trim();
       const generic_long = String(genericLongEl.value || "").trim();
       const message = String(messageEl.value || "").trim();
+      const account_mode = String(accountModeEl.value || "single").trim() === "multi" ? "multi" : "single";
+      let multi_browser_count = 2;
+      let collabs_account_indices = null;
+      let multi_account_spec = "";
+      let collabs_account_profile_map = {};
+      if (account_mode === "multi") {
+        const rawSpec = String(multiAccountCountEl.value || "").trim();
+        const parsed = parseCollabsAccountSelection(rawSpec);
+        if (!parsed.ok) {
+          alert(parsed.error || "Định dạng tài khoản không hợp lệ.");
+          return;
+        }
+        collabs_account_indices = parsed.indices;
+        multi_browser_count = parsed.indices.length;
+        multi_account_spec = rawSpec;
+        const emailMapRaw = String(multiAccountEmailsEl.value || "").trim();
+        const profileMapParsed = parseCollabsAccountProfileMap(emailMapRaw, collabs_account_indices);
+        if (!profileMapParsed.ok) {
+          alert(profileMapParsed.error || "Thông tin theo tài khoản không hợp lệ.");
+          return;
+        }
+        collabs_account_profile_map = profileMapParsed.map || {};
+      }
       if (!full_name && !email) {
         alert("Nhập tối thiểu Họ tên hoặc Email.");
         return;
@@ -1110,6 +1337,11 @@ function collectAutoApplyProfile() {
         apply_mode,
         row_start,
         row_end,
+        account_mode,
+        multi_browser_count,
+        collabs_account_indices,
+        multi_account_spec,
+        collabs_account_profile_map,
       });
     };
 
@@ -1126,19 +1358,33 @@ async function autoApplyFromResultFile(name) {
   }
   const form = await collectAutoApplyProfile();
   if (!form) return;
+  const body = {
+    name,
+    profile: form.profile,
+    apply_mode: form.apply_mode,
+    row_start: form.row_start,
+    row_end: form.row_end,
+    auto_submit: false,
+    use_cdp: true,
+    cdp_url: "http://127.0.0.1:9222",
+    account_mode: form.account_mode || "single",
+  };
+  if (form.account_mode === "multi") {
+    body.multi_browser_count = form.multi_browser_count ?? 2;
+    if (Array.isArray(form.collabs_account_indices) && form.collabs_account_indices.length >= 2) {
+      body.collabs_account_indices = form.collabs_account_indices;
+    }
+    if (form.multi_account_spec && String(form.multi_account_spec).trim()) {
+      body.multi_account_spec = String(form.multi_account_spec).trim();
+    }
+    if (form.collabs_account_profile_map && typeof form.collabs_account_profile_map === "object") {
+      body.collabs_account_profile_map = form.collabs_account_profile_map;
+    }
+  }
   const res = await fetch("/api/auto-apply/start", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      name,
-      profile: form.profile,
-      apply_mode: form.apply_mode,
-      row_start: form.row_start,
-      row_end: form.row_end,
-      auto_submit: false,
-      use_cdp: true,
-      cdp_url: "http://127.0.0.1:9222",
-    }),
+    body: JSON.stringify(body),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok || !data.ok) {
@@ -1632,6 +1878,8 @@ function bindEvents() {
   });
   bindMultiSelectDropdowns();
   bindSecretEyeButtons();
+  const aaAccMode = $("aa_account_mode");
+  if (aaAccMode) aaAccMode.addEventListener("change", syncAutoApplyAccountModeUI);
   const cbMode = $("collabsDiscoveryMode");
   if (cbMode) cbMode.addEventListener("change", updateCollabsDiscoveryModeUI);
   updateCollabsDiscoveryModeUI();
@@ -1673,16 +1921,25 @@ function bindEvents() {
       downloadAutoCollabsTemplate();
     });
   }
-  const edgeBtn = $("openEdgeCdpBtn");
-  if (edgeBtn) {
+  document.querySelectorAll(".open-edge-cdp-btn").forEach((edgeBtn) => {
     edgeBtn.addEventListener("click", (e) => {
       try {
         e.preventDefault();
         e.stopPropagation();
       } catch (_) {}
-      openEdgeForAutoApply();
+      showEdgeCdpAccountPicker();
+    });
+  });
+  const edgeCdpModal = $("edgeCdpAccountsModal");
+  if (edgeCdpModal) {
+    edgeCdpModal.addEventListener("click", (e) => {
+      if (e.target === edgeCdpModal) closeEdgeCdpAccountPicker();
     });
   }
+  const edgeCdpCancel = $("edgeCdpAccountsCancelBtn");
+  if (edgeCdpCancel) edgeCdpCancel.addEventListener("click", closeEdgeCdpAccountPicker);
+  const edgeCdpOpen = $("edgeCdpAccountsOpenBtn");
+  if (edgeCdpOpen) edgeCdpOpen.addEventListener("click", submitOpenEdgeCdpAccounts);
   const actLic = $("activateLicenseBtn");
   if (actLic) actLic.addEventListener("click", activateLicense);
   const deLic = $("deactivateLicenseBtn");
@@ -1704,6 +1961,7 @@ function bindEvents() {
     erf.addEventListener("input", () => mirrorEndPageFromRefersion());
     erf.addEventListener("change", persistEndPageBoth);
   }
+  syncAutoApplyAccountModeUI();
 }
 
 async function init() {

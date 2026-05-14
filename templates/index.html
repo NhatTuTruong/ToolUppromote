@@ -427,8 +427,10 @@
       <div class="card">
         <div class="results-head">
           <h2>File kết quả</h2>
-          <button class="btn" id="openEdgeCdpBtn" type="button" title="Mở Edge (sẵn sàng Auto Apply)">⧉</button>
-          <button class="btn" id="refreshResultsBtn" type="button">Làm mới</button>
+          <div>
+            <button class="btn open-edge-cdp-btn" id="openEdgeCdpBtn" type="button" title="Mở Edge theo tài khoản (CDP 9222–9231)">⧉</button>
+          <button style="margin-right: 8px;" class="btn" id="refreshResultsBtn" type="button">Làm mới</button>
+          </div>
         </div>
         
         <div class="file-list" id="resultFileList">
@@ -440,7 +442,10 @@
       <div class="card">
         <div class="results-head">
           <h2>Auto Collabs</h2>
-          <button class="btn" id="refreshAutoCollabsBtn" type="button">Làm mới</button>
+          <div class="results-head-actions">
+            <button class="btn open-edge-cdp-btn" type="button" title="Mở Edge theo tài khoản (CDP 9222–9231)">⧉</button>
+            <button class="btn" id="refreshAutoCollabsBtn" type="button">Làm mới</button>
+          </div>
         </div>
         <div class="actions">
           <button class="btn" id="downloadAutoCollabsTemplateBtn" type="button">Tải file mẫu</button>
@@ -472,6 +477,41 @@
         </label>
         <label>Từ hàng #<input id="aa_row_start" type="number" min="1" step="1" placeholder="1" /></label>
         <label>Đến hàng #<input id="aa_row_end" type="number" min="1" step="1" placeholder="10 (để trống = tới cuối)" /></label>
+          </div>
+        </div>
+
+        <div class="filter-field-full">
+          <label>Tài khoản Collabs
+            <select id="aa_account_mode">
+              <option value="single">1 tài khoản</option>
+              <option value="multi">Nhiều tài khoản</option>
+            </select>
+          </label>
+          <div id="aa_multi_count_wrap" class="hidden" style="margin-top:10px;">
+            <label>Tài khoản / trình duyệt
+              <input
+                id="aa_multi_account_count"
+                type="text"
+                inputmode="text"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="1-5 hoặc 1,4,7"
+                value="1-2"
+              />
+            </label>
+            <span class="form-field-caption"
+              >Dải liên tục: <code>1-5</code> (TK1…TK5). Danh sách rời: <code>1,4,7</code> (đúng các TK đó). Hoặc số
+              <code>2</code>…<code>10</code> = tài khoản 1 đến n như trước. Mỗi TK lần lượt chạy lại toàn bộ brand; mở Edge đúng cổng CDP; chưa login Collabs thì đăng nhập xong tool mới chạy tiếp.</span>
+            <label>Thông tin theo tài khoản (tuỳ chọn)
+              <textarea
+                id="aa_multi_account_emails"
+                rows="4"
+                spellcheck="false"
+                placeholder="1=email1@gmail.com|NO|NO|NO|NO&#10;4=email4@gmail.com|Tên 4|09123|site4.com|ig4"
+              ></textarea>
+            </label>
+            <span class="form-field-caption"
+              >Mỗi dòng: <code>TK=Email|Họ tên|Số điện thoại|Website|Instagram</code>. Giá trị trống hoặc <code>NO</code> lấy từ ô phía dưới. Dòng cho TK không nằm trong ô <em>Tài khoản / trình duyệt</em> được bỏ qua.</span>
           </div>
         </div>
 
@@ -554,6 +594,28 @@
         <button class="btn" type="button" id="aa_cancel_btn">Hủy</button>
         <button class="btn" type="button" id="aa_save_btn">Lưu</button>
         <button class="btn primary" type="button" id="aa_confirm_btn">Bắt đầu Auto Apply</button>
+      </div>
+    </div>
+  </div>
+  <div class="modal-backdrop hidden" id="edgeCdpAccountsModal">
+    <div class="modal-card edge-cdp-modal-card">
+      <h3>Mở Edge theo tài khoản</h3>
+      <p class="edge-cdp-modal-hint">Mỗi ô = 1 profile Edge + CDP (9222–9231), khớp Auto Apply đa tài khoản.</p>
+      <div class="edge-cdp-acc-grid" role="group" aria-label="Chọn tài khoản CDP">
+        <label class="edge-cdp-acc-row"><input type="checkbox" id="edge_cdp_acc_1" checked /><span class="edge-cdp-acc-num">TK1</span><span class="edge-cdp-acc-port">9222</span></label>
+        <label class="edge-cdp-acc-row"><input type="checkbox" id="edge_cdp_acc_2" /><span class="edge-cdp-acc-num">TK2</span><span class="edge-cdp-acc-port">9223</span></label>
+        <label class="edge-cdp-acc-row"><input type="checkbox" id="edge_cdp_acc_3" /><span class="edge-cdp-acc-num">TK3</span><span class="edge-cdp-acc-port">9224</span></label>
+        <label class="edge-cdp-acc-row"><input type="checkbox" id="edge_cdp_acc_4" /><span class="edge-cdp-acc-num">TK4</span><span class="edge-cdp-acc-port">9225</span></label>
+        <label class="edge-cdp-acc-row"><input type="checkbox" id="edge_cdp_acc_5" /><span class="edge-cdp-acc-num">TK5</span><span class="edge-cdp-acc-port">9226</span></label>
+        <label class="edge-cdp-acc-row"><input type="checkbox" id="edge_cdp_acc_6" /><span class="edge-cdp-acc-num">TK6</span><span class="edge-cdp-acc-port">9227</span></label>
+        <label class="edge-cdp-acc-row"><input type="checkbox" id="edge_cdp_acc_7" /><span class="edge-cdp-acc-num">TK7</span><span class="edge-cdp-acc-port">9228</span></label>
+        <label class="edge-cdp-acc-row"><input type="checkbox" id="edge_cdp_acc_8" /><span class="edge-cdp-acc-num">TK8</span><span class="edge-cdp-acc-port">9229</span></label>
+        <label class="edge-cdp-acc-row"><input type="checkbox" id="edge_cdp_acc_9" /><span class="edge-cdp-acc-num">TK9</span><span class="edge-cdp-acc-port">9230</span></label>
+        <label class="edge-cdp-acc-row"><input type="checkbox" id="edge_cdp_acc_10" /><span class="edge-cdp-acc-num">TK10</span><span class="edge-cdp-acc-port">9231</span></label>
+      </div>
+      <div class="actions edge-cdp-modal-actions">
+        <button class="btn" type="button" id="edgeCdpAccountsCancelBtn">Hủy</button>
+        <button class="btn primary" type="button" id="edgeCdpAccountsOpenBtn">Mở Edge</button>
       </div>
     </div>
   </div>

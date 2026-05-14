@@ -2,69 +2,31 @@
 <html lang="vi">
 <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <title>Quản trị key bản quyền</title>
-    <style>
-        body { font-family: "Segoe UI", Arial, sans-serif; background: #f4f7fb; margin: 0; color: #1e293b; }
-        .wrap { max-width: 1220px; margin: 18px auto; padding: 0 14px; }
-        .bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
-        h1 { margin: 0; font-size: 22px; color: #0f172a; }
-        h3 { margin: 0 0 12px; font-size: 17px; color: #111827; }
-        .card { background: #fff; border: 1px solid #dbe2ee; border-radius: 10px; padding: 14px; margin-bottom: 14px; box-shadow: 0 6px 20px rgba(31, 41, 55, 0.04); }
-        .tabs { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0 14px; }
-        .tab-btn { border: 1px solid #c8d5ea; background: #fff; color: #0f172a; border-radius: 999px; padding: 8px 12px; font-weight: 800; font-size: 13px; cursor: pointer; }
-        .tab-btn:hover { background: #eef4ff; }
-        .tab-btn.active { background: #2563eb; border-color: #2563eb; color: #fff; }
-        .tab-panel { display: none; }
-        .tab-panel.active { display: block; }
-        .grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
-        .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-        label { display: block; font-size: 12px; color: #475569; margin-bottom: 4px; font-weight: 600; }
-        input, textarea, select { width: 100%; padding: 8px; border: 1px solid #bfd0ea; border-radius: 7px; box-sizing: border-box; background: #fff; }
-        textarea { min-height: 120px; resize: vertical; }
-        input:focus, textarea:focus, select:focus { outline: none; border-color: #3b82f6; box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.15); }
-        .btn { border: 0; border-radius: 8px; padding: 8px 12px; cursor: pointer; font-weight: 700; font-size: 13px; color: #fff; }
-        .btn-primary { background: #2563eb; }
-        .btn-primary:hover { background: #1d4ed8; }
-        .btn-warn { background: #d97706; }
-        .btn-warn:hover { background: #b45309; }
-        .btn-danger { background: #dc2626; }
-        .btn-danger:hover { background: #b91c1c; }
-        table { width: 100%; border-collapse: collapse; font-size: 13px; }
-        th, td { border-bottom: 1px solid #e5ecf7; text-align: left; padding: 8px; vertical-align: top; }
-        th { background: #f8fbff; color: #334155; font-weight: 700; }
-        .ok { color: #15803d; font-weight: 700; }
-        .bad { color: #b91c1c; font-weight: 700; }
-        .msg { margin: 8px 0; padding: 9px 10px; border-radius: 8px; font-weight: 600; }
-        .msg.ok { background: #e7f7ec; border: 1px solid #b7e4c7; color: #166534; }
-        .muted { color: #64748b; font-size: 12px; }
-        .pagination { margin-top: 10px; display: flex; justify-content: flex-end; gap: 6px; align-items: center; }
-        .pg-btn { font-size: 12px; padding: 5px 8px; border-radius: 6px; border: 1px solid #c8d5ea; background: #fff; color: #334155; text-decoration: none; }
-        .pg-btn:hover { background: #eef4ff; }
-        .pg-btn.disabled { opacity: 0.5; pointer-events: none; }
-        code { font-size: 12px; background: #f3f7ff; padding: 2px 4px; border-radius: 5px; }
-        .search-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
-        .search-row input[type="search"] { flex: 1; min-width: 180px; max-width: 420px; }
-        .check-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
-        .check-row label { margin: 0; display: inline-flex; gap: 6px; align-items: center; font-size: 13px; font-weight: 600; color: #334155; }
-        .check-row input[type="checkbox"] { width: auto; }
-    </style>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ asset('css/admin-theme.css') }}">
 </head>
-<body>
-<div class="wrap">
-    <div class="bar">
-        <h1>Quản trị key bản quyền</h1>
+<body class="admin-body">
+<div class="admin-wrap">
+    <header class="admin-topbar">
+        <div>
+            <h1 class="admin-topbar-title">Quản trị key bản quyền</h1>
+            <p class="admin-topbar-sub">Token Refersion · Key · Activation</p>
+        </div>
         <form method="post" action="{{ route('admin.logout') }}">
             @csrf
             <button type="submit" class="btn btn-warn">Đăng xuất</button>
         </form>
-    </div>
+    </header>
 
     @if(session('success'))
-        <div class="msg ok">{{ session('success') }}</div>
+        <div class="admin-msg ok">{{ session('success') }}</div>
     @endif
 
-    <div class="tabs" role="tablist" aria-label="Tabs quản trị">
+    <div class="admin-tabs" role="tablist" aria-label="Tabs quản trị">
         <button type="button" class="tab-btn active" data-tab-target="tab-refersion" role="tab" aria-controls="tab-refersion" aria-selected="true">Token Refersion</button>
         <button type="button" class="tab-btn" data-tab-target="tab-quick-key" role="tab" aria-controls="tab-quick-key" aria-selected="false">Thêm/Cập nhật key</button>
         <button type="button" class="tab-btn" data-tab-target="tab-activations" role="tab" aria-controls="tab-activations" aria-selected="false">Activation</button>
@@ -77,13 +39,13 @@
         <form method="post" action="{{ route('admin.settings.refersion_token') }}">
             @csrf
             <div>
-                <label>Refersion token</label>
-                <input name="refersion_token" type="text" value="{{ $refersionToken }}" autocomplete="off" placeholder="Nhập token Refersion">
+                <label class="field-label" for="refersion_token">Refersion token</label>
+                <input id="refersion_token" name="refersion_token" type="text" value="{{ $refersionToken }}" autocomplete="off" placeholder="Nhập token Refersion">
             </div>
-            <div class="muted" style="margin-top:6px;">
+            <p class="muted" style="margin-top:10px;">
                 Khi lưu, app client đã kích hoạt key sẽ tự đồng bộ token này vào phần Cài đặt.
-            </div>
-            <div style="margin-top:10px;">
+            </p>
+            <div style="margin-top:14px;">
                 <button type="submit" class="btn btn-primary">Lưu token</button>
             </div>
         </form>
@@ -97,21 +59,21 @@
             @csrf
             <div class="grid">
                 <div>
-                    <label>Key bản quyền</label>
-                    <div style="display:flex; gap:6px; align-items:center;">
+                    <label class="field-label" for="quick-license-key">Key bản quyền</label>
+                    <div class="flex-input-row">
                         <input id="quick-license-key" name="license_key" required>
-                        <button id="btn-generate-key" type="button" class="btn btn-warn">Tạo</button>
+                        <button id="btn-generate-key" type="button" class="btn btn-warn" style="flex-shrink:0;">Tạo</button>
                     </div>
                 </div>
-                <div><label>Giới hạn record/ngày</label><input name="daily_limit" type="number" min="1" value="500"></div>
-                <div><label>Số máy tối đa</label><input name="max_machines" type="number" min="1" value="2"></div>
-                <div><label>Hạn dùng</label><input name="expires_at" type="datetime-local"></div>
+                <div><label class="field-label">Giới hạn record/ngày</label><input name="daily_limit" type="number" min="1" value="500"></div>
+                <div><label class="field-label">Số máy tối đa</label><input name="max_machines" type="number" min="1" value="2"></div>
+                <div><label class="field-label">Hạn dùng</label><input name="expires_at" type="datetime-local"></div>
             </div>
-            <div style="margin-top:8px;">
-                <label>Ghi chú</label><input name="notes">
+            <div style="margin-top:12px;">
+                <label class="field-label">Ghi chú</label><input name="notes">
             </div>
-            <div style="margin-top:8px;">
-                <label>Net được phép (theo key)</label>
+            <div style="margin-top:12px;">
+                <label class="field-label">Net được phép (theo key)</label>
                 <div class="check-row">
                     <label><input type="checkbox" name="allowed_sources[]" value="uppromote" checked> Uppromote</label>
                     <label><input type="checkbox" name="allowed_sources[]" value="goaffpro" checked> Goaffpro</label>
@@ -119,14 +81,14 @@
                     <label><input type="checkbox" name="allowed_sources[]" value="collabs"> Shopify Collabs</label>
                 </div>
             </div>
-            <div style="margin-top:8px;">
-                <label>Auto Apply Collabs (Apply Collab)</label>
+            <div style="margin-top:12px;">
+                <label class="field-label">Auto Apply Collabs (Apply Collab)</label>
                 <div class="check-row">
                     <label><input type="checkbox" name="allow_auto_apply_collabs" value="1" checked> Apply Collab</label>
                 </div>
-                <div class="muted" style="margin-top:4px;">Tắt mục này sẽ ẩn các nút/chức năng Auto Apply Collabs trong app.</div>
+                <p class="muted" style="margin-top:6px;">Tắt mục này sẽ ẩn các nút/chức năng Auto Apply Collabs trong app.</p>
             </div>
-            <div style="margin-top:10px;"><button type="submit" class="btn btn-primary">Lưu key</button></div>
+            <div style="margin-top:14px;"><button type="submit" class="btn btn-primary">Lưu key</button></div>
         </form>
     </div>
     </div>
@@ -134,7 +96,7 @@
     <div id="tab-activations" class="tab-panel">
     <div class="card">
         <h3>Activation đang hoạt động</h3>
-        <div class="muted" style="margin-bottom:8px;">Usage theo ngày VN ({{ $usageDayVn }})</div>
+        <p class="muted" style="margin-bottom:10px;">Usage theo ngày VN ({{ $usageDayVn }})</p>
         <form method="get" action="{{ route('admin.dashboard') }}" class="search-row">
             <input type="hidden" name="keys_q" value="{{ request('keys_q') }}">
             <input type="search" name="activation_q" value="{{ request('activation_q') }}" placeholder="Tìm theo mã activation, mã máy, key hoặc chú thích key…" autocomplete="off">
@@ -143,7 +105,8 @@
                 <a class="pg-btn" href="{{ route('admin.dashboard', array_filter(['keys_q' => request('keys_q')])) }}">Xóa lọc activation</a>
             @endif
         </form>
-        <table>
+        <div class="table-scroll">
+        <table class="data-table">
             <thead>
             <tr>
                 <th>ID</th><th>Mã activation</th><th>Key</th><th>Mã máy</th><th>Đã dùng hôm nay</th><th>Kích hoạt lúc</th><th>Lần cuối online</th><th>Chú thích</th><th>Thao tác</th>
@@ -173,6 +136,7 @@
             @endforeach
             </tbody>
         </table>
+        </div>
         <div class="pagination">
             <a class="pg-btn {{ $activations->onFirstPage() ? 'disabled' : '' }}" href="{{ $activations->previousPageUrl() ?: '#' }}">← Trước</a>
             <span class="muted">Trang {{ $activations->currentPage() }}/{{ $activations->lastPage() }}</span>
@@ -192,7 +156,8 @@
                 <a class="pg-btn" href="{{ route('admin.dashboard', array_filter(['activation_q' => request('activation_q')])) }}">Xóa lọc key</a>
             @endif
         </form>
-        <table>
+        <div class="table-scroll">
+        <table class="data-table">
             <thead>
             <tr>
                 <th>ID</th><th>Key</th><th>Trạng thái</th><th>Máy đang active</th><th>Record/ngày</th><th>Số máy tối đa</th><th>Net</th><th>Hạn dùng</th><th>Cập nhật</th>
@@ -220,11 +185,11 @@
                                 </select>
                                 <input name="daily_limit" type="number" min="1" value="{{ $k->daily_limit }}">
                             </div>
-                            <div class="grid-2" style="margin-top:6px;">
+                            <div class="grid-2" style="margin-top:8px;">
                                 <input name="max_machines" type="number" min="1" value="{{ $k->max_machines }}">
                                 <input name="expires_at" type="datetime-local" value="{{ $k->expires_at ? \Illuminate\Support\Carbon::parse($k->expires_at)->format('Y-m-d\TH:i') : '' }}">
                             </div>
-                            <div style="margin-top:6px;">
+                            <div style="margin-top:8px;">
                                 <div class="check-row">
                                     <label><input type="checkbox" name="allowed_sources[]" value="uppromote" @checked(in_array('uppromote', $allowed, true))> Uppromote</label>
                                     <label><input type="checkbox" name="allowed_sources[]" value="goaffpro" @checked(in_array('goaffpro', $allowed, true))> Goaffpro</label>
@@ -232,17 +197,17 @@
                                     <label><input type="checkbox" name="allowed_sources[]" value="collabs" @checked(in_array('collabs', $allowed, true))> Shopify Collabs</label>
                                 </div>
                             </div>
-                            <div style="margin-top:6px;">
+                            <div style="margin-top:8px;">
                                 <div class="check-row">
                                     <label><input type="checkbox" name="allow_auto_apply_collabs" value="1" @checked((bool) $k->allow_auto_apply_collabs)> Apply Collab</label>
                                 </div>
                             </div>
-                            <div style="margin-top:6px;"><input name="notes" value="{{ $k->notes }}"></div>
-                            <div style="margin-top:6px; display:flex; gap:8px; flex-wrap:wrap;">
+                            <div style="margin-top:8px;"><input name="notes" value="{{ $k->notes }}"></div>
+                            <div class="stack-btns" style="margin-top:10px;">
                                 <button type="submit" class="btn btn-primary">Cập nhật</button>
                             </div>
                         </form>
-                        <form method="post" action="{{ route('admin.keys.delete', ['id' => $k->id]) }}" onsubmit="return confirm('Bạn có chắc muốn xóa key {{ $k->license_key }}? Toàn bộ activation và usage liên quan sẽ bị xóa.');" style="margin-top:6px;">
+                        <form method="post" action="{{ route('admin.keys.delete', ['id' => $k->id]) }}" onsubmit="return confirm('Bạn có chắc muốn xóa key {{ $k->license_key }}? Toàn bộ activation và usage liên quan sẽ bị xóa.');" style="margin-top:8px;">
                             @csrf
                             <button type="submit" class="btn btn-danger">Xóa</button>
                         </form>
@@ -251,6 +216,7 @@
             @endforeach
             </tbody>
         </table>
+        </div>
         <div class="pagination">
             <a class="pg-btn {{ $keys->onFirstPage() ? 'disabled' : '' }}" href="{{ $keys->previousPageUrl() ?: '#' }}">← Trước</a>
             <span class="muted">Trang {{ $keys->currentPage() }}/{{ $keys->lastPage() }}</span>

@@ -1,6 +1,9 @@
+from __future__ import annotations
+
 import os
 import re
 import multiprocessing
+import multiprocessing.synchronize  # noqa: F401 — PyInstaller cần submodule này
 import queue as pyqueue
 import subprocess
 import sys
@@ -18,6 +21,7 @@ from edge_cdp import (
     cdp_url_host_port,
     default_user_data_dir_for_port,
     ensure_edge_cdp_running,
+    stop_edge_cdp_browser,
     port_for_collabs_account,
     cdp_url_for_collabs_account,
 )
@@ -347,6 +351,11 @@ def fetch_offers_uppromote(filters: dict) -> list:
         or str(core.DEFAULT_UPPROMOTE_PAGE_DELAY_MS)
     )
 
+    brand_cap = core.net_sources_max_brands_per_run()
+    filters["_net_fetch_start_page"] = start_page
+    filters["_net_fetch_end_page"] = start_page
+    STATE.add_log(f"Uppromote: giới hạn tối đa {brand_cap} brand mỗi lần lọc (trước Apify).")
+
     raw_offers = []
     page = start_page
     while True:
@@ -363,8 +372,17 @@ def fetch_offers_uppromote(filters: dict) -> list:
         if not page_items:
             STATE.add_log(f"Uppromote trang {page}: hết dữ liệu, dừng phân trang.")
             break
+        room = brand_cap - len(raw_offers)
+        if room <= 0:
+            break
+        if len(page_items) > room:
+            page_items = page_items[:room]
         raw_offers.extend(page_items)
+        filters["_net_fetch_end_page"] = page
         STATE.add_log(f"Uppromote trang {page}: +{len(page_items)} offer (tổng {len(raw_offers)})")
+        if len(raw_offers) >= brand_cap:
+            STATE.add_log(f"Uppromote: đã đạt giới hạn {brand_cap} brand/lần lọc, dừng tải.")
+            break
         if end_page is not None and page >= end_page:
             STATE.add_log(f"Uppromote: đã tới trang kết thúc đã chọn: {end_page}")
             break
@@ -429,6 +447,11 @@ def fetch_offers_goaffpro(filters: dict) -> list:
         or str(core.DEFAULT_GOAFFPRO_PAGE_DELAY_MS)
     )
 
+    brand_cap = core.net_sources_max_brands_per_run()
+    filters["_net_fetch_start_page"] = start_page
+    filters["_net_fetch_end_page"] = start_page
+    STATE.add_log(f"Goaffpro: giới hạn tối đa {brand_cap} brand mỗi lần lọc (trước Apify).")
+
     raw_stores = []
     page = start_page
     while True:
@@ -445,8 +468,17 @@ def fetch_offers_goaffpro(filters: dict) -> list:
         if not stores:
             STATE.add_log(f"Goaffpro trang {page}: hết dữ liệu, dừng phân trang.")
             break
+        room = brand_cap - len(raw_stores)
+        if room <= 0:
+            break
+        if len(stores) > room:
+            stores = stores[:room]
         raw_stores.extend(stores)
+        filters["_net_fetch_end_page"] = page
         STATE.add_log(f"Goaffpro trang {page}: +{len(stores)} cửa hàng (tổng {len(raw_stores)})")
+        if len(raw_stores) >= brand_cap:
+            STATE.add_log(f"Goaffpro: đã đạt giới hạn {brand_cap} brand/lần lọc, dừng tải.")
+            break
         try:
             total_n = int(body.get("count")) if body.get("count") is not None else None
         except Exception:
@@ -494,6 +526,11 @@ def fetch_offers_refersion(filters: dict) -> list:
         or str(core.DEFAULT_REFERSION_PAGE_DELAY_MS)
     )
 
+    brand_cap = core.net_sources_max_brands_per_run()
+    filters["_net_fetch_start_page"] = start_page
+    filters["_net_fetch_end_page"] = start_page
+    STATE.add_log(f"Refersion: giới hạn tối đa {brand_cap} brand mỗi lần lọc (trước Apify).")
+
     raw_offers = []
     page = start_page
     while True:
@@ -504,14 +541,23 @@ def fetch_offers_refersion(filters: dict) -> list:
         STATE.add_log(f"Refersion trang {page}: đang tải...")
         body = core.fetch_refersion_page(base_url, page)
         payload = body.get("data") or {}
-        offers = payload.get("offers") or []
-        if not isinstance(offers, list):
-            offers = []
-        if not offers:
+        page_offers = payload.get("offers") or []
+        if not isinstance(page_offers, list):
+            page_offers = []
+        if not page_offers:
             STATE.add_log(f"Refersion trang {page}: hết dữ liệu, dừng phân trang.")
             break
-        raw_offers.extend(offers)
-        STATE.add_log(f"Refersion trang {page}: +{len(offers)} offer (tổng {len(raw_offers)})")
+        room = brand_cap - len(raw_offers)
+        if room <= 0:
+            break
+        if len(page_offers) > room:
+            page_offers = page_offers[:room]
+        raw_offers.extend(page_offers)
+        filters["_net_fetch_end_page"] = page
+        STATE.add_log(f"Refersion trang {page}: +{len(page_offers)} offer (tổng {len(raw_offers)})")
+        if len(raw_offers) >= brand_cap:
+            STATE.add_log(f"Refersion: đã đạt giới hạn {brand_cap} brand/lần lọc, dừng tải.")
+            break
         try:
             total_n = int(payload.get("total_results")) if payload.get("total_results") is not None else None
         except Exception:
@@ -837,6 +883,16 @@ def run_pipeline(settings: dict, min_traffic: int, filters: dict, source: str = 
         else ("refersion" if src == "refersion" else ("collabs" if src == "collabs" else "uppromote"))
     )
     export_start_page, export_end_page = _resolve_export_page_range(filters, src)
+    if src in ("uppromote", "goaffpro", "refersion"):
+        try:
+            fs = filters.get("_net_fetch_start_page")
+            fe = filters.get("_net_fetch_end_page")
+            if fs is not None and fe is not None:
+                fs_i, fe_i = int(fs), int(fe)
+                if fe_i >= fs_i:
+                    export_start_page, export_end_page = fs_i, fe_i
+        except (TypeError, ValueError):
+            pass
     now = datetime.now()
     date_part = f"{now.day}-{now.month}-{now.year}"
     time_part = f"{now.hour}-{now.minute:02d}"
@@ -1587,6 +1643,13 @@ def _normalize_account_mode(raw) -> str:
     return "single"
 
 
+def _normalize_multi_apply_flow(raw) -> str:
+    s = str(raw or "").strip().lower()
+    if s in ("handoff_on_limit", "handoff", "limit_handoff", "switch_on_limit"):
+        return "handoff_on_limit"
+    return "replay_all_accounts"
+
+
 def _normalize_collabs_account_indices_list(raw_list) -> tuple[list[int], str]:
     """Giữ thứ tự, bỏ trùng; mỗi phần tử 1..EDGE_CDP_ACCOUNT_MAX."""
     if not isinstance(raw_list, list):
@@ -2053,6 +2116,7 @@ def _sequential_multi_apply_worker(
     login_first: bool,
     file_name: str,
     started_local: datetime,
+    multi_apply_flow: str = "replay_all_accounts",
 ) -> None:
     """
     Đa tài khoản lần lượt: mỗi slot chạy lại toàn bộ danh sách link (cùng file brand),
@@ -2066,17 +2130,25 @@ def _sequential_multi_apply_worker(
     attempted_items: list[dict] = []
     per_slot: list[dict] = []
     L = len(links)
+    flow_mode = _normalize_multi_apply_flow(multi_apply_flow)
     try:
-        st.add_log(
-            f"Đa tài khoản (lần lượt): {n} phiên Edge — mỗi tài khoản apply lại cả {L} link trong file."
-        )
+        if flow_mode == "handoff_on_limit":
+            st.add_log(
+                f"Đa tài khoản (handoff khi limit): tối đa {n} phiên Edge — "
+                "mỗi tài khoản tiếp quản phần brand còn lại nếu tài khoản trước chạm limit cộng đồng."
+            )
+        else:
+            st.add_log(
+                f"Đa tài khoản (lần lượt): {n} phiên Edge — mỗi tài khoản apply lại cả {L} link trong file."
+            )
+        remaining_links = list(links)
         for i, slot in enumerate(slots):
             if st.stop_event.is_set():
                 st.add_log("Đã nhận lệnh hủy — dừng trước khi sang tài khoản kế.")
                 break
-            if L == 0:
+            if not remaining_links:
                 break
-            sub_links = list(links)
+            sub_links = list(remaining_links) if flow_mode == "handoff_on_limit" else list(links)
             cdp = str(slot.get("cdp_url") or "").strip()
             _, port = cdp_url_host_port(cdp)
             udir = str(slot.get("edge_user_data_dir") or "").strip() or default_user_data_dir_for_port(port)
@@ -2086,28 +2158,38 @@ def _sequential_multi_apply_worker(
                 profile_override=slot.get("profile_override"),
             )
             st.add_log(
-                f"=== Tài khoản {i + 1}/{n} — CDP {cdp} — {L} link (lặp lại cả danh sách) — "
+                f"=== Tài khoản {i + 1}/{n} — CDP {cdp} — {len(sub_links)} link "
+                f"({'handoff còn lại' if flow_mode == 'handoff_on_limit' else 'lặp lại cả danh sách'}) — "
                 "nếu chưa login Collabs, hãy đăng nhập trong cửa sổ Edge vừa mở ==="
             )
-            st.add_log("Đang kiểm tra/mở Edge CDP…")
             host, p = cdp_url_host_port(cdp)
-            ensure_edge_cdp_running(
-                port=p,
-                user_data_dir=udir,
-                edge_exe=_EDGE_EXE_AUTO,
-                log=st.add_log,
-                host=host,
-            )
-            st.add_log(f"Bắt đầu Auto Apply cho tài khoản {i + 1}/{n}…")
-            result = auto_apply_core.run_auto_apply(
-                links=sub_links,
-                profile=prof,
-                auto_submit=auto_submit,
-                cdp_url=cdp,
-                login_first=login_first,
-                should_stop=lambda: st.stop_event.is_set(),
-                log=st.add_log,
-            )
+            result = {}
+            try:
+                st.add_log("Đang kiểm tra/mở Edge CDP…")
+                ensure_edge_cdp_running(
+                    port=p,
+                    user_data_dir=udir,
+                    edge_exe=_EDGE_EXE_AUTO,
+                    log=st.add_log,
+                    host=host,
+                )
+                st.add_log(f"Bắt đầu Auto Apply cho tài khoản {i + 1}/{n}…")
+                result = auto_apply_core.run_auto_apply(
+                    links=sub_links,
+                    profile=prof,
+                    auto_submit=auto_submit,
+                    cdp_url=cdp,
+                    login_first=login_first,
+                    should_stop=lambda: st.stop_event.is_set(),
+                    log=st.add_log,
+                    stop_on_limit_exceeded=(flow_mode == "handoff_on_limit"),
+                )
+            finally:
+                # Rule: chạy xong account nào thì đóng browser account đó ngay.
+                try:
+                    stop_edge_cdp_browser(port=p, host=host, log=st.add_log)
+                except Exception:
+                    pass
             if not isinstance(result, dict):
                 result = {}
             fi = int(result.get("filled") or 0)
@@ -2130,8 +2212,24 @@ def _sequential_multi_apply_worker(
                     "filled": fi,
                     "submitted": su,
                     "skipped": False,
+                    "limit_exceeded": bool(result.get("limit_exceeded")),
                 }
             )
+            if flow_mode == "handoff_on_limit":
+                if bool(result.get("limit_exceeded")):
+                    try:
+                        idx = int(result.get("limit_exceeded_link_index"))
+                    except Exception:
+                        idx = -1
+                    if idx < 0 or idx >= len(sub_links):
+                        idx = len(sub_links) - 1
+                    remaining_links = sub_links[idx:]
+                    st.add_log(
+                        f"--- TK {i + 1} chạm limit cộng đồng. Chuyển {len(remaining_links)} brand còn lại cho tài khoản kế tiếp. ---"
+                    )
+                else:
+                    remaining_links = []
+                    st.add_log("--- TK hiện tại xử lý hết danh sách mà không chạm limit. Không cần chuyển tài khoản kế. ---")
             st.add_log(f"--- Xong tài khoản {i + 1}/{n}: đã điền {fi}, đã submit {su} ---")
         merged = {
             "total": L,
@@ -2142,6 +2240,7 @@ def _sequential_multi_apply_worker(
             "attempted_items": attempted_items,
             "sequential_multi": True,
             "accounts": n,
+            "multi_apply_flow": flow_mode,
             "per_slot": per_slot,
             "batch_id": str(st.batch_id or ""),
         }
@@ -2202,6 +2301,12 @@ def _auto_apply_worker(
             st.status = "Error"
         st.add_log(f"LỖI: {exc}")
     finally:
+        # Rule: single account chạy xong thì tắt browser CDP của account đó.
+        try:
+            host, port = cdp_url_host_port(cdp_url)
+            stop_edge_cdp_browser(port=port, host=host, log=st.add_log)
+        except Exception:
+            pass
         with st.lock:
             st.running = False
 
@@ -2265,6 +2370,7 @@ def api_auto_apply_start():
     payload_cdp = str(payload.get("cdp_url") or "").strip() or DEFAULT_CDP
 
     parallel_link_split = _normalize_parallel_link_split(payload.get("parallel_link_split"))
+    multi_apply_flow = _normalize_multi_apply_flow(payload.get("multi_apply_flow"))
     explicit_account_mode = "account_mode" in payload
     account_mode = _normalize_account_mode(payload.get("account_mode"))
     multi_parallel = bool(payload.get("multi_parallel"))
@@ -2368,6 +2474,7 @@ def api_auto_apply_start():
                     "login_first": login_first,
                     "file_name": safe_name,
                     "started_local": datetime.now(),
+                    "multi_apply_flow": multi_apply_flow,
                 },
                 daemon=True,
             )
@@ -2382,6 +2489,7 @@ def api_auto_apply_start():
                     "batch_id": st.batch_id,
                     "account_mode": "multi",
                     "multi_parallel": False,
+                    "multi_apply_flow": multi_apply_flow,
                 }
             )
 

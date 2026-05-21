@@ -8,12 +8,51 @@ use App\Models\LicenseActivation;
 use App\Models\LicenseKey;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Carbon;
 use Illuminate\View\View;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class LicenseManagementController extends Controller
 {
+    private const ADMIN_TABS = [
+        'tab-refersion',
+        'tab-quick-key',
+        'tab-activations',
+        'tab-keys',
+    ];
+
+    private function resolveActiveTab(Request $request): string
+    {
+        $tab = trim((string) $request->query('tab', 'tab-refersion'));
+        if (! in_array($tab, self::ADMIN_TABS, true)) {
+            return 'tab-refersion';
+        }
+
+        return $tab;
+    }
+
+    /** Redirect về dashboard, giữ tab + bộ lọc/phân trang hiện tại. */
+    private function redirectToDashboard(Request $request, string $defaultTab = 'tab-refersion'): RedirectResponse
+    {
+        $tab = trim((string) $request->input('tab', $defaultTab));
+        if (! in_array($tab, self::ADMIN_TABS, true)) {
+            $tab = $defaultTab;
+        }
+
+        $query = array_filter([
+            'tab' => $tab,
+            'keys_q' => $request->input('keys_q'),
+            'activation_q' => $request->input('activation_q'),
+            'keys_page' => $request->input('keys_page'),
+            'activations_page' => $request->input('activations_page'),
+        ], static fn ($v) => $v !== null && $v !== '');
+
+        return redirect()->route('admin.dashboard', $query);
+    }
+
     public function dashboard(): View
     {
+        $activeTab = $this->resolveActiveTab(request());
         $todayVn = now('Asia/Ho_Chi_Minh')->toDateString();
         $keysQ = trim((string) request('keys_q', ''));
         $keysQuery = LicenseKey::query()
@@ -30,7 +69,8 @@ class LicenseManagementController extends Controller
             });
         }
 
-        $keys = $keysQuery->paginate(20, ['*'], 'keys_page')->withQueryString();
+        $keys = $keysQuery->paginate(20, ['*'], 'keys_page')
+            ->appends(request()->only(['tab', 'activation_q']));
 
         $activationQ = trim((string) request('activation_q', ''));
         $activationsQuery = LicenseActivation::query()
@@ -51,9 +91,11 @@ class LicenseManagementController extends Controller
             });
         }
 
-        $activations = $activationsQuery->paginate(20, ['*'], 'activations_page')->withQueryString();
+        $activations = $activationsQuery->paginate(20, ['*'], 'activations_page')
+            ->appends(request()->only(['tab', 'keys_q']));
 
         return view('admin.dashboard', [
+            'activeTab' => $activeTab,
             'keys' => $keys,
             'activations' => $activations,
             'usageDayVn' => $todayVn,
@@ -74,7 +116,7 @@ class LicenseManagementController extends Controller
             ['value' => $token]
         );
 
-        return back()->with('success', 'Đã cập nhật Refersion token.');
+        return $this->redirectToDashboard($request, 'tab-refersion')->with('success', 'Đã cập nhật Refersion token.');
     }
 
     public function storeKey(Request $request): RedirectResponse
@@ -102,7 +144,7 @@ class LicenseManagementController extends Controller
         $model->notes = $data['notes'] ?? null;
         $model->save();
 
-        return back()->with('success', 'Đã lưu key.');
+        return $this->redirectToDashboard($request, 'tab-quick-key')->with('success', 'Đã lưu key.');
     }
 
     public function bulkImport(Request $request): RedirectResponse
@@ -144,7 +186,7 @@ class LicenseManagementController extends Controller
             }
         }
 
-        return back()->with('success', "Import xong. Created={$created}, Updated={$updated}");
+        return $this->redirectToDashboard($request, 'tab-quick-key')->with('success', "Import xong. Created={$created}, Updated={$updated}");
     }
 
     public function updateKey(Request $request, int $id): RedirectResponse
@@ -170,7 +212,70 @@ class LicenseManagementController extends Controller
         $key->notes = $data['notes'] ?? null;
         $key->save();
 
-        return back()->with('success', 'Đã cập nhật key.');
+        return $this->redirectToDashboard($request, 'tab-keys')->with('success', 'Đã cập nhật key.');
+    }
+
+    public function exportKeys(): StreamedResponse
+    {
+        $filename = now('Asia/Ho_Chi_Minh')->format('Y-m-d').'.csv';
+
+        return response()->streamDownload(function (): void {
+            $handle = fopen('php://output', 'wb');
+            if ($handle === false) {
+                return;
+            }
+
+            fwrite($handle, "\xEF\xBB\xBF");
+
+            fputcsv($handle, [
+                'ID',
+                'Key bản quyền',
+                'Key hint',
+                'Trạng thái',
+                'Máy đang active',
+                'Record/ngày',
+                'Số máy max',
+                'Net được phép',
+                'Auto Apply Collabs',
+                'Hạn dùng',
+                'Ghi chú',
+                'Ngày tạo',
+                'Cập nhật lúc',
+            ]);
+
+            LicenseKey::query()
+                ->withCount(['activations as active_activations_count' => function ($query): void {
+                    $query->whereNull('deactivated_at');
+                }])
+                ->orderByDesc('id')
+                ->chunk(200, function ($keys) use ($handle): void {
+                    foreach ($keys as $key) {
+                        $expiresAt = $key->expires_at instanceof Carbon
+                            ? $key->expires_at->timezone('Asia/Ho_Chi_Minh')->format('Y-m-d H:i:s')
+                            : '';
+
+                        fputcsv($handle, [
+                            $key->id,
+                            $key->license_key,
+                            $key->key_hint ?? '',
+                            $key->status,
+                            (int) ($key->active_activations_count ?? 0),
+                            $key->daily_limit ?? '',
+                            $key->max_machines ?? '',
+                            implode(', ', $key->normalizedAllowedSources()),
+                            $key->allow_auto_apply_collabs ? 'Bật' : 'Tắt',
+                            $expiresAt,
+                            $key->notes ?? '',
+                            $key->created_at?->timezone('Asia/Ho_Chi_Minh')->format('Y-m-d H:i:s') ?? '',
+                            $key->updated_at?->timezone('Asia/Ho_Chi_Minh')->format('Y-m-d H:i:s') ?? '',
+                        ]);
+                    }
+                });
+
+            fclose($handle);
+        }, $filename, [
+            'Content-Type' => 'text/csv; charset=UTF-8',
+        ]);
     }
 
     public function deleteKey(Request $request, int $id): RedirectResponse
@@ -179,7 +284,7 @@ class LicenseManagementController extends Controller
         $keyText = (string) $key->license_key;
         $key->delete();
 
-        return back()->with('success', "Đã xóa key {$keyText}.");
+        return $this->redirectToDashboard($request, 'tab-keys')->with('success', "Đã xóa key {$keyText}.");
     }
 
     public function revokeActivation(Request $request, int $id): RedirectResponse
@@ -190,6 +295,6 @@ class LicenseManagementController extends Controller
             $activation->last_seen_at = now();
             $activation->save();
         }
-        return back()->with('success', 'Đã thu hồi activation.');
+        return $this->redirectToDashboard($request, 'tab-activations')->with('success', 'Đã thu hồi activation.');
     }
 }

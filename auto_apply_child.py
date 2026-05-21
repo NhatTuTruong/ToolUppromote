@@ -5,7 +5,7 @@ Worker chạy trong subprocess (Windows spawn): một CDP + một profile + danh
 from __future__ import annotations
 
 import auto_apply as auto_apply_core
-from edge_cdp import cdp_url_host_port, default_user_data_dir_for_port, ensure_edge_cdp_running
+from edge_cdp import cdp_url_host_port, default_user_data_dir_for_port, ensure_edge_cdp_running, stop_edge_cdp_browser
 
 
 def _default_edge_exe() -> str | None:
@@ -63,5 +63,11 @@ def run_auto_apply_in_subprocess(
     except Exception as exc:
         try:
             result_queue.put({"job_id": job_id, "ok": False, "error": str(exc)})
+        except Exception:
+            pass
+    finally:
+        # Rule: slot nào chạy xong thì đóng browser slot đó.
+        try:
+            stop_edge_cdp_browser(port=port, host=host, log=_log)
         except Exception:
             pass

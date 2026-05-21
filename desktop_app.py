@@ -1,5 +1,9 @@
-import shutil
 import multiprocessing
+
+# Phải gọi trước khi import webapp (dùng multiprocessing) — bắt buộc khi đóng gói PyInstaller.
+multiprocessing.freeze_support()
+
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -83,5 +87,4 @@ def main():
 
 
 if __name__ == "__main__":
-    multiprocessing.freeze_support()
     main()

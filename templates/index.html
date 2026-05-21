@@ -12,11 +12,13 @@
     body.license-loading .tab-btn[data-tab="runRefersionTab"],
     body.license-loading .tab-btn[data-tab="runCollabsTab"],
     body.license-loading .tab-btn[data-tab="autoCollabsTab"],
+    body.license-loading .tab-btn[data-tab="resultsTab"],
     body.license-loading #runUppromoteTab,
     body.license-loading #runGoaffproTab,
     body.license-loading #runRefersionTab,
     body.license-loading #runCollabsTab,
-    body.license-loading #autoCollabsTab {
+    body.license-loading #autoCollabsTab,
+    body.license-loading #resultsTab {
       display: none !important;
     }
   </style>
@@ -488,6 +490,12 @@
             </select>
           </label>
           <div id="aa_multi_count_wrap" class="hidden" style="margin-top:10px;">
+            <label>Luồng apply đa tài khoản
+              <select id="aa_multi_apply_flow">
+                <option value="replay_all_accounts">Mỗi tài khoản apply lại toàn bộ danh sách brand</option>
+                <option value="handoff_on_limit">Khi tài khoản chạm limit thì chuyển sang tài khoản tiếp theo</option>
+              </select>
+            </label>
             <label>Tài khoản / trình duyệt
               <input
                 id="aa_multi_account_count"
@@ -500,8 +508,7 @@
               />
             </label>
             <span class="form-field-caption"
-              >Dải liên tục: <code>1-5</code> (TK1…TK5). Danh sách rời: <code>1,4,7</code> (đúng các TK đó). Hoặc số
-              <code>2</code>…<code>10</code> = tài khoản 1 đến n như trước. Mỗi TK lần lượt chạy lại toàn bộ brand; mở Edge đúng cổng CDP; chưa login Collabs thì đăng nhập xong tool mới chạy tiếp.</span>
+              >Dải liên tục: <code>1-5</code> (TK1 đến TK5). Danh sách rời: <code>1,4,7</code> (TK1, TK4, TK7).</span>
             <label>Thông tin theo tài khoản (tuỳ chọn)
               <textarea
                 id="aa_multi_account_emails"

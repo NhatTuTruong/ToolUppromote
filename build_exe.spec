@@ -20,6 +20,14 @@ hiddenimports = [
     "runtime_paths",
     "edge_cdp",
     "auto_apply_child",
+    # multiprocessing (Auto Apply song song) — thiếu submodule gây lỗi synchronize khi chạy .exe
+    "multiprocessing.synchronize",
+    "multiprocessing.heap",
+    "multiprocessing.pool",
+    "multiprocessing.popen_spawn_win32",
+    "multiprocessing.spawn",
+    "multiprocessing.util",
+    "multiprocessing.reduction",
 ]
 
 for pkg in ("webview",):

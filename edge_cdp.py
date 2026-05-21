@@ -69,6 +69,101 @@ def _default_edge_paths_windows() -> list[str]:
     return paths
 
 
+def _pids_listening_on_port(port: int) -> list[int]:
+    """Windows: lấy PID đang listen trên TCP port bằng netstat."""
+    if not sys.platform.startswith("win"):
+        return []
+    try:
+        out = subprocess.check_output(
+            ["netstat", "-ano", "-p", "tcp"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+        )
+    except Exception:
+        return []
+    pids: list[int] = []
+    needle = f":{int(port)}"
+    for line in out.splitlines():
+        row = line.strip()
+        if not row:
+            continue
+        parts = row.split()
+        if len(parts) < 5:
+            continue
+        proto = parts[0].lower()
+        local = parts[1]
+        state = parts[3].upper()
+        pid_raw = parts[4]
+        if "tcp" not in proto:
+            continue
+        if needle not in local:
+            continue
+        if state != "LISTENING":
+            continue
+        try:
+            pid = int(pid_raw)
+        except Exception:
+            continue
+        if pid > 0 and pid not in pids:
+            pids.append(pid)
+    return pids
+
+
+def stop_edge_cdp_browser(
+    *,
+    port: int,
+    host: str = "127.0.0.1",
+    log: Optional[Callable[[str], None]] = None,
+    wait_sec: float = 6.0,
+) -> bool:
+    """Đóng browser Edge đang listen CDP port. Trả True nếu port đã đóng."""
+
+    def _log(msg: str) -> None:
+        if log:
+            try:
+                log(str(msg))
+            except Exception:
+                pass
+
+    h = (host or "127.0.0.1").strip() or "127.0.0.1"
+    if not _is_tcp_port_open(h, int(port)):
+        _log(f"CDP {h}:{port} đã tắt sẵn.")
+        return True
+    if not sys.platform.startswith("win"):
+        _log("Nền tảng không phải Windows: bỏ qua auto-close browser CDP.")
+        return False
+
+    pids = _pids_listening_on_port(int(port))
+    if not pids:
+        _log(f"Không tìm thấy PID LISTENING cho {h}:{port}.")
+        return False
+    ok_any = False
+    for pid in pids:
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            ok_any = True
+            _log(f"Đã gửi lệnh tắt Edge PID {pid} (CDP {h}:{port}).")
+        except Exception as exc:
+            _log(f"Lỗi taskkill PID {pid}: {exc}")
+
+    deadline = time.monotonic() + float(max(1.0, wait_sec))
+    while time.monotonic() < deadline:
+        if not _is_tcp_port_open(h, int(port)):
+            _log(f"Đã tắt browser CDP {h}:{port}.")
+            return True
+        time.sleep(0.2)
+    if ok_any:
+        _log(f"Đã gửi lệnh tắt nhưng port {h}:{port} vẫn còn mở.")
+    return False
+
+
 def ensure_edge_cdp_running(
     port: int = 9222,
     user_data_dir: str = r"C:\edge-cdp",

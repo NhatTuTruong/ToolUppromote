@@ -64,6 +64,7 @@ const AUTO_APPLY_DEFAULTS = {
   aa_account_mode: "single",
   aa_multi_account_count: "1-2",
   aa_multi_account_emails: "",
+  aa_multi_apply_flow: "replay_all_accounts",
 };
 const LS_AUTO_APPLY_HISTORY = "aff_auto_apply_history_v1";
 
@@ -415,7 +416,7 @@ const TAB_SOURCE_MAP = {
 
 function normalizeAllowedSourcesFromLicense(lic) {
   const all = ["uppromote", "goaffpro", "refersion", "collabs"];
-  if (!lic || !lic.licensed) return all;
+  if (!lic || !lic.licensed) return [];
   const incoming = Array.isArray(lic.allowed_sources) ? lic.allowed_sources : [];
   const normalized = Array.from(
     new Set(
@@ -428,43 +429,78 @@ function normalizeAllowedSourcesFromLicense(lic) {
 }
 
 function applyLicenseSourceVisibility(lic) {
+  const licensed = !!(lic && lic.licensed);
   const allowed = new Set(normalizeAllowedSourcesFromLicense(lic));
+
+  const setTabVisible = (tabId, visible) => {
+    const show = visible ? "" : "none";
+    const btn = document.querySelector(`.tab-btn[data-tab="${tabId}"]`);
+    const panel = document.getElementById(tabId);
+    if (btn) btn.style.display = show;
+    if (panel) panel.style.display = show;
+  };
+
   document.querySelectorAll(".tab-btn").forEach((btn) => {
-    const source = TAB_SOURCE_MAP[btn.dataset.tab || ""];
-    if (!source) return;
-    const visible = allowed.has(source);
-    btn.style.display = visible ? "" : "none";
+    const tabId = btn.dataset.tab || "";
+    if (tabId === "settingsTab") {
+      btn.style.display = "";
+      return;
+    }
+    if (!licensed) {
+      btn.style.display = "none";
+      return;
+    }
+    const source = TAB_SOURCE_MAP[tabId];
+    if (!source) {
+      btn.style.display = "";
+      return;
+    }
+    btn.style.display = allowed.has(source) ? "" : "none";
   });
+
   document.querySelectorAll(".tab-panel").forEach((panel) => {
-    const source = TAB_SOURCE_MAP[panel.id || ""];
-    if (!source) return;
+    const tabId = panel.id || "";
+    if (tabId === "settingsTab") {
+      panel.style.display = "";
+      return;
+    }
+    if (!licensed) {
+      panel.style.display = "none";
+      return;
+    }
+    const source = TAB_SOURCE_MAP[tabId];
+    if (!source) {
+      panel.style.display = "";
+      return;
+    }
     panel.style.display = allowed.has(source) ? "" : "none";
   });
+
   document.querySelectorAll("[data-settings-source]").forEach((el) => {
     const source = String(el.getAttribute("data-settings-source") || "").trim().toLowerCase();
     if (!source) return;
-    el.style.display = allowed.has(source) ? "" : "none";
+    el.style.display = !licensed || allowed.has(source) ? "" : "none";
   });
 
-  // Nếu server tắt Auto Apply Collabs, ẩn riêng tab Auto Collabs (dù license cho Collabs).
-  // Lý do: tab này chỉ có ý nghĩa khi auto-apply feature bật.
-  try {
-    const enabled = isAutoApplyCollabsEnabled();
-    const autoBtn = document.querySelector('.tab-btn[data-tab="autoCollabsTab"]');
-    const autoPanel = document.getElementById("autoCollabsTab");
-    if (autoBtn) autoBtn.style.display = enabled ? "" : "none";
-    if (autoPanel) autoPanel.style.display = enabled ? "" : "none";
-  } catch (_) {
-    /* ignore */
+  if (licensed) {
+    try {
+      const enabled = isAutoApplyCollabsEnabled();
+      setTabVisible("autoCollabsTab", enabled && allowed.has("collabs"));
+    } catch (_) {
+      /* ignore */
+    }
   }
 
   const activeBtn = document.querySelector(".tab-btn.active");
   const activeTab = activeBtn ? activeBtn.dataset.tab : null;
-  const activeBlockedByLicense = activeTab && TAB_SOURCE_MAP[activeTab] && !allowed.has(TAB_SOURCE_MAP[activeTab]);
-  const activeBlockedByFeature = activeTab === "autoCollabsTab" && !isAutoApplyCollabsEnabled();
-  if (activeBlockedByLicense || activeBlockedByFeature) {
-    const fallback = document.querySelector('.tab-btn[data-tab="settingsTab"]');
-    if (fallback) switchTab("settingsTab");
+  const mustGoSettings =
+    !licensed ||
+    (activeTab &&
+      TAB_SOURCE_MAP[activeTab] &&
+      !allowed.has(TAB_SOURCE_MAP[activeTab])) ||
+    (activeTab === "autoCollabsTab" && licensed && !isAutoApplyCollabsEnabled());
+  if (mustGoSettings && activeTab !== "settingsTab") {
+    switchTab("settingsTab");
   }
 }
 
@@ -1060,6 +1096,7 @@ function collectAutoApplyProfile() {
   const accountModeEl = $("aa_account_mode");
   const multiAccountCountEl = $("aa_multi_account_count");
   const multiAccountEmailsEl = $("aa_multi_account_emails");
+  const multiApplyFlowEl = $("aa_multi_apply_flow");
   const btnCancel = $("aa_cancel_btn");
   const btnSave = $("aa_save_btn");
   const btnConfirm = $("aa_confirm_btn");
@@ -1098,6 +1135,7 @@ function collectAutoApplyProfile() {
     !accountModeEl ||
     !multiAccountCountEl ||
     !multiAccountEmailsEl ||
+    !multiApplyFlowEl ||
     !btnCancel ||
     !btnSave ||
     !btnConfirm
@@ -1106,14 +1144,16 @@ function collectAutoApplyProfile() {
     return Promise.resolve(null);
   }
 
-  // Luôn mặc định "1 tài khoản" khi mở popup.
-  accountModeEl.value = "single";
+  // Giữ lựa chọn lần trước: mặc định single nếu chưa có dữ liệu lưu.
+  const savedAccountMode = String(read("aa_account_mode") || "single").trim().toLowerCase();
+  accountModeEl.value = savedAccountMode === "multi" ? "multi" : "single";
   const savedCount =
     read("aa_multi_account_count").trim() ||
     read("aa_multi_browser_count").trim() ||
     "2";
   multiAccountCountEl.value = savedCount;
   multiAccountEmailsEl.value = read("aa_multi_account_emails") || "";
+  multiApplyFlowEl.value = read("aa_multi_apply_flow") || "replay_all_accounts";
   syncAutoApplyAccountModeUI();
   fullNameEl.value = read("aa_full_name");
   emailEl.value = read("aa_email");
@@ -1237,6 +1277,7 @@ function collectAutoApplyProfile() {
       keep("aa_account_mode", String(accountModeEl.value || "single"));
       keep("aa_multi_account_count", String(multiAccountCountEl.value || "2").trim() || "2");
       keep("aa_multi_account_emails", String(multiAccountEmailsEl.value || "").trim());
+      keep("aa_multi_apply_flow", String(multiApplyFlowEl.value || "replay_all_accounts").trim() || "replay_all_accounts");
     };
 
     const onSave = () => {
@@ -1280,6 +1321,7 @@ function collectAutoApplyProfile() {
       let collabs_account_indices = null;
       let multi_account_spec = "";
       let collabs_account_profile_map = {};
+      const multi_apply_flow = String(multiApplyFlowEl.value || "replay_all_accounts").trim() || "replay_all_accounts";
       if (account_mode === "multi") {
         const rawSpec = String(multiAccountCountEl.value || "").trim();
         const parsed = parseCollabsAccountSelection(rawSpec);
@@ -1338,6 +1380,7 @@ function collectAutoApplyProfile() {
         row_start,
         row_end,
         account_mode,
+        multi_apply_flow,
         multi_browser_count,
         collabs_account_indices,
         multi_account_spec,
@@ -1371,6 +1414,7 @@ async function autoApplyFromResultFile(name) {
   };
   if (form.account_mode === "multi") {
     body.multi_browser_count = form.multi_browser_count ?? 2;
+    body.multi_apply_flow = form.multi_apply_flow || "replay_all_accounts";
     if (Array.isArray(form.collabs_account_indices) && form.collabs_account_indices.length >= 2) {
       body.collabs_account_indices = form.collabs_account_indices;
     }
@@ -1657,7 +1701,7 @@ async function loadLicense() {
     const msg = $("licenseMessage");
     if (msg) msg.textContent = "Không đọc được trạng thái bản quyền.";
     // Nếu lỗi gọi server, mở full tab để không khóa người dùng.
-    const fallbackLicense = { licensed: false, allowed_sources: ["uppromote", "goaffpro", "refersion"] };
+    const fallbackLicense = { licensed: false, allowed_sources: [] };
     state.currentLicense = fallbackLicense;
     applyLicenseSourceVisibility(fallbackLicense);
     finishLicenseLoadingState();

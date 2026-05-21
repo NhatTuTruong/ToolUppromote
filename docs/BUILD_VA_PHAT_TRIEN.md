@@ -36,6 +36,12 @@ Quy trình nhanh:
 - Python 3.10+ (khuyến nghị bản ổn định mới nhất trên Windows).
 - Thư mục làm việc: gốc project (cùng cấp với `webapp.py`, `filter.py`).
 
+### Giới hạn Uppromote / Goaffpro / Refersion (mỗi lần lọc)
+
+- Mặc định app chỉ tải tối đa **200 brand** (record API) mỗi lần chạy pipeline cho ba nguồn này, rồi mới chạy Apify — tránh tải không giới hạn.
+- Ghi đè trong `.env` (tuỳ chọn): `UPPROMOTE_GOAFFPRO_REFERSION_MAX_BRANDS_PER_RUN=200`
+- Tên file Excel `*_pageA-B_*.xlsx` dùng **khoảng trang thực tế đã tải** (A = trang bắt đầu, B = trang cuối cùng có dữ liệu), không chỉ theo ô “trang kết thúc” người dùng nhập khi bị cắt bởi giới hạn 200.
+
 Cài dependency chạy app:
 
 ```bash

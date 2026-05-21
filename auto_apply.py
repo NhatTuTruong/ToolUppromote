@@ -89,6 +89,7 @@ def run_auto_apply(
     should_stop: Callable[[], bool] | None = None,
     log: Callable[[str], None] | None = None,
     brand_timeout_sec: int = 60,
+    stop_on_limit_exceeded: bool = False,
 ) -> dict:
     try:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -129,6 +130,39 @@ def run_auto_apply(
         except Exception:
             return False
         return "collabs.shopify.com" in u
+
+    def _has_community_application_limit_exceeded(page) -> bool:
+        pattern = re.compile(r"community\s+application\s+limit\s+has\s+been\s+exceeded\.?", re.IGNORECASE)
+        for ctx in _contexts(page):
+            try:
+                found_text = str(ctx.evaluate(
+                    """() => {
+                      const parts = [];
+                      const pick = (sel) => {
+                        try {
+                          document.querySelectorAll(sel).forEach((el) => {
+                            const t = (el.innerText || el.textContent || "").trim();
+                            if (t) parts.push(t);
+                          });
+                        } catch (_) {}
+                      };
+                      try {
+                        const bodyText = (document.body?.innerText || document.body?.textContent || "").trim();
+                        if (bodyText) parts.push(bodyText);
+                      } catch (_) {}
+                      pick('[role="alert"]');
+                      pick('[aria-live]');
+                      pick('.Polaris-Banner');
+                      pick('.Polaris-InlineError');
+                      pick('[data-testid*="error"], [data-test*="error"]');
+                      return parts.join("\\n");
+                    }"""
+                ) or "")
+                if found_text and pattern.search(found_text):
+                    return True
+            except Exception:
+                continue
+        return False
 
     def _click_apply_now_only(page) -> bool:
         """
@@ -1690,6 +1724,9 @@ def run_auto_apply(
     submit_count = 0
     submitted_items: list[dict] = []
     attempted_items: list[dict] = []
+    limit_exceeded = False
+    limit_exceeded_link_index = -1
+    stop_account_now = False
 
     def _domain_from_link(raw_link: str) -> str:
         try:
@@ -1880,6 +1917,20 @@ def run_auto_apply(
                     except Exception:
                         pass
                     continue
+                if _has_community_application_limit_exceeded(brand_page):
+                    _log("  - Tài khoản đã chạm giới hạn cộng đồng: Community application limit has been exceeded.")
+                    _record_attempt(p=brand_page, link=link, submitted=False, note="community_application_limit_exceeded")
+                    limit_exceeded = True
+                    limit_exceeded_link_index = i - 1
+                    try:
+                        brand_page.close()
+                    except Exception:
+                        pass
+                    if stop_on_limit_exceeded:
+                        _log("  - Chế độ handoff: dừng tài khoản hiện tại và chuyển brand này cho tài khoản kế.")
+                        stop_account_now = True
+                        break
+                    continue
                 _check_stop("trước khi bắt đầu điền form")
                 brand_page.wait_for_timeout(700)
 
@@ -1907,6 +1958,15 @@ def run_auto_apply(
                             brand_page.close()
                         except Exception:
                             pass
+                        break
+                    if _has_community_application_limit_exceeded(brand_page):
+                        _log("  - Phát hiện limit cộng đồng ngay đầu bước form. Chuyển tài khoản kế tiếp.")
+                        _record_attempt(p=brand_page, link=link, submitted=False, note="community_application_limit_exceeded")
+                        limit_exceeded = True
+                        limit_exceeded_link_index = i - 1
+                        skip_brand = True
+                        if stop_on_limit_exceeded:
+                            stop_account_now = True
                         break
                     _check_stop(f"trong form step {step} ({i}/{total})")
                     try:
@@ -1946,18 +2006,43 @@ def run_auto_apply(
                         sent = True
                         submit_count += 1
                         _log("  - Đã bấm Send application (hoàn thành).")
+                        if _has_community_application_limit_exceeded(brand_page):
+                            _log("  - Sau khi bấm Send, trang báo community limit exceeded.")
+                            limit_exceeded = True
+                            limit_exceeded_link_index = i - 1
+                            if stop_on_limit_exceeded:
+                                stop_account_now = True
                         break
                     if _click_next_if_visible(brand_page):
                         _log("  - Đã bấm Next, sang bước kế.")
+                        if _has_community_application_limit_exceeded(brand_page):
+                            _log("  - Sau khi bấm Next, trang báo community limit exceeded.")
+                            limit_exceeded = True
+                            limit_exceeded_link_index = i - 1
+                            skip_brand = True
+                            if stop_on_limit_exceeded:
+                                stop_account_now = True
+                            break
                         continue
                     # No Next and no Send; try legacy submit when allowed.
                     if auto_submit and _click_submit_fallback(brand_page):
                         _log("  - Đã bấm submit/apply (fallback) nhưng chưa chắc là 'Send application'.")
+                        if _has_community_application_limit_exceeded(brand_page):
+                            _log("  - Sau khi submit fallback, trang báo community limit exceeded.")
+                            limit_exceeded = True
+                            limit_exceeded_link_index = i - 1
+                            skip_brand = True
+                            if stop_on_limit_exceeded:
+                                stop_account_now = True
+                            break
                     break
 
                 if timed_out or skip_brand:
                     if timed_out:
                         _record_attempt(p=brand_page, link=link, submitted=False, note="brand_timeout")
+                    if stop_account_now:
+                        _log("  - Kết thúc ngay tài khoản hiện tại do chạm community limit.")
+                        break
                     continue
 
                 if total_filled <= 0:
@@ -2025,6 +2110,15 @@ def run_auto_apply(
                 else:
                     _log("  - Chưa bấm được 'Send application' => GIỮ tab này mở và chuyển sang brand tiếp theo.")
                     _record_attempt(p=brand_page, link=link, submitted=False, note="not_submitted_kept_open")
+                if stop_on_limit_exceeded and _has_community_application_limit_exceeded(brand_page):
+                    _log("  - Đã xuất hiện thông báo giới hạn sau khi xử lý form. Chuyển tài khoản kế từ brand hiện tại.")
+                    limit_exceeded = True
+                    limit_exceeded_link_index = i - 1
+                    stop_account_now = True
+                    break
+                if stop_account_now:
+                    _log("  - Dừng account hiện tại để handoff sang account kế.")
+                    break
             # end for link
         finally:
             try:
@@ -2056,5 +2150,7 @@ def run_auto_apply(
         "submitted": submit_count,
         "submitted_items": submitted_items,
         "attempted_items": attempted_items,
+        "limit_exceeded": bool(limit_exceeded),
+        "limit_exceeded_link_index": int(limit_exceeded_link_index),
     }
 

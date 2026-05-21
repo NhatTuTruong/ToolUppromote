@@ -129,6 +129,25 @@ def collabs_max_pages_cap() -> int | None:
     return n if n > 0 else None
 
 
+# Uppromote / Goaffpro / Refersion: giới hạn số brand (record API) mỗi lần lọc trước khi chạy Apify.
+DEFAULT_NET_SOURCES_MAX_BRANDS_PER_RUN = 200
+
+
+def net_sources_max_brands_per_run() -> int:
+    """
+    Số brand tối đa tải từ API mỗi lần chạy (Uppromote, Goaffpro, Refersion).
+    Ghi đè bằng biến môi trường UPPROMOTE_GOAFFPRO_REFERSION_MAX_BRANDS_PER_RUN (số nguyên dương).
+    """
+    raw = (os.getenv("UPPROMOTE_GOAFFPRO_REFERSION_MAX_BRANDS_PER_RUN") or "").strip()
+    if not raw:
+        return int(DEFAULT_NET_SOURCES_MAX_BRANDS_PER_RUN)
+    try:
+        n = int(raw)
+    except ValueError:
+        return int(DEFAULT_NET_SOURCES_MAX_BRANDS_PER_RUN)
+    return max(1, min(5000, n))
+
+
 def _unescape_dotenv_double_quoted(inner: str) -> str:
     out: list[str] = []
     i = 0
@@ -2828,6 +2847,7 @@ def fetch_all_goaffpro_offers() -> list:
         or str(DEFAULT_GOAFFPRO_PAGE_DELAY_MS)
     )
 
+    brand_cap = net_sources_max_brands_per_run()
     all_stores = []
     page = 1
     while True:
@@ -2842,8 +2862,16 @@ def fetch_all_goaffpro_offers() -> list:
             print(f"Goaffpro: không còn store — kết thúc phân trang.")
             break
 
+        room = brand_cap - len(all_stores)
+        if room <= 0:
+            break
+        if len(page_items) > room:
+            page_items = page_items[:room]
         all_stores.extend(page_items)
         print(f"Goaffpro: +{len(page_items)} store (lũy kế {len(all_stores)})")
+        if len(all_stores) >= brand_cap:
+            print(f"Goaffpro: đạt giới hạn {brand_cap} brand/lần lọc.")
+            break
 
         if max_pages_cap is not None and page >= max_pages_cap:
             print(f"Goaffpro: dừng vì GOAFFPRO_MAX_PAGES={max_pages_cap}")
@@ -2877,6 +2905,7 @@ def fetch_all_refersion_offers() -> list:
         os.getenv("REFERSION_PAGE_DELAY_MS", str(DEFAULT_REFERSION_PAGE_DELAY_MS))
         or str(DEFAULT_REFERSION_PAGE_DELAY_MS)
     )
+    brand_cap = net_sources_max_brands_per_run()
     all_offers = []
     page = 1
     while True:
@@ -2889,8 +2918,16 @@ def fetch_all_refersion_offers() -> list:
         if not page_items:
             print("Refersion: không còn offer — kết thúc phân trang.")
             break
+        room = brand_cap - len(all_offers)
+        if room <= 0:
+            break
+        if len(page_items) > room:
+            page_items = page_items[:room]
         all_offers.extend(page_items)
         print(f"Refersion: +{len(page_items)} offer (lũy kế {len(all_offers)})")
+        if len(all_offers) >= brand_cap:
+            print(f"Refersion: đạt giới hạn {brand_cap} brand/lần lọc.")
+            break
         if max_pages_cap is not None and page >= max_pages_cap:
             print(f"Refersion: dừng vì REFERSION_MAX_PAGES={max_pages_cap}")
             break
@@ -2970,6 +3007,7 @@ def fetch_all_uppromote_offers() -> list:
     max_pages_cap = uppromote_max_pages_cap()
     delay_ms = int(os.getenv("UPPROMOTE_PAGE_DELAY_MS", str(DEFAULT_UPPROMOTE_PAGE_DELAY_MS)) or str(DEFAULT_UPPROMOTE_PAGE_DELAY_MS))
 
+    brand_cap = net_sources_max_brands_per_run()
     all_offers = []
     page = 1
     while True:
@@ -2984,8 +3022,16 @@ def fetch_all_uppromote_offers() -> list:
             print(f"Uppromote: trang {page} không còn offer — kết thúc phân trang.")
             break
 
+        room = brand_cap - len(all_offers)
+        if room <= 0:
+            break
+        if len(page_items) > room:
+            page_items = page_items[:room]
         all_offers.extend(page_items)
         print(f"Uppromote: +{len(page_items)} offer (lũy kế {len(all_offers)})")
+        if len(all_offers) >= brand_cap:
+            print(f"Uppromote: đạt giới hạn {brand_cap} brand/lần lọc.")
+            break
 
         if max_pages_cap is not None and page >= max_pages_cap:
             print(f"Uppromote: dừng vì UPPROMOTE_MAX_PAGES={max_pages_cap}")

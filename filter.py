@@ -2709,6 +2709,25 @@ def build_collabs_csv_row(offer: dict, item: dict, status: str) -> list:
     ]
 
 
+# Ký tự điều khiển (Apify/Similarweb đôi khi trả về) — openpyxl từ chối ghi Excel.
+_ILLEGAL_EXCEL_CELL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def sanitize_excel_cell(value):
+    """Loại ký tự không hợp lệ với .xlsx; tránh IllegalCharacterError khi ghi ô."""
+    if value is None:
+        return ""
+    if isinstance(value, (int, float, bool)):
+        return value
+    s = str(value)
+    if not s.strip() and s != "0":
+        return ""
+    s = _ILLEGAL_EXCEL_CELL_RE.sub("", s)
+    if len(s) > 32767:
+        s = s[:32767]
+    return s
+
+
 def write_xlsx_highlight_status(path: Path, header: list, rows: list, status_col: int = 0) -> None:
     """Ghi file Excel: dòng có trạng thái ĐẠT (hoặc GET) được tô nền xanh lá nhạt."""
     from openpyxl import Workbook
@@ -2716,8 +2735,8 @@ def write_xlsx_highlight_status(path: Path, header: list, rows: list, status_col
 
     wb = Workbook()
     ws = wb.active
-    ws.append(list(header))
-    header_list = list(header)
+    ws.append([sanitize_excel_cell(v) for v in header])
+    header_list = [sanitize_excel_cell(v) for v in header]
     hyperlink_columns = {
         i + 1
         for i, name in enumerate(header_list)
@@ -2729,10 +2748,12 @@ def write_xlsx_highlight_status(path: Path, header: list, rows: list, status_col
         ws.cell(row=1, column=c).fill = header_fill
     ok_values = {STATUS_TRAFFIC_OK, "GET", "ĐẠT"}
     for row in rows:
-        cells = [
-            ("N/A" if (v is None or (isinstance(v, str) and not v.strip())) else v)
-            for v in list(row)
-        ]
+        cells = []
+        for v in list(row):
+            if v is None or (isinstance(v, str) and not str(v).strip()):
+                cells.append("N/A")
+            else:
+                cells.append(sanitize_excel_cell(v))
         ws.append(cells)
         r = ws.max_row
         for c in hyperlink_columns:

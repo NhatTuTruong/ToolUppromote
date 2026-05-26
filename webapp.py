@@ -921,7 +921,14 @@ def run_pipeline(settings: dict, min_traffic: int, filters: dict, source: str = 
         try:
             core.write_xlsx_highlight_status(xlsx_path, header, exported_rows, status_col=0)
         except Exception as exc:
-            STATE.add_log(f"Không ghi được Excel (cần openpyxl): {exc}")
+            msg = str(exc)
+            if "cannot be used in worksheets" in msg or type(exc).__name__ == "IllegalCharacterError":
+                STATE.add_log(
+                    "Không ghi được Excel: dữ liệu Similarweb/Apify có ký tự ẩn không hợp lệ "
+                    f"(thường ở cột Top từ khóa). Đã thử lọc — nếu vẫn lỗi: {exc}"
+                )
+            else:
+                STATE.add_log(f"Không ghi được Excel: {exc}")
             return False
         with STATE.lock:
             STATE.output_file = str(xlsx_path)

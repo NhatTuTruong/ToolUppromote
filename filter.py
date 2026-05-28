@@ -578,6 +578,34 @@ COLLABS_BRAND_PROFILE_QUERY = (
     "}"
 )
 
+COLLABS_PRODUCTS_QUERY = (
+    "query ProductsQuery($searchParams: ProductsSearchInput!, $first: Int, $last: Int, "
+    "$after: String, $before: String, $seed: String!) {"
+    " socialAccounts { id __typename }"
+    " products("
+    "   searchParams: $searchParams"
+    "   first: $first"
+    "   last: $last"
+    "   after: $after"
+    "   before: $before"
+    "   seed: $seed"
+    " ) {"
+    "   nodes {"
+    "     id"
+    "     url"
+    "     minPrice { amount currency __typename }"
+    "     maxPrice { amount currency __typename }"
+    "     affiliateProduct { id saved active url __typename }"
+    "     shopifyStore { name shopifyStoreId __typename }"
+    "     __typename"
+    "   }"
+    "   totalCount"
+    "   pageInfo { hasNextPage hasPreviousPage endCursor startCursor __typename }"
+    "   __typename"
+    " }"
+    "}"
+)
+
 COLLABS_CATEGORY_LABELS = {
     "CLOTHING_AND_ACCESSORIES": "Clothing and accessories",
     "WOMENS_CLOTHING": "Women's clothing and accessories",
@@ -1021,6 +1049,7 @@ def map_collabs_brand(node: dict, detail_brand: dict | None = None) -> dict:
     return {
         "brand": name,
         "url": _collabs_brand_url(node, detail_brand),
+        "product_link": "",
         "offer": offer,
         "cookieDays": "",
         "client_url": "",
@@ -2649,6 +2678,7 @@ COLLABS_CSV_HEADER = [
     "Thương hiệu",
     "Website",
     "Link Apply",
+    "Link product",
     "Hoa hồng mạng lưới",
     "Thời gian giữ đơn",
     "Danh mục",
@@ -2771,6 +2801,7 @@ def build_collabs_csv_row(offer: dict, item: dict, status: str) -> list:
     visits_display = visits_formatted_from_engagement(eng)
     website = str(offer.get("url", "") or "").strip()
     apply_url = str(offer.get("client_url", "") or "").strip()
+    product_links = str(offer.get("product_link", "") or "").strip()
     if not apply_url and website:
         p = urlparse(website if "://" in website else f"https://{website}")
         if p.netloc:
@@ -2781,6 +2812,7 @@ def build_collabs_csv_row(offer: dict, item: dict, status: str) -> list:
         offer.get("brand", ""),
         website,
         apply_url,
+        product_links,
         offer.get("offer", ""),
         format_collabs_holding_period(offer.get("collabs_holding_period", "")),
         offer.get("category", ""),
@@ -3104,6 +3136,7 @@ def fetch_all_collabs_brands_nodes(
 def fetch_collabs_cursor_brand_ids(
     base_url: str,
     product_categories: list | None = None,
+    search_query: str | None = None,
     delay_ms: int = 0,
     should_stop: Callable[[], bool] | None = None,
 ) -> set[str]:
@@ -3114,7 +3147,11 @@ def fetch_collabs_cursor_brand_ids(
         if should_stop and should_stop():
             break
         body = fetch_collabs_page(
-            base_url, DEFAULT_COLLABS_LIMIT, after=after, product_categories=product_categories
+            base_url,
+            DEFAULT_COLLABS_LIMIT,
+            after=after,
+            product_categories=product_categories,
+            search_query=search_query,
         )
         search = _collabs_brands_search(body)
         nodes = search.get("nodes") or []
@@ -3141,6 +3178,7 @@ def _iter_collabs_shard_brands(
     product_categories: list | None,
     exclude_ids: set[str],
     *,
+    search_query_base: str = "",
     delay_ms: int = 0,
     should_stop: Callable[[], bool] | None = None,
     max_pages_per_prefix: int | None = None,
@@ -3149,6 +3187,7 @@ def _iter_collabs_shard_brands(
     exclude = exclude_ids or set()
     seen: set[str] = set()
     page_cap = max_pages_per_prefix if max_pages_per_prefix is not None else COLLABS_SHARD_MAX_PAGES
+    base_q = str(search_query_base or "").strip()
     for prefix in COLLABS_SHARD_ALPHABET:
         if should_stop and should_stop():
             return
@@ -3162,7 +3201,7 @@ def _iter_collabs_shard_brands(
                 DEFAULT_COLLABS_LIMIT,
                 after=after,
                 product_categories=product_categories,
-                search_query=prefix or None,
+                search_query=((f"{base_q} {prefix}".strip()) if base_q else (prefix or None)),
             )
             search = _collabs_brands_search(body)
             nodes = search.get("nodes") or []
@@ -3193,6 +3232,7 @@ def fetch_collabs_brands_shard_paginated(
     product_categories: list | None,
     exclude_ids: set[str],
     max_count: int,
+    search_query_base: str = "",
     skip_count: int = 0,
     delay_ms: int = 0,
     should_stop: Callable[[], bool] | None = None,
@@ -3224,6 +3264,7 @@ def fetch_collabs_brands_shard_paginated(
         base_url,
         product_categories,
         exclude_ids,
+        search_query_base=search_query_base,
         delay_ms=delay_ms,
         should_stop=should_stop,
     ):
@@ -3246,6 +3287,7 @@ def fetch_collabs_brands_shard_fill(
     product_categories: list | None,
     exclude_ids: set[str],
     max_count: int,
+    search_query_base: str = "",
     delay_ms: int = 0,
     should_stop: Callable[[], bool] | None = None,
     log_fn: Callable[[str], None] | None = None,
@@ -3257,6 +3299,7 @@ def fetch_collabs_brands_shard_fill(
         product_categories,
         exclude_ids,
         max_count=max_count,
+        search_query_base=search_query_base,
         skip_count=skip_count,
         delay_ms=delay_ms,
         should_stop=should_stop,
@@ -3287,6 +3330,249 @@ def fetch_collabs_brand_profile(base_url: str, shopify_store_gid: str) -> dict:
         raise RuntimeError(f"Collabs detail GraphQL lỗi: {json.dumps(body.get('errors'), ensure_ascii=False)[:300]}")
     data = body.get("data") if isinstance(body, dict) else {}
     return data if isinstance(data, dict) else {}
+
+
+def _money_to_float(v) -> float:
+    try:
+        return float(str(v or "").strip())
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _build_product_entry(url: str, min_amount, max_amount, currency: str = "") -> dict:
+    u = str(url or "").strip()
+    if not u:
+        return {}
+    mn = _money_to_float(min_amount)
+    mx = _money_to_float(max_amount)
+    avg = (mn + mx) / 2.0 if (mn or mx) else 0.0
+    cur = str(currency or "").strip().upper()
+    if cur in {"NONE", "NULL", "N/A", "NA"}:
+        cur = ""
+    if not cur:
+        cur = str(os.getenv("COLLABS_DEFAULT_CURRENCY", "USD") or "USD").strip().upper()
+    if cur and avg > 0:
+        line = f"{avg:.2f} {cur} - {u}"
+    elif avg > 0:
+        line = f"{avg:.2f} - {u}"
+    else:
+        line = u
+    return {"url": u, "avg_price": avg, "currency": cur, "line": line}
+
+
+def fetch_collabs_product_links(
+    base_url: str,
+    shopify_store_id: str,
+    *,
+    brand_name: str = "",
+    store_name: str = "",
+    first: int = 36,
+    max_pages: int = 1,
+    target_count: int | None = None,
+    should_stop: Callable[[], bool] | None = None,
+    delay_ms: int = 0,
+) -> list[dict]:
+    """
+    Lấy danh sách product link theo brand/shopifyStoreId trong Discovery.
+    Ưu tiên thử searchTerm theo tên brand/store để tăng độ chính xác và tốc độ.
+    Ưu tiên product.url (link sản phẩm storefront), fallback affiliateProduct.url.
+    """
+    sid = str(shopify_store_id or "").strip()
+    if not sid:
+        return []
+    products_seed = str(
+        os.getenv("COLLABS_PRODUCTS_SEED", "6c9efb8b-2B19-4FD3-D6F4-3B6BDD54") or ""
+    ).strip() or "6c9efb8b-2B19-4FD3-D6F4-3B6BDD54"
+
+    out: list[dict] = []
+    seen: set[str] = set()
+    after = None
+    pages = 0
+    page_cap = max(1, int(max_pages or 1))
+    size = max(1, int(first or 36))
+    target = int(target_count) if target_count is not None else 0
+    if target < 0:
+        target = 0
+    bn = str(brand_name or "").strip()
+    sn = str(store_name or "").strip()
+
+    def _norm_text(v: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "", str(v or "").lower())
+
+    bn_norm = _norm_text(bn)
+    sn_norm = _norm_text(sn)
+    candidate_terms: list[str] = []
+    for t in (bn, sn):
+        tt = str(t or "").strip()
+        if tt and tt not in candidate_terms:
+            candidate_terms.append(tt)
+    # fallback query rộng nếu query theo tên chưa đủ.
+    candidate_terms.append("")
+    for term in candidate_terms:
+        after = None
+        pages = 0
+        while pages < page_cap:
+            if should_stop and should_stop():
+                break
+            payload = {
+                "operationName": "ProductsQuery",
+                "query": COLLABS_PRODUCTS_QUERY,
+                "variables": {
+                    "first": size,
+                    "searchParams": {
+                        "brandValues": [],
+                        "categories": [],
+                    },
+                    "seed": products_seed,
+                },
+            }
+            if term:
+                payload["variables"]["searchParams"]["searchTerm"] = term
+            if after:
+                payload["variables"]["after"] = str(after)
+            res = requests.post(base_url, headers=build_collabs_headers(), json=payload, timeout=60)
+            text = res.text
+            try:
+                body = res.json()
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Collabs Products parse JSON lỗi (HTTP {res.status_code}): {text[:180]}"
+                ) from exc
+            if not res.ok:
+                raise RuntimeError(f"Collabs Products HTTP {res.status_code}: {text[:300]}")
+            gql_errors = body.get("errors") if isinstance(body, dict) else None
+            if gql_errors:
+                err_text = json.dumps(gql_errors, ensure_ascii=False)
+                allow_partial = "UNAUTHORIZED" in err_text.upper()
+                data_candidate = body.get("data") if isinstance(body, dict) else {}
+                has_products_nodes = bool(
+                    isinstance(data_candidate, dict)
+                    and isinstance(data_candidate.get("products"), dict)
+                    and isinstance((data_candidate.get("products") or {}).get("nodes"), list)
+                )
+                if not (allow_partial and has_products_nodes):
+                    raise RuntimeError(f"Collabs Products GraphQL lỗi: {err_text[:300]}")
+            data = body.get("data") if isinstance(body, dict) else {}
+            products = data.get("products") if isinstance(data, dict) else {}
+            nodes = products.get("nodes") if isinstance(products, dict) else []
+            if not isinstance(nodes, list) or not nodes:
+                break
+            pages += 1
+            for node in nodes:
+                if not isinstance(node, dict):
+                    continue
+                store = node.get("shopifyStore") if isinstance(node.get("shopifyStore"), dict) else {}
+                node_sid = str(store.get("shopifyStoreId") or "").strip()
+                node_store_name = str(store.get("name") or "").strip()
+                if node_sid and node_sid != sid:
+                    continue
+                if not node_sid:
+                    node_store_norm = _norm_text(node_store_name)
+                    if bn_norm and bn_norm not in node_store_norm and sn_norm and sn_norm not in node_store_norm:
+                        continue
+                aff = node.get("affiliateProduct") if isinstance(node.get("affiliateProduct"), dict) else {}
+                url = str(node.get("url") or aff.get("url") or "").strip()
+                if not url or url in seen:
+                    continue
+                min_price = node.get("minPrice") if isinstance(node.get("minPrice"), dict) else {}
+                max_price = node.get("maxPrice") if isinstance(node.get("maxPrice"), dict) else {}
+                min_amount = (min_price or {}).get("amount")
+                max_amount = (max_price or {}).get("amount")
+                currency = (
+                    (min_price or {}).get("currency")
+                    or (max_price or {}).get("currency")
+                    or ""
+                )
+                entry = _build_product_entry(url, min_amount, max_amount, currency)
+                if not entry:
+                    continue
+                seen.add(url)
+                out.append(entry)
+                if target > 0 and len(out) >= target:
+                    return out[:target]
+            info = products.get("pageInfo") if isinstance(products, dict) else {}
+            has_next = bool(info.get("hasNextPage")) if isinstance(info, dict) else False
+            after = info.get("endCursor") if isinstance(info, dict) else None
+            if not has_next or not after:
+                break
+            if delay_ms > 0:
+                time.sleep(delay_ms / 1000)
+        if target > 0 and len(out) >= target:
+            return out[:target]
+    return out[:target] if target > 0 else out
+
+
+def fetch_shopify_storefront_product_links(
+    site_url: str,
+    *,
+    max_count: int = 24,
+    max_pages: int = 2,
+    timeout_sec: int = 20,
+    should_stop: Callable[[], bool] | None = None,
+    delay_ms: int = 0,
+) -> list[dict]:
+    """
+    Fallback lấy product link trực tiếp từ storefront Shopify qua /products.json.
+    """
+    raw = str(site_url or "").strip()
+    if not raw:
+        return []
+    parsed = urlparse(raw if "://" in raw else f"https://{raw}")
+    if not parsed.netloc:
+        return []
+    base = f"{parsed.scheme or 'https'}://{parsed.netloc}"
+    out: list[dict] = []
+    seen: set[str] = set()
+    cap = max(1, int(max_count or 24))
+    pages = max(1, int(max_pages or 1))
+    for p in range(1, pages + 1):
+        if should_stop and should_stop():
+            break
+        api_url = f"{base}/products.json?limit=250&page={p}"
+        try:
+            res = requests.get(api_url, timeout=timeout_sec)
+            if not res.ok:
+                break
+            body = res.json()
+        except Exception:
+            break
+        products = body.get("products") if isinstance(body, dict) else []
+        if not isinstance(products, list) or not products:
+            break
+        for prod in products:
+            if not isinstance(prod, dict):
+                continue
+            handle = str(prod.get("handle") or "").strip()
+            if not handle:
+                continue
+            u = f"{base}/products/{handle}"
+            if u in seen:
+                continue
+            variants = prod.get("variants") if isinstance(prod.get("variants"), list) else []
+            prices: list[float] = []
+            for var in variants:
+                if not isinstance(var, dict):
+                    continue
+                prices.append(_money_to_float(var.get("price")))
+            min_amount = min(prices) if prices else 0.0
+            max_amount = max(prices) if prices else min_amount
+            first_variant = variants[0] if variants and isinstance(variants[0], dict) else {}
+            currency = str(
+                first_variant.get("currency")
+                or first_variant.get("currency_code")
+                or prod.get("currency")
+                or ""
+            ).strip()
+            entry = _build_product_entry(u, min_amount, max_amount, currency)
+            if not entry:
+                continue
+            seen.add(u)
+            out.append(entry)
+            if len(out) >= cap:
+                return out[:cap]
+        if delay_ms > 0:
+            time.sleep(delay_ms / 1000)
+    return out[:cap]
 
 
 def fetch_all_goaffpro_offers() -> list:

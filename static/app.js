@@ -838,6 +838,7 @@ function collectFilters(source) {
       min_cookie: "",
       currency: "",
       application_review: "",
+      search_query: $("searchQueryCb")?.value?.trim() || "",
       product_categories: collectCheckedValues("#productCategoryCollabsGroup"),
     };
   }

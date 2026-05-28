@@ -151,6 +151,10 @@ class AppState:
 
 
 STATE = AppState()
+COLLABS_CURSOR_CACHE_LOCK = threading.Lock()
+COLLABS_CURSOR_CACHE: dict[str, dict] = {}
+COLLABS_PRODUCTS_CACHE_LOCK = threading.Lock()
+COLLABS_PRODUCTS_CACHE: dict[str, dict] = {}
 
 
 class AutoApplyJob:
@@ -675,14 +679,50 @@ def fetch_offers_collabs(filters: dict) -> list:
             if progress_floor > STATE.progress:
                 STATE.progress = progress_floor
 
+    def _collabs_cursor_cache_key() -> str:
+        pc = product_categories or []
+        q = brand_search_query.lower().strip()
+        return "collabs:" + ",".join(sorted(str(x).strip() for x in pc if str(x).strip())) + f":q={q}"
+
+    def _read_collabs_cursor_cache(cache_key: str) -> dict:
+        ttl = int(os.getenv("COLLABS_CURSOR_CACHE_TTL_SEC", "900") or "900")
+        now = time.time()
+        with COLLABS_CURSOR_CACHE_LOCK:
+            raw = COLLABS_CURSOR_CACHE.get(cache_key) or {}
+            built_at = float(raw.get("built_at") or 0.0)
+            if ttl > 0 and built_at > 0 and (now - built_at) > ttl:
+                COLLABS_CURSOR_CACHE.pop(cache_key, None)
+                return {}
+            return dict(raw)
+
+    def _write_collabs_cursor_cache(cache_key: str, *, last_page: int, ids: set[str]) -> None:
+        payload = {
+            "last_page": max(0, int(last_page or 0)),
+            "ids": set(ids or set()),
+            "built_at": time.time(),
+        }
+        with COLLABS_CURSOR_CACHE_LOCK:
+            COLLABS_CURSOR_CACHE[cache_key] = payload
+
     product_categories = core.norm_collabs_product_categories(
         (filters or {}).get("product_categories")
     )
+    brand_search_query = str((filters or {}).get("search_query") or "").strip()
     if product_categories:
         STATE.add_log(
             "Collabs API: lọc productCategories="
             + ", ".join(product_categories)
         )
+    if brand_search_query:
+        STATE.add_log(f"Collabs API: searchQuery={brand_search_query}")
+
+    brand_search_norm = brand_search_query.lower().strip()
+
+    def _matches_brand_search(node: dict) -> bool:
+        if not brand_search_norm:
+            return True
+        name = str((node or {}).get("name") or "").strip().lower()
+        return brand_search_norm in name
 
     pages_per_run = max(1, core.COLLABS_DISCOVERY_PAGES_PER_RUN)
     max_records_per_run = page_size * pages_per_run
@@ -702,6 +742,18 @@ def fetch_offers_collabs(filters: dict) -> list:
     cursor_exhausted_at_page: int | None = None  # trang cuối có dữ liệu cursor (theo API), None nếu chưa hết
     last_cursor_page_with_data = 0
     cursor_reached_effective_end = False
+    cursor_seen_ids: set[str] = set()
+    cursor_cache_key = _collabs_cursor_cache_key()
+    cursor_cache = _read_collabs_cursor_cache(cursor_cache_key)
+    cache_last_page = int(cursor_cache.get("last_page") or 0)
+    cache_ids = set(cursor_cache.get("ids") or set())
+    if start_page > 1 and cache_last_page > 0 and start_page > cache_last_page:
+        cursor_exhausted_at_page = cache_last_page
+        last_cursor_page_with_data = cache_last_page
+        page = effective_end + 1
+        STATE.add_log(
+            f"Collabs: dùng cache cursor (hết ở trang {cache_last_page}) — bỏ qua bước nhảy 1→{start_page}."
+        )
     if start_page > 1:
         STATE.add_log(f"Collabs: bắt đầu từ trang {start_page}")
     STATE.add_log(
@@ -742,7 +794,11 @@ def fetch_offers_collabs(filters: dict) -> list:
         elif page >= start_page:
             STATE.add_log(f"Collabs trang {page}: đang tải...")
         body = core.fetch_collabs_page(
-            base_url, page_size, after=after, product_categories=product_categories
+            base_url,
+            page_size,
+            after=after,
+            product_categories=product_categories,
+            search_query=brand_search_query or None,
         )
         search = core._collabs_brands_search(body)
         nodes = search.get("nodes") or []
@@ -750,6 +806,12 @@ def fetch_offers_collabs(filters: dict) -> list:
             nodes = []
         if not nodes:
             cursor_exhausted_at_page = last_cursor_page_with_data
+            if cursor_exhausted_at_page:
+                _write_collabs_cursor_cache(
+                    cursor_cache_key,
+                    last_page=cursor_exhausted_at_page,
+                    ids=cursor_seen_ids,
+                )
             if page >= start_page:
                 if cursor_exhausted_at_page:
                     STATE.add_log(
@@ -769,8 +831,15 @@ def fetch_offers_collabs(filters: dict) -> list:
                 )
             break
         last_cursor_page_with_data = page
+        for n in nodes:
+            if isinstance(n, dict):
+                nid = str(n.get("id") or "").strip()
+                if nid:
+                    cursor_seen_ids.add(nid)
         if page >= start_page:
             room = max_records - len(raw_nodes)
+            if brand_search_norm:
+                nodes = [n for n in nodes if isinstance(n, dict) and _matches_brand_search(n)]
             batch = nodes[:room] if room < len(nodes) else nodes
             raw_nodes.extend(batch)
             STATE.add_log(
@@ -788,6 +857,12 @@ def fetch_offers_collabs(filters: dict) -> list:
             break
         if not has_next:
             cursor_exhausted_at_page = last_cursor_page_with_data
+            if cursor_exhausted_at_page:
+                _write_collabs_cursor_cache(
+                    cursor_cache_key,
+                    last_page=cursor_exhausted_at_page,
+                    ids=cursor_seen_ids,
+                )
             if page < start_page and cursor_exhausted_at_page:
                 STATE.add_log(
                     f"Collabs: không tới được trang yêu cầu {start_page} "
@@ -816,6 +891,8 @@ def fetch_offers_collabs(filters: dict) -> list:
                 for n in raw_nodes
                 if isinstance(n, dict) and n.get("id")
             }
+            if cache_ids:
+                seen_ids |= cache_ids
             cursor_last = int(cursor_exhausted_at_page or last_cursor_page_with_data or 0)
             pages_filled_in_run = len(raw_nodes) // page_size if raw_nodes else 0
             first_virtual_shard_page = start_page + pages_filled_in_run
@@ -826,20 +903,32 @@ def fetch_offers_collabs(filters: dict) -> list:
                     f"(trang ảo {first_virtual_shard_page}→{effective_end}, "
                     f"bỏ qua {shard_skip} brand sau cursor trang {cursor_last})…"
                 )
-                try:
-                    cursor_ids = core.fetch_collabs_cursor_brand_ids(
-                        base_url,
-                        product_categories=product_categories,
-                        delay_ms=delay_ms,
-                        should_stop=STATE.control.should_stop,
+                if cache_ids:
+                    STATE.add_log(
+                        f"Collabs: dùng cache {len(cache_ids)} brand cursor để loại trùng shard."
                     )
-                    if cursor_ids:
-                        seen_ids |= cursor_ids
-                        STATE.add_log(
-                            f"Collabs: đã loại {len(cursor_ids)} brand cursor khỏi luồng shard."
+                else:
+                    try:
+                        cursor_ids = core.fetch_collabs_cursor_brand_ids(
+                            base_url,
+                            product_categories=product_categories,
+                            search_query=brand_search_query or None,
+                            delay_ms=delay_ms,
+                            should_stop=STATE.control.should_stop,
                         )
-                except Exception as exc:
-                    STATE.add_log(f"Collabs: không lấy được id cursor để phân trang shard: {exc}")
+                        if cursor_ids:
+                            seen_ids |= cursor_ids
+                            cache_ids = set(cursor_ids)
+                            _write_collabs_cursor_cache(
+                                cursor_cache_key,
+                                last_page=cursor_last,
+                                ids=cache_ids,
+                            )
+                            STATE.add_log(
+                                f"Collabs: đã loại {len(cursor_ids)} brand cursor khỏi luồng shard."
+                            )
+                    except Exception as exc:
+                        STATE.add_log(f"Collabs: không lấy được id cursor để phân trang shard: {exc}")
             elif (
                 cursor_last
                 and effective_end > cursor_last
@@ -856,11 +945,14 @@ def fetch_offers_collabs(filters: dict) -> list:
                     product_categories=product_categories,
                     exclude_ids=seen_ids,
                     max_count=need,
+                    search_query_base=brand_search_query,
                     skip_count=shard_skip,
                     delay_ms=delay_ms,
                     should_stop=STATE.control.should_stop,
                     log_fn=STATE.add_log,
                 )
+                if brand_search_norm:
+                    extra = [n for n in extra if isinstance(n, dict) and _matches_brand_search(n)]
                 _append_shard_as_extra(extra, first_virtual_page=first_virtual_shard_page)
             except Exception as exc:
                 STATE.add_log(f"Collabs shard bổ sung lỗi: {exc}")
@@ -873,7 +965,15 @@ def fetch_offers_collabs(filters: dict) -> list:
     redirect_delay_ms = int(os.getenv("COLLABS_REDIRECT_DELAY_MS", "50") or "50")
     signup_timeout_sec = int(os.getenv("COLLABS_SIGNUP_TIMEOUT_SEC", "20") or "20")
     signup_delay_ms = int(os.getenv("COLLABS_SIGNUP_DELAY_MS", "50") or "50")
+    products_first = int(os.getenv("COLLABS_PRODUCTS_FIRST", "36") or "36")
+    products_max_pages = int(os.getenv("COLLABS_PRODUCTS_MAX_PAGES", "6") or "6")
+    products_target_links = int(os.getenv("COLLABS_PRODUCTS_TARGET_LINKS", "24") or "24")
+    products_delay_ms = int(os.getenv("COLLABS_PRODUCTS_DELAY_MS", "0") or "0")
+    products_storefront_fallback_pages = int(os.getenv("COLLABS_PRODUCTS_STOREFRONT_MAX_PAGES", "2") or "2")
+    products_query_min_fill = int(os.getenv("COLLABS_PRODUCTS_QUERY_MIN_FILL", "8") or "8")
+    products_cache_ttl_sec = int(os.getenv("COLLABS_PRODUCTS_CACHE_TTL_SEC", "1800") or "1800")
     signup_by_host = {}
+    product_links_by_store: dict[str, str] = {}
     for idx, node in enumerate(raw_nodes, start=1):
         STATE.control.wait_if_paused()
         if STATE.control.should_stop():
@@ -888,6 +988,72 @@ def fetch_offers_collabs(filters: dict) -> list:
             except Exception as exc:
                 STATE.add_log(f"Lỗi detail collabs ({gid}): {exc}")
         mapped = core.map_collabs_brand(node, detail_brand)
+        store_id = str(mapped.get("collabs_shopify_store_id") or "").strip()
+        if store_id:
+            if store_id in product_links_by_store:
+                mapped["product_link"] = product_links_by_store.get(store_id, "")
+            else:
+                try:
+                    now_ts = time.time()
+                    cached_links: list[dict] = []
+                    with COLLABS_PRODUCTS_CACHE_LOCK:
+                        c = COLLABS_PRODUCTS_CACHE.get(store_id) or {}
+                        built = float(c.get("built_at") or 0.0)
+                        if built and (now_ts - built) <= max(0, products_cache_ttl_sec):
+                            cached_links = list(c.get("links") or [])
+                    product_items = [x for x in cached_links if isinstance(x, dict) and str(x.get("url") or "").strip()]
+                    if not product_items:
+                        # Fast path: storefront products.json thường nhanh và trả product.url chuẩn hơn.
+                        sf_items = core.fetch_shopify_storefront_product_links(
+                            str(mapped.get("url") or "").strip(),
+                            max_count=products_target_links,
+                            max_pages=products_storefront_fallback_pages,
+                            should_stop=STATE.control.should_stop,
+                            delay_ms=products_delay_ms,
+                        )
+                        product_items = list(sf_items or [])
+                        # Chỉ gọi ProductsQuery nếu storefront chưa đủ mức tối thiểu mong muốn.
+                        if len(product_items) < max(1, products_query_min_fill):
+                            api_items = core.fetch_collabs_product_links(
+                                base_url,
+                                store_id,
+                                brand_name=str(mapped.get("brand") or ""),
+                                store_name=str((detail_brand or {}).get("name") or ""),
+                                first=products_first,
+                                max_pages=products_max_pages,
+                                target_count=products_target_links,
+                                should_stop=STATE.control.should_stop,
+                                delay_ms=products_delay_ms,
+                            )
+                            merged: list[dict] = []
+                            seen_merge: set[str] = set()
+                            for it in list(product_items) + list(api_items):
+                                if not isinstance(it, dict):
+                                    continue
+                                su = str(it.get("url") or "").strip()
+                                if not su or su in seen_merge:
+                                    continue
+                                seen_merge.add(su)
+                                merged.append(it)
+                            product_items = merged[:products_target_links]
+                        with COLLABS_PRODUCTS_CACHE_LOCK:
+                            COLLABS_PRODUCTS_CACHE[store_id] = {
+                                "links": list(product_items),
+                                "built_at": now_ts,
+                            }
+                    product_link_text = "\n".join(
+                        str((it or {}).get("line") or (it or {}).get("url") or "").strip()
+                        for it in product_items
+                        if isinstance(it, dict)
+                    ).strip()
+                    mapped["product_link"] = product_link_text
+                    product_links_by_store[store_id] = product_link_text
+                    if product_items:
+                        STATE.add_log(
+                            f"Collabs products: {mapped.get('brand') or store_id} -> {len(product_items)} link"
+                        )
+                except Exception as exc:
+                    STATE.add_log(f"Lỗi products collabs ({store_id}): {exc}")
         storefront_url = str(mapped.get("url") or "").strip()
         final_url = storefront_url
         if storefront_url:

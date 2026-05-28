@@ -642,18 +642,18 @@ def fetch_offers_collabs(filters: dict) -> list:
     core.enforce_fixed_fetch_defaults()
     max_pages_cap = core.collabs_max_pages_cap()
     page_size = core.DEFAULT_COLLABS_LIMIT
-    max_discovery_pages_per_run = 3
-    max_discovery_records_per_run = page_size * max_discovery_pages_per_run
     start_page = int(filters.get("start_page") or 1)
     if start_page < 1:
         start_page = 1
     end_raw = filters.get("end_page")
-    if end_raw is None:
-        end_page = 1
-    elif str(end_raw).strip() == "":
+    end_page: int | None
+    if end_raw is None or str(end_raw).strip() == "":
         end_page = None
     else:
-        end_page = int(end_raw)
+        try:
+            end_page = int(str(end_raw).strip())
+        except (TypeError, ValueError):
+            end_page = None
     if end_page is not None and end_page < start_page:
         end_page = start_page
     if end_page is not None and max_pages_cap is not None:
@@ -675,62 +675,198 @@ def fetch_offers_collabs(filters: dict) -> list:
             if progress_floor > STATE.progress:
                 STATE.progress = progress_floor
 
-    raw_nodes = []
+    product_categories = core.norm_collabs_product_categories(
+        (filters or {}).get("product_categories")
+    )
+    if product_categories:
+        STATE.add_log(
+            "Collabs API: lọc productCategories="
+            + ", ".join(product_categories)
+        )
+
+    pages_per_run = max(1, core.COLLABS_DISCOVERY_PAGES_PER_RUN)
+    max_records_per_run = page_size * pages_per_run
+    user_end_page = end_page
+    if user_end_page is None:
+        effective_end = start_page + pages_per_run - 1
+    else:
+        effective_end = min(user_end_page, start_page + pages_per_run - 1)
+    if effective_end < start_page:
+        effective_end = start_page
+    max_records = (effective_end - start_page + 1) * page_size
+    max_records = min(max_records, max_records_per_run)
+
+    raw_nodes: list = []
     after = None
     page = 1
+    cursor_exhausted_at_page: int | None = None  # trang cuối có dữ liệu cursor (theo API), None nếu chưa hết
+    last_cursor_page_with_data = 0
+    cursor_reached_effective_end = False
     if start_page > 1:
         STATE.add_log(f"Collabs: bắt đầu từ trang {start_page}")
-    forced_end_page = start_page + max_discovery_pages_per_run - 1
-    while True:
+    STATE.add_log(
+        f"Collabs: mỗi lần chạy tối đa {pages_per_run} trang "
+        f"({max_records_per_run} brand). Lần này: trang {start_page} → {effective_end}."
+    )
+
+    def _append_shard_as_extra(extra: list, *, first_virtual_page: int) -> None:
+        nonlocal raw_nodes
+        if not extra:
+            return
+        idx = 0
+        while idx < len(extra) and len(raw_nodes) < max_records:
+            room = max_records - len(raw_nodes)
+            chunk_n = min(page_size, room, len(extra) - idx)
+            chunk = extra[idx : idx + chunk_n]
+            raw_nodes.extend(chunk)
+            vp = first_virtual_page + idx // page_size
+            STATE.add_log(
+                f"Collabs trang {vp} (shard): +{chunk_n} brand (tổng {len(raw_nodes)})"
+            )
+            idx += chunk_n
+            filled_pages = max(1, (len(raw_nodes) + page_size - 1) // page_size)
+            _set_progress_floor(min(25.0, 5.0 + (filled_pages * 2.0)))
+
+    while page <= effective_end:
         STATE.control.wait_if_paused()
         if STATE.control.should_stop():
             STATE.add_log("Đã dừng.")
             return []
-        if page >= start_page:
+        if len(raw_nodes) >= max_records:
+            break
+        if page < start_page:
+            if page == 1 or page % 20 == 0:
+                STATE.add_log(
+                    f"Collabs: đang nhảy cursor tới trang {start_page} (đang ở trang {page})…"
+                )
+        elif page >= start_page:
             STATE.add_log(f"Collabs trang {page}: đang tải...")
-        body = core.fetch_collabs_page(base_url, page_size, after=after)
-        data = body.get("data") or {}
-        search = data.get("brandsNetworkSearch") or {}
+        body = core.fetch_collabs_page(
+            base_url, page_size, after=after, product_categories=product_categories
+        )
+        search = core._collabs_brands_search(body)
         nodes = search.get("nodes") or []
         if not isinstance(nodes, list):
             nodes = []
         if not nodes:
+            cursor_exhausted_at_page = last_cursor_page_with_data
             if page >= start_page:
-                STATE.add_log(f"Collabs trang {page}: hết dữ liệu, dừng phân trang.")
-            break
-        if page >= start_page:
-            raw_nodes.extend(nodes)
-            STATE.add_log(f"Collabs trang {page}: +{len(nodes)} brand (tổng {len(raw_nodes)})")
-            if len(raw_nodes) >= max_discovery_records_per_run:
-                raw_nodes = raw_nodes[:max_discovery_records_per_run]
+                if cursor_exhausted_at_page:
+                    STATE.add_log(
+                        f"Collabs trang {page}: hết dữ liệu cursor "
+                        f"(trang cuối có brand: {cursor_exhausted_at_page}, theo API)."
+                    )
+                else:
+                    STATE.add_log(f"Collabs trang {page}: hết dữ liệu cursor (theo API).")
+            elif cursor_exhausted_at_page:
                 STATE.add_log(
-                    f"Collabs: đạt giới hạn mỗi lần lọc {max_discovery_records_per_run} brand "
-                    f"(~{max_discovery_pages_per_run} trang), dừng phân trang."
+                    f"Collabs: không tới được trang yêu cầu {start_page} "
+                    f"(cursor hết ở trang {cursor_exhausted_at_page}, theo API)."
                 )
-                break
-            # Hiển thị tiến trình ngay trong pha crawl trang Collabs (0-25%).
+            else:
+                STATE.add_log(
+                    f"Collabs: không tới được trang yêu cầu {start_page} (cursor không có dữ liệu)."
+                )
+            break
+        last_cursor_page_with_data = page
+        if page >= start_page:
+            room = max_records - len(raw_nodes)
+            batch = nodes[:room] if room < len(nodes) else nodes
+            raw_nodes.extend(batch)
+            STATE.add_log(
+                f"Collabs trang {page}: +{len(batch)} brand (tổng {len(raw_nodes)})"
+            )
             seen_pages = max(1, page - start_page + 1)
             _set_progress_floor(min(25.0, 5.0 + (seen_pages * 2.0)))
         info = search.get("pageInfo") or {}
         has_next = bool(info.get("hasNextPage"))
         after = info.get("endCursor")
-        if end_page is not None and page >= end_page:
-            STATE.add_log(f"Collabs: đã tới trang kết thúc đã chọn: {end_page}")
+        if len(raw_nodes) >= max_records:
             break
-        if page >= forced_end_page:
-            STATE.add_log(
-                f"Collabs: chỉ lấy tối đa {max_discovery_pages_per_run} trang liên tiếp mỗi lần "
-                f"(trang {start_page} → {forced_end_page})."
-            )
+        if page >= effective_end:
+            cursor_reached_effective_end = True
             break
         if not has_next:
+            cursor_exhausted_at_page = last_cursor_page_with_data
+            if page < start_page and cursor_exhausted_at_page:
+                STATE.add_log(
+                    f"Collabs: không tới được trang yêu cầu {start_page} "
+                    f"(cursor hết ở trang {cursor_exhausted_at_page}, theo API)."
+                )
+            elif cursor_exhausted_at_page:
+                STATE.add_log(
+                    f"Collabs: cursor hết ở trang {cursor_exhausted_at_page} (theo API)."
+                )
             break
         if max_pages_cap is not None and page >= max_pages_cap:
+            cursor_exhausted_at_page = last_cursor_page_with_data or page
             STATE.add_log(f"Collabs: đã tới giới hạn trang trong cài đặt: {max_pages_cap}")
             break
         page += 1
         if delay_ms > 0:
             time.sleep(delay_ms / 1000)
+
+    pages_in_range = effective_end - start_page + 1
+    pages_filled = (len(raw_nodes) + page_size - 1) // page_size
+    if len(raw_nodes) < max_records and pages_filled < pages_in_range:
+        need = max_records - len(raw_nodes)
+        if need > 0:
+            seen_ids = {
+                str(n.get("id") or "").strip()
+                for n in raw_nodes
+                if isinstance(n, dict) and n.get("id")
+            }
+            cursor_last = int(cursor_exhausted_at_page or last_cursor_page_with_data or 0)
+            pages_filled_in_run = len(raw_nodes) // page_size if raw_nodes else 0
+            first_virtual_shard_page = start_page + pages_filled_in_run
+            shard_skip = max(0, (first_virtual_shard_page - cursor_last - 1) * page_size)
+            if shard_skip > 0 or first_virtual_shard_page > cursor_last:
+                STATE.add_log(
+                    "Collabs: dùng shard phân trang cố định "
+                    f"(trang ảo {first_virtual_shard_page}→{effective_end}, "
+                    f"bỏ qua {shard_skip} brand sau cursor trang {cursor_last})…"
+                )
+                try:
+                    cursor_ids = core.fetch_collabs_cursor_brand_ids(
+                        base_url,
+                        product_categories=product_categories,
+                        delay_ms=delay_ms,
+                        should_stop=STATE.control.should_stop,
+                    )
+                    if cursor_ids:
+                        seen_ids |= cursor_ids
+                        STATE.add_log(
+                            f"Collabs: đã loại {len(cursor_ids)} brand cursor khỏi luồng shard."
+                        )
+                except Exception as exc:
+                    STATE.add_log(f"Collabs: không lấy được id cursor để phân trang shard: {exc}")
+            elif (
+                cursor_last
+                and effective_end > cursor_last
+                and not cursor_reached_effective_end
+            ):
+                STATE.add_log(
+                    "Collabs: cursor không phủ hết dải yêu cầu "
+                    f"{start_page}→{effective_end} (hết ở trang {cursor_last}, theo API). "
+                    "Đang dùng shard bù theo thứ tự a→z→0-9."
+                )
+            try:
+                extra = core.fetch_collabs_brands_shard_fill(
+                    base_url,
+                    product_categories=product_categories,
+                    exclude_ids=seen_ids,
+                    max_count=need,
+                    skip_count=shard_skip,
+                    delay_ms=delay_ms,
+                    should_stop=STATE.control.should_stop,
+                    log_fn=STATE.add_log,
+                )
+                _append_shard_as_extra(extra, first_virtual_page=first_virtual_shard_page)
+            except Exception as exc:
+                STATE.add_log(f"Collabs shard bổ sung lỗi: {exc}")
+
+    if len(raw_nodes) > max_records:
+        raw_nodes = raw_nodes[:max_records]
     offers = []
     total_raw = len(raw_nodes)
     redirect_timeout_sec = int(os.getenv("COLLABS_REDIRECT_TIMEOUT_SEC", "20") or "20")
@@ -752,19 +888,25 @@ def fetch_offers_collabs(filters: dict) -> list:
             except Exception as exc:
                 STATE.add_log(f"Lỗi detail collabs ({gid}): {exc}")
         mapped = core.map_collabs_brand(node, detail_brand)
-        before_url = str(mapped.get("url") or "").strip()
-        if before_url:
-            final_url = core.resolve_redirected_url(before_url, timeout_sec=redirect_timeout_sec)
-            if final_url and final_url != before_url:
+        storefront_url = str(mapped.get("url") or "").strip()
+        final_url = storefront_url
+        if storefront_url:
+            final_url = core.resolve_redirected_url(
+                storefront_url, timeout_sec=redirect_timeout_sec
+            )
+            if final_url and final_url != storefront_url:
                 mapped["url"] = final_url
-                STATE.add_log(f"Collabs redirect: {before_url} -> {final_url}")
-        effective_url = str(mapped.get("url") or "").strip()
-        hk = core.host_key(effective_url)
+                STATE.add_log(f"Collabs redirect: {storefront_url} -> {final_url}")
+        hk = core.host_key(storefront_url or final_url)
         signup_url = ""
-        if hk:
+        if storefront_url or final_url:
             signup_url = signup_by_host.get(hk, "")
             if not signup_url:
-                signup_url = core.discover_collabs_signup_url(effective_url, timeout_sec=signup_timeout_sec)
+                signup_url = core.discover_collabs_signup_url_with_redirect(
+                    storefront_url or final_url,
+                    timeout_sec=signup_timeout_sec,
+                    should_stop=STATE.control.should_stop,
+                )
                 signup_by_host[hk] = signup_url
         if signup_url:
             mapped["client_url"] = signup_url
@@ -1680,7 +1822,7 @@ def _parse_multi_collabs_account_spec(spec: str) -> list[int]:
     """
     - Có dấu phẩy: danh sách, vd 1,4,7 (thứ tự giữ nguyên, bỏ trùng).
     - Một dải a-b: vd 1-5 (hai đầu 1..MAX).
-    - Chỉ số nguyên n (không phẩy, không gạch): legacy — tài khoản 1..n, 2 <= n <= MAX.
+    - Chỉ số nguyên n (không phẩy, không gạch): chỉ tài khoản n, 1 <= n <= MAX.
     """
     s = str(spec or "").strip()
     if not s:
@@ -1710,9 +1852,9 @@ def _parse_multi_collabs_account_spec(spec: str) -> list[int]:
         return list(range(a, b + 1))
     if s.isdigit():
         n = int(s, 10)
-        if n < 2 or n > EDGE_CDP_ACCOUNT_MAX:
+        if n < 1 or n > EDGE_CDP_ACCOUNT_MAX:
             return []
-        return list(range(1, n + 1))
+        return [n]
     return []
 
 
@@ -1723,8 +1865,6 @@ def _collabs_account_indices_from_payload(payload: dict, legacy_count: int) -> t
         out, err = _normalize_collabs_account_indices_list(raw_list)
         if err:
             return [], err
-        if len(out) < 2:
-            return [], "Đa tài khoản cần ít nhất 2 tài khoản trong collabs_account_indices."
         return out, ""
     spec = str(
         payload.get("multi_account_spec") or payload.get("multi_collabs_account_spec") or ""
@@ -1734,13 +1874,11 @@ def _collabs_account_indices_from_payload(payload: dict, legacy_count: int) -> t
         if not out:
             return (
                 [],
-                "Tài khoản không hợp lệ. Dùng dải (vd: 1-5), danh sách (vd: 1,4,7), hoặc số 2-10 (tài khoản 1→n).",
+                "Tài khoản không hợp lệ. Dùng dải (vd: 1-5), danh sách (vd: 1,4,7), hoặc số 1-10 (chỉ tài khoản n).",
             )
-        if len(out) < 2:
-            return [], "Đa tài khoản cần ít nhất 2 tài khoản (vd: 1-2 hoặc 1,2)."
         return out, ""
     n = int(legacy_count)
-    n = max(2, min(EDGE_CDP_ACCOUNT_MAX, n))
+    n = max(1, min(EDGE_CDP_ACCOUNT_MAX, n))
     return list(range(1, n + 1)), ""
 
 
@@ -2402,7 +2540,13 @@ def api_auto_apply_start():
         if profile_map_err:
             return jsonify({"ok": False, "error": profile_map_err}), 400
         slots = _slots_from_collabs_account_indices(indices, profile_map=profile_map)
-        use_sequential_multi = True
+        if len(slots) >= 2:
+            use_sequential_multi = True
+        elif len(slots) == 1:
+            # Cho phép nhập "1" trong ô tài khoản/trình duyệt: fallback chạy 1 tài khoản (TK1).
+            account_mode = "single"
+        else:
+            return jsonify({"ok": False, "error": "Không có tài khoản hợp lệ để chạy."}), 400
     elif explicit_account_mode and account_mode == "single":
         slots = [{"cdp_url": DEFAULT_CDP, "edge_user_data_dir": "", "email_override": ""}]
     elif not explicit_account_mode and has_custom_slots and multi_parallel:

@@ -45,7 +45,21 @@
 
     <section id="settingsTab" class="tab-panel active">
       <div class="card">
-        <h2>Cài đặt môi trường</h2>
+        <div style="display:flex;align-items:center;gap:10px;justify-content:space-between;">
+          <h2 style="margin:0;">Cài đặt môi trường</h2>
+          <button
+            type="button"
+            id="reloadAppBtn"
+            class="secret-eye-btn"
+            aria-label="Reload lại toàn bộ app"
+            title="Reload lại toàn bộ app"
+          >
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+              <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+              <polyline points="21 3 21 9 15 9" />
+            </svg>
+          </button>
+        </div>
        
         <div class="form-grid">
           <label class="form-field-label">
@@ -206,36 +220,36 @@
           </label>
           <label>Ngưỡng traffic tối thiểu<input id="minTrafficCb" type="number" value="9000" /></label>
           <label class="collabs-in-discovery-only">Trang bắt đầu<input id="startPageCb" type="number" min="1" value="1" /></label>
-          <label class="collabs-in-discovery-only">Trang kết thúc<input id="endPageCb" type="text" inputmode="numeric" autocomplete="off" placeholder="1 — để trống = tới trang cuối API" /></label>
+          <label class="collabs-in-discovery-only">Trang kết thúc<input id="endPageCb" type="text" inputmode="numeric" autocomplete="off" placeholder="Để trống = 3 trang từ trang bắt đầu (36 brand)" /></label>
           <label class="collabs-in-discovery-only">Hoa hồng tối thiểu (%)<input id="minCommissionCb" type="number" step="0.01" /></label>
           <label class="collabs-outside-discovery-only">Số kết quả mục tiêu<input id="outsideTargetResultsCb" type="number" min="10" max="30" step="10" value="30" /></label>
           <div class="filter-field-full collabs-in-discovery-only">
-            <label class="form-field-caption">Danh mục</label>
-            <div class="multi-select" data-multi-label="Category Collabs">
+            <label class="form-field-caption">Danh mục sản phẩm</label>
+            <div class="multi-select" data-multi-label="Product category API" data-empty-label="Tất cả">
               <button type="button" class="multi-select-btn" aria-expanded="false" aria-haspopup="listbox">
                 <span class="multi-select-btn-text muted-hint">Tất cả</span>
                 <span class="multi-select-chevron" aria-hidden="true">▼</span>
               </button>
-              <div class="multi-select-panel" id="categoryCollabsGroup" role="listbox" aria-multiselectable="true">
-                <label class="multi-select-option"><input type="checkbox" name="categoryCollabs" value="WOMENS_CLOTHING"><span>Women's clothing and accessories</span></label>
-                <label class="multi-select-option"><input type="checkbox" name="categoryCollabs" value="MENS_CLOTHING"><span>Men's clothing and accessories</span></label>
-                <label class="multi-select-option"><input type="checkbox" name="categoryCollabs" value="BEAUTY"><span>Beauty</span></label>
-                <label class="multi-select-option"><input type="checkbox" name="categoryCollabs" value="HEALTH_AND_WELLNESS"><span>Health and wellness</span></label>
-                <label class="multi-select-option"><input type="checkbox" name="categoryCollabs" value="FOOD_AND_DRINK"><span>Food and drink</span></label>
-                <label class="multi-select-option"><input type="checkbox" name="categoryCollabs" value="HOME_GOODS_AND_DECOR"><span>Home goods and decor</span></label>
-                <label class="multi-select-option"><input type="checkbox" name="categoryCollabs" value="BABY_AND_TODDLER"><span>Baby and toddler</span></label>
-                <label class="multi-select-option"><input type="checkbox" name="categoryCollabs" value="ELECTRONICS"><span>Electronics</span></label>
-                <label class="multi-select-option"><input type="checkbox" name="categoryCollabs" value="SPORTS_GOODS"><span>Sports goods</span></label>
-                <label class="multi-select-option"><input type="checkbox" name="categoryCollabs" value="ARTS_AND_CRAFTS"><span>Arts and crafts</span></label>
-                <label class="multi-select-option"><input type="checkbox" name="categoryCollabs" value="TECH"><span>Tech</span></label>
-                <label class="multi-select-option"><input type="checkbox" name="categoryCollabs" value="PHOTOGRAPHY"><span>Photography</span></label>
-                <label class="multi-select-option"><input type="checkbox" name="categoryCollabs" value="PET_SUPPLIES_AND_ACCESSORIES"><span>Pet supplies and accessories</span></label>
-                <label class="multi-select-option"><input type="checkbox" name="categoryCollabs" value="DIY"><span>DIY</span></label>
-                <label class="multi-select-option"><input type="checkbox" name="categoryCollabs" value="AUTOMOTIVE"><span>Automotive</span></label>
-                <label class="multi-select-option"><input type="checkbox" name="categoryCollabs" value="GARDENING"><span>Gardening</span></label>
-                <label class="multi-select-option"><input type="checkbox" name="categoryCollabs" value="TOBACCO_AND_VAPE"><span>Tobacco and vape</span></label>
-                <label class="multi-select-option"><input type="checkbox" name="categoryCollabs" value="MATURE"><span>Mature</span></label>
-                <label class="multi-select-option"><input type="checkbox" name="categoryCollabs" value="MUSICAL_INSTRUMENTS_AND_ACCESSORIES"><span>Musical instruments and accessories</span></label>
+              <div class="multi-select-panel" id="productCategoryCollabsGroup" role="listbox" aria-multiselectable="true">
+                <label class="multi-select-option"><input type="checkbox" name="productCategoryCollabs" value="WOMENS_CLOTHING"><span>Women's clothing and accessories</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="productCategoryCollabs" value="MENS_CLOTHING"><span>Men's clothing and accessories</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="productCategoryCollabs" value="BEAUTY"><span>Beauty</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="productCategoryCollabs" value="HEALTH_AND_WELLNESS"><span>Health and wellness</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="productCategoryCollabs" value="FOOD_AND_DRINK"><span>Food and drink</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="productCategoryCollabs" value="HOME_GOODS_AND_DECOR"><span>Home goods and decor</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="productCategoryCollabs" value="BABY_AND_TODDLER"><span>Baby and toddler</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="productCategoryCollabs" value="ELECTRONICS"><span>Electronics</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="productCategoryCollabs" value="SPORTS_GOODS"><span>Sports goods</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="productCategoryCollabs" value="ARTS_AND_CRAFTS"><span>Arts and crafts</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="productCategoryCollabs" value="TECH"><span>Tech</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="productCategoryCollabs" value="PHOTOGRAPHY"><span>Photography</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="productCategoryCollabs" value="PET_SUPPLIES_AND_ACCESSORIES"><span>Pet supplies and accessories</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="productCategoryCollabs" value="DIY"><span>DIY</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="productCategoryCollabs" value="AUTOMOTIVE"><span>Automotive</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="productCategoryCollabs" value="GARDENING"><span>Gardening</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="productCategoryCollabs" value="TOBACCO_AND_VAPE"><span>Tobacco and vape</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="productCategoryCollabs" value="MATURE"><span>Mature</span></label>
+                <label class="multi-select-option"><input type="checkbox" name="productCategoryCollabs" value="MUSICAL_INSTRUMENTS_AND_ACCESSORIES"><span>Musical instruments and accessories</span></label>
               </div>
             </div>
           </div>

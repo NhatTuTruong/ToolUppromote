@@ -40,6 +40,12 @@ MAX_OFFERS_PER_PAGE = 50
 MIN_OFFERS_PER_PAGE = 10
 OFFERS_PER_PAGE_STEP = 10
 DEFAULT_COLLABS_LIMIT = 12
+# Shopify Collabs cursor pagination có giới hạn (API báo hasNextPage); vượt bằng chia searchQuery.
+COLLABS_SHARD_FETCH_THRESHOLD = int(os.getenv("COLLABS_SHARD_FETCH_THRESHOLD", "900") or "900")
+COLLABS_SHARD_ALPHABET = string.ascii_lowercase + string.digits
+COLLABS_SHARD_MAX_PAGES = int(os.getenv("COLLABS_SHARD_MAX_PAGES", "120") or "120")
+COLLABS_SHARD_MAX_DEPTH = int(os.getenv("COLLABS_SHARD_MAX_DEPTH", "2") or "2")
+COLLABS_DISCOVERY_PAGES_PER_RUN = int(os.getenv("COLLABS_DISCOVERY_PAGES_PER_RUN", "3") or "3")
 
 
 def clamp_offers_per_page(raw) -> int:
@@ -601,6 +607,27 @@ def collabs_category_label(raw_code: str) -> str:
     if not code:
         return ""
     return COLLABS_CATEGORY_LABELS.get(code, code)
+
+
+def norm_collabs_product_categories(raw) -> list[str]:
+    """Chuẩn hóa mã CreatorProductCategory cho GraphQL productCategories."""
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        items = [raw]
+    elif isinstance(raw, (list, tuple, set)):
+        items = list(raw)
+    else:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        code = str(item or "").strip().upper()
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        out.append(code)
+    return out
 
 
 def format_collabs_holding_period(raw) -> str:
@@ -1190,6 +1217,51 @@ def _collabs_page_has_signup_cta(html: str) -> bool:
     )
 
 
+def discover_collabs_signup_url_with_redirect(
+    storefront_url: str,
+    timeout_sec: int = 20,
+    should_stop: Callable[[], bool] | None = None,
+) -> str:
+    """
+    Tìm link đăng ký: thử URL storefront gốc trước, sau đó URL sau redirect.
+    Tránh mất slug đúng (vd. toybox.shop/pages/collaboration) khi redirect sang domain khác.
+    """
+    original = str(storefront_url or "").strip()
+    if not original:
+        return ""
+    resolved = resolve_redirected_url(original, timeout_sec=timeout_sec)
+    candidates: list[str] = []
+    for u in (original, resolved):
+        u = str(u or "").strip()
+        if u and u not in candidates:
+            candidates.append(u)
+    def _signup_rank(url: str) -> int:
+        low = (url or "").lower().rstrip("/")
+        if "/pages/collaboration" in low or low.endswith("/collaboration"):
+            return 0
+        if "collaboration" in low:
+            return 1
+        if low.endswith("/pages/collab") or low.endswith("/pages/collabs"):
+            return 100
+        return 50
+
+    best = ""
+    best_rank = 999
+    for u in candidates:
+        if should_stop and should_stop():
+            break
+        found = discover_collabs_signup_url(u, timeout_sec=timeout_sec, should_stop=should_stop)
+        if not found:
+            continue
+        rank = _signup_rank(found)
+        if rank < best_rank:
+            best = found
+            best_rank = rank
+        if rank == 0:
+            break
+    return best
+
+
 def discover_collabs_signup_url(
     site_url: str, timeout_sec: int = 20, should_stop: Callable[[], bool] | None = None
 ) -> str:
@@ -1209,7 +1281,7 @@ def discover_collabs_signup_url(
 
     # Tổng thời gian tìm kiếm cho 1 domain (giây). Quá thời gian -> trả default và nhảy domain khác.
     # Yêu cầu mới: tối đa 30 giây (có thể override bằng env).
-    max_domain_search_sec = int(os.getenv("COLLABS_SIGNUP_MAX_DOMAIN_SECONDS", "30") or "30")
+    max_domain_search_sec = int(os.getenv("COLLABS_SIGNUP_MAX_DOMAIN_SECONDS", "15") or "15")
     if max_domain_search_sec < 5:
         max_domain_search_sec = 5
     deadline = time.monotonic() + float(max_domain_search_sec)
@@ -1265,10 +1337,19 @@ def discover_collabs_signup_url(
             if any(k in low for k in quick_keywords):
                 quick_links.append(normalized)
         # Ưu tiên community trước, sau đó collab/affiliate.
-        quick_links = sorted(
-            set(quick_links),
-            key=lambda u: (0 if "community" in u.lower() else (1 if "collab" in u.lower() else 2)),
-        )
+        def _homepage_link_rank(u: str) -> tuple:
+            low = u.lower()
+            if "/pages/collaboration" in low or low.rstrip("/").endswith("/collaboration"):
+                return (0,)
+            if "collaboration" in low:
+                return (1,)
+            if "community" in low:
+                return (2,)
+            if "collab" in low:
+                return (3,)
+            return (4,)
+
+        quick_links = sorted(set(quick_links), key=_homepage_link_rank)
         for cand in quick_links[:60]:
             if _halt() or _remaining_sec() <= 0:
                 break
@@ -1277,6 +1358,8 @@ def discover_collabs_signup_url(
                 return final_url
 
     preferred_paths = [
+        "/pages/collaboration",
+        "/pages/collaborations",
         "/pages/collab",
         "/pages/collabs",
         "/pages/collabs-signup",
@@ -1290,11 +1373,9 @@ def discover_collabs_signup_url(
         "/pages/ambassadors",
         "/pages/ambassador-program",
         "/pages/ambassador-programs",
-        "/pages/collaboration",
         "/pages/partners",
         "/pages/partner-program",
         "/pages/partner-programs",
-        "/pages/collaborations",
         "/pages/curious-community",
         "/pages/shopify-collabs",
         "/ambassadors",
@@ -1365,13 +1446,21 @@ def discover_collabs_signup_url(
 
     quick_candidates = _extract_same_domain_links_quick(home_html, home_url)
     # Ưu tiên community/collab trước để tăng độ chính xác cho Shopify Collabs page.
-    quick_candidates.sort(
-        key=lambda u: (
-            0
-            if "community" in u.lower()
-            else (1 if "collab" in u.lower() else (2 if "affiliate" in u.lower() else 3))
-        )
-    )
+    def _quick_cand_rank(u: str) -> tuple:
+        low = u.lower()
+        if "/pages/collaboration" in low or low.rstrip("/").endswith("/collaboration"):
+            return (0,)
+        if "collaboration" in low:
+            return (1,)
+        if "community" in low:
+            return (2,)
+        if "collab" in low:
+            return (3,)
+        if "affiliate" in low:
+            return (4,)
+        return (5,)
+
+    quick_candidates.sort(key=_quick_cand_rank)
     for cand in quick_candidates:
         if _halt() or _remaining_sec() <= 0:
             break
@@ -2805,29 +2894,374 @@ def fetch_refersion_page(base_url: str, page: int) -> dict:
     return body if isinstance(body, dict) else {}
 
 
-def fetch_collabs_page(base_url: str, first: int, after: str | None = None) -> dict:
+def fetch_collabs_page(
+    base_url: str,
+    first: int,
+    after: str | None = None,
+    product_categories: list | None = None,
+    search_query: str | None = None,
+) -> dict:
     payload = {
         "operationName": "BrandsQuery",
         "query": COLLABS_BRANDS_QUERY,
         "variables": {
             "first": int(first),
-            "productCategories": [],
+            "productCategories": norm_collabs_product_categories(product_categories),
             "brandValues": [],
         },
     }
+    sq = str(search_query or "").strip()
+    if sq:
+        payload["variables"]["searchQuery"] = sq
     if after:
         payload["variables"]["after"] = str(after)
-    res = requests.post(base_url, headers=build_collabs_headers(), json=payload, timeout=60)
-    text = res.text
-    try:
-        body = res.json()
-    except Exception as exc:
-        raise RuntimeError(f"Collabs parse JSON lỗi (HTTP {res.status_code}): {text[:180]}") from exc
+    max_retries = int(os.getenv("COLLABS_HTTP_RETRIES", "6") or "6")
+    retry_base_ms = int(os.getenv("COLLABS_HTTP_RETRY_BASE_MS", "800") or "800")
+    body = None
+    text = ""
+    res = None
+    for attempt in range(max_retries + 1):
+        res = requests.post(base_url, headers=build_collabs_headers(), json=payload, timeout=60)
+        text = res.text
+        if res.status_code == 429 or res.status_code >= 500:
+            if attempt >= max_retries:
+                break
+            wait_ms = retry_base_ms * (2**attempt)
+            time.sleep(wait_ms / 1000)
+            continue
+        try:
+            body = res.json()
+        except Exception as exc:
+            if attempt >= max_retries:
+                raise RuntimeError(
+                    f"Collabs parse JSON lỗi (HTTP {res.status_code}): {text[:180]}"
+                ) from exc
+            time.sleep(retry_base_ms / 1000)
+            continue
+        break
+    if body is None:
+        raise RuntimeError(f"Collabs HTTP {res.status_code}: {text[:300]}")
     if not res.ok:
         raise RuntimeError(f"Collabs HTTP {res.status_code}: {text[:300]}")
     if body.get("errors"):
         raise RuntimeError(f"Collabs GraphQL lỗi: {json.dumps(body.get('errors'), ensure_ascii=False)[:300]}")
     return body if isinstance(body, dict) else {}
+
+
+def _collabs_brands_search(body: dict) -> dict:
+    data = body.get("data") if isinstance(body, dict) else {}
+    search = data.get("brandsNetworkSearch") if isinstance(data, dict) else {}
+    return search if isinstance(search, dict) else {}
+
+
+def _collabs_shard_total_count(
+    base_url: str,
+    page_size: int,
+    product_categories: list | None,
+    search_query: str,
+) -> int:
+    body = fetch_collabs_page(
+        base_url,
+        page_size,
+        product_categories=product_categories,
+        search_query=search_query or None,
+    )
+    search = _collabs_brands_search(body)
+    try:
+        return int(search.get("totalCount") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _collabs_paginate_shard(
+    base_url: str,
+    page_size: int,
+    product_categories: list | None,
+    search_query: str,
+    delay_ms: int = 0,
+    should_stop: Callable[[], bool] | None = None,
+    max_pages: int | None = None,
+) -> list[dict]:
+    """Lấy hết brand trong một shard searchQuery (totalCount phải <= ngưỡng shard)."""
+    after = None
+    out: list[dict] = []
+    pages = 0
+    page_cap = max_pages if max_pages is not None else COLLABS_SHARD_MAX_PAGES
+    while pages < page_cap:
+        if should_stop and should_stop():
+            break
+        body = fetch_collabs_page(
+            base_url,
+            page_size,
+            after=after,
+            product_categories=product_categories,
+            search_query=search_query or None,
+        )
+        search = _collabs_brands_search(body)
+        nodes = search.get("nodes") or []
+        if not isinstance(nodes, list):
+            nodes = []
+        if not nodes:
+            break
+        pages += 1
+        out.extend([n for n in nodes if isinstance(n, dict)])
+        info = search.get("pageInfo") or {}
+        if not info.get("hasNextPage"):
+            break
+        after = info.get("endCursor")
+        if not after:
+            break
+        shard_delay = max(delay_ms, int(os.getenv("COLLABS_SHARD_PAGE_DELAY_MS", "50") or "50"))
+        if shard_delay > 0:
+            time.sleep(shard_delay / 1000)
+    return out
+
+
+def fetch_all_collabs_brands_nodes(
+    base_url: str,
+    product_categories: list | None = None,
+    delay_ms: int = 0,
+    should_stop: Callable[[], bool] | None = None,
+    log_fn: Callable[[str], None] | None = None,
+    shard_threshold: int | None = None,
+    max_count: int | None = None,
+    exclude_ids: set[str] | None = None,
+) -> list[dict]:
+    """Tải brand Discovery — chia searchQuery (a, aa, ab…) khi totalCount > ~996.
+
+    max_count: tối đa brand *mới* (chưa có trong exclude_ids). None = không giới hạn.
+    """
+    threshold = shard_threshold if shard_threshold is not None else COLLABS_SHARD_FETCH_THRESHOLD
+    page_size = DEFAULT_COLLABS_LIMIT
+    queue: list[str] = [""]
+    by_id: dict[str, dict] = {}
+    exclude = exclude_ids or set()
+    out: list[dict] = []
+    shards_fetched = 0
+
+    def _log(msg: str) -> None:
+        if log_fn:
+            log_fn(msg)
+
+    while queue:
+        if should_stop and should_stop():
+            break
+        prefix = queue.pop(0)
+        if should_stop and should_stop():
+            break
+        try:
+            total = _collabs_shard_total_count(base_url, page_size, product_categories, prefix)
+        except Exception as exc:
+            _log(f"Collabs shard {prefix!r}: lỗi đếm — {exc}")
+            continue
+        if delay_ms > 0:
+            time.sleep(delay_ms / 1000)
+        if total <= 0:
+            continue
+        label = prefix if prefix else "(tất cả)"
+        if total > threshold:
+            if len(prefix) >= COLLABS_SHARD_MAX_DEPTH:
+                _log(
+                    f"Collabs shard {label}: totalCount={total} vượt ngưỡng nhưng đã chạm "
+                    f"max depth={COLLABS_SHARD_MAX_DEPTH}, lấy tạm shard này."
+                )
+            else:
+                _log(f"Collabs shard {label}: totalCount={total} — chia nhỏ…")
+                for ch in COLLABS_SHARD_ALPHABET:
+                    queue.append(prefix + ch)
+                continue
+        nodes = _collabs_paginate_shard(
+            base_url,
+            page_size,
+            product_categories,
+            prefix,
+            delay_ms=delay_ms,
+            should_stop=should_stop,
+        )
+        new_n = 0
+        for node in nodes:
+            nid = str(node.get("id") or "").strip()
+            if not nid or nid in exclude or nid in by_id:
+                continue
+            by_id[nid] = node
+            out.append(node)
+            new_n += 1
+            if max_count is not None and len(out) >= max_count:
+                _log(
+                    f"Collabs shard {label}: đủ {max_count} brand mới — dừng shard."
+                )
+                return out[:max_count]
+        shards_fetched += 1
+        _log(
+            f"Collabs shard {label}: +{new_n} brand mới "
+            f"(shard {len(nodes)}, tổng mới {len(out)}/{total})"
+        )
+
+    _log(f"Collabs: hoàn tất shard — {shards_fetched} shard, {len(out)} brand mới.")
+    return out
+
+
+def fetch_collabs_cursor_brand_ids(
+    base_url: str,
+    product_categories: list | None = None,
+    delay_ms: int = 0,
+    should_stop: Callable[[], bool] | None = None,
+) -> set[str]:
+    """Thu thập toàn bộ brand id từ cursor Discovery (không searchQuery) — dùng loại trùng khi phân trang shard."""
+    after = None
+    out: set[str] = set()
+    while True:
+        if should_stop and should_stop():
+            break
+        body = fetch_collabs_page(
+            base_url, DEFAULT_COLLABS_LIMIT, after=after, product_categories=product_categories
+        )
+        search = _collabs_brands_search(body)
+        nodes = search.get("nodes") or []
+        if not isinstance(nodes, list) or not nodes:
+            break
+        for node in nodes:
+            if isinstance(node, dict):
+                nid = str(node.get("id") or "").strip()
+                if nid:
+                    out.add(nid)
+        info = search.get("pageInfo") or {}
+        if not info.get("hasNextPage"):
+            break
+        after = info.get("endCursor")
+        if not after:
+            break
+        if delay_ms > 0:
+            time.sleep(delay_ms / 1000)
+    return out
+
+
+def _iter_collabs_shard_brands(
+    base_url: str,
+    product_categories: list | None,
+    exclude_ids: set[str],
+    *,
+    delay_ms: int = 0,
+    should_stop: Callable[[], bool] | None = None,
+    max_pages_per_prefix: int | None = None,
+):
+    """Duyệt brand shard theo thứ tự cố định: prefix a→z→0-9, cursor từng prefix."""
+    exclude = exclude_ids or set()
+    seen: set[str] = set()
+    page_cap = max_pages_per_prefix if max_pages_per_prefix is not None else COLLABS_SHARD_MAX_PAGES
+    for prefix in COLLABS_SHARD_ALPHABET:
+        if should_stop and should_stop():
+            return
+        after = None
+        pages = 0
+        while pages < page_cap:
+            if should_stop and should_stop():
+                return
+            body = fetch_collabs_page(
+                base_url,
+                DEFAULT_COLLABS_LIMIT,
+                after=after,
+                product_categories=product_categories,
+                search_query=prefix or None,
+            )
+            search = _collabs_brands_search(body)
+            nodes = search.get("nodes") or []
+            if not isinstance(nodes, list) or not nodes:
+                break
+            pages += 1
+            for node in nodes:
+                if not isinstance(node, dict):
+                    continue
+                nid = str(node.get("id") or "").strip()
+                if not nid or nid in exclude or nid in seen:
+                    continue
+                seen.add(nid)
+                yield node
+            info = search.get("pageInfo") or {}
+            if not info.get("hasNextPage"):
+                break
+            after = info.get("endCursor")
+            if not after:
+                break
+            shard_delay = max(delay_ms, int(os.getenv("COLLABS_SHARD_PAGE_DELAY_MS", "50") or "50"))
+            if shard_delay > 0:
+                time.sleep(shard_delay / 1000)
+
+
+def fetch_collabs_brands_shard_paginated(
+    base_url: str,
+    product_categories: list | None,
+    exclude_ids: set[str],
+    max_count: int,
+    skip_count: int = 0,
+    delay_ms: int = 0,
+    should_stop: Callable[[], bool] | None = None,
+    log_fn: Callable[[str], None] | None = None,
+) -> list[dict]:
+    """
+    Lấy brand shard theo thứ tự cố định (a→z→0-9), bỏ qua skip_count brand đầu, lấy max_count tiếp theo.
+    Không random — mỗi start_page/end_page cho batch shard khác nhau.
+    """
+    if max_count <= 0:
+        return []
+    skip_count = max(0, int(skip_count or 0))
+
+    def _log(msg: str) -> None:
+        if log_fn:
+            log_fn(msg)
+
+    if skip_count:
+        _log(
+            f"Collabs shard: bỏ qua {skip_count} brand (phân trang cố định), "
+            f"lấy tối đa {max_count} brand…"
+        )
+    else:
+        _log(f"Collabs shard: đang lấy tối đa {max_count} brand mới…")
+
+    skipped = 0
+    out: list[dict] = []
+    for node in _iter_collabs_shard_brands(
+        base_url,
+        product_categories,
+        exclude_ids,
+        delay_ms=delay_ms,
+        should_stop=should_stop,
+    ):
+        if skipped < skip_count:
+            skipped += 1
+            continue
+        out.append(node)
+        if len(out) >= max_count:
+            return out[:max_count]
+    if skip_count and skipped < skip_count and not out:
+        _log(
+            f"Collabs shard: không đủ brand để bỏ qua {skip_count} "
+            f"(chỉ có {skipped} brand sau khi loại trùng cursor)."
+        )
+    return out[:max_count]
+
+
+def fetch_collabs_brands_shard_fill(
+    base_url: str,
+    product_categories: list | None,
+    exclude_ids: set[str],
+    max_count: int,
+    delay_ms: int = 0,
+    should_stop: Callable[[], bool] | None = None,
+    log_fn: Callable[[str], None] | None = None,
+    skip_count: int = 0,
+) -> list[dict]:
+    """Lấy brand mới qua searchQuery a-z0-9 (thứ tự cố định, có thể skip phân trang)."""
+    return fetch_collabs_brands_shard_paginated(
+        base_url,
+        product_categories,
+        exclude_ids,
+        max_count=max_count,
+        skip_count=skip_count,
+        delay_ms=delay_ms,
+        should_stop=should_stop,
+        log_fn=log_fn,
+    )
 
 
 def fetch_collabs_brand_profile(base_url: str, shopify_store_gid: str) -> dict:

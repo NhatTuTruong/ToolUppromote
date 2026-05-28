@@ -122,6 +122,7 @@ function settingValueForPayload(key) {
 
 /** Đồng bộ khi đổi tab — không gồm minTraffic (để hai tab không ghi đè ngưỡng traffic). */
 const LS_END_PAGE = "aff_filter_end_page";
+const LS_END_PAGE_COLLABS = "aff_filter_end_page_collabs";
 
 const FILTER_SYNC_PAIRS_GP = [
   ["startPage", "startPageGp"],
@@ -153,7 +154,7 @@ function syncAutoApplyAccountModeUI() {
 
 const COLLABS_ACCOUNT_MAX = 10;
 
-/** Đa tài khoản: dải 1-5, danh sách 1,4,7, hoặc số n (tài khoản 1..n). */
+/** Chọn tài khoản: dải 1-5, danh sách 1,4,7, hoặc số n (chỉ tài khoản n). */
 function parseCollabsAccountSelection(raw) {
   const s = String(raw || "").trim();
   if (!s) {
@@ -183,9 +184,6 @@ function parseCollabsAccountSelection(raw) {
         idx.push(n);
       }
     }
-    if (idx.length < 2) {
-      return { ok: false, indices: [], error: "Đa tài khoản cần ít nhất 2 tài khoản." };
-    }
     return { ok: true, indices: idx, error: "" };
   }
   if (s.includes("-")) {
@@ -205,32 +203,23 @@ function parseCollabsAccountSelection(raw) {
     }
     const idx = [];
     for (let i = a; i <= b; i += 1) idx.push(i);
-    if (idx.length < 2) {
-      return {
-        ok: false,
-        indices: [],
-        error: "Đa tài khoản cần ít nhất 2 tài khoản (vd: 1-2, không dùng 5-5).",
-      };
-    }
     return { ok: true, indices: idx, error: "" };
   }
   if (/^\d+$/.test(s)) {
     const n = parseInt(s, 10);
-    if (!Number.isFinite(n) || n < 2 || n > COLLABS_ACCOUNT_MAX) {
+    if (!Number.isFinite(n) || n < 1 || n > COLLABS_ACCOUNT_MAX) {
       return {
         ok: false,
         indices: [],
-        error: `Nhập số từ 2–${COLLABS_ACCOUNT_MAX} (tài khoản 1→n), hoặc dải/danh sách.`,
+        error: `Nhập số từ 1–${COLLABS_ACCOUNT_MAX} (chỉ tài khoản n), hoặc dải/danh sách.`,
       };
     }
-    const idx = [];
-    for (let i = 1; i <= n; i += 1) idx.push(i);
-    return { ok: true, indices: idx, error: "" };
+    return { ok: true, indices: [n], error: "" };
   }
   return {
     ok: false,
     indices: [],
-    error: "Không hiểu định dạng. Dùng 1-5 hoặc 1,4,7 hoặc số 2-10.",
+    error: "Không hiểu định dạng. Dùng 1-5 hoặc 1,4,7 hoặc số 1-10.",
   };
 }
 
@@ -357,6 +346,15 @@ function loadPersistedEndPage() {
   if ($("endPage")) $("endPage").value = v;
   if ($("endPageGp")) $("endPageGp").value = v;
   if ($("endPageRf")) $("endPageRf").value = v;
+  const rawCb = localStorage.getItem(LS_END_PAGE_COLLABS);
+  if ($("endPageCb")) {
+    $("endPageCb").value = rawCb === null ? "" : String(rawCb);
+  }
+}
+
+function persistEndPageCollabs() {
+  const v = ($("endPageCb")?.value ?? "").trim();
+  localStorage.setItem(LS_END_PAGE_COLLABS, v);
 }
 
 function mirrorEndPageOther(fromUppromote) {
@@ -739,7 +737,12 @@ function bindMultiSelectDropdowns() {
       if (n === 0) {
         // Nếu đây là dropdown Identify trong Auto Apply, mặc định là "Prefer not to say"
         const label = String(root.getAttribute("data-multi-label") || "").toLowerCase();
-        textEl.textContent = label.includes("identify") ? "Prefer not to say" : "Tất cả";
+        const emptyLabel = String(root.getAttribute("data-empty-label") || "").trim();
+        if (emptyLabel) {
+          textEl.textContent = emptyLabel;
+        } else {
+          textEl.textContent = label.includes("identify") ? "Prefer not to say" : "Tất cả";
+        }
         return;
       }
       if (n === 1) {
@@ -835,7 +838,7 @@ function collectFilters(source) {
       min_cookie: "",
       currency: "",
       application_review: "",
-      categories: collectCheckedValues("#categoryCollabsGroup"),
+      product_categories: collectCheckedValues("#productCategoryCollabsGroup"),
     };
   }
   return {
@@ -1920,6 +1923,22 @@ function bindEvents() {
   document.querySelectorAll(".tab-btn").forEach((btn) => {
     btn.addEventListener("click", () => switchTab(btn.dataset.tab, true));
   });
+  const reloadBtn = $("reloadAppBtn");
+  if (reloadBtn) {
+    reloadBtn.addEventListener("click", (e) => {
+      try {
+        e.preventDefault();
+        e.stopPropagation();
+      } catch (_) {}
+      try {
+        const url = new URL(window.location.href);
+        url.searchParams.set("_reload", String(Date.now()));
+        window.location.replace(url.toString());
+      } catch (_) {
+        window.location.reload();
+      }
+    });
+  }
   bindMultiSelectDropdowns();
   bindSecretEyeButtons();
   const aaAccMode = $("aa_account_mode");
@@ -1927,6 +1946,9 @@ function bindEvents() {
   const cbMode = $("collabsDiscoveryMode");
   if (cbMode) cbMode.addEventListener("change", updateCollabsDiscoveryModeUI);
   updateCollabsDiscoveryModeUI();
+  const endPageCb = $("endPageCb");
+  if (endPageCb) endPageCb.addEventListener("change", persistEndPageCollabs);
+  if (endPageCb) endPageCb.addEventListener("blur", persistEndPageCollabs);
   $("saveSettingsBtn").addEventListener("click", saveSettings);
   $("runBtnUppromote").addEventListener("click", () => runFilter("uppromote"));
   $("runBtnGoaffpro").addEventListener("click", () => runFilter("goaffpro"));

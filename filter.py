@@ -208,6 +208,75 @@ def load_env_file(path: Path):
 load_env_file(BASE_DIR / ".env")
 
 
+API_URL_ENV_KEYS = (
+    "UPPROMOTE_API_URL",
+    "GOAFFPRO_API_URL",
+    "REFERSION_API_URL",
+    "COLLABS_API_URL",
+)
+
+
+def is_apify_api_token(value) -> bool:
+    s = str(value or "").strip()
+    return bool(s) and s.lower().startswith("apify_api_")
+
+
+def is_http_api_url(value) -> bool:
+    s = str(value or "").strip().lower()
+    return s.startswith("http://") or s.startswith("https://")
+
+
+def repair_misplaced_apify_tokens(env: dict) -> tuple[dict, list[str]]:
+    """Chuyển token Apify bị ghi nhầm vào các ô URL sang APIFY_TOKENS."""
+    out = dict(env or {})
+    notes: list[str] = []
+    tokens = parse_apify_tokens_list(out.get("APIFY_TOKENS"))
+    seen = set(tokens)
+    for key in API_URL_ENV_KEYS:
+        val = str(out.get(key) or "").strip()
+        if not val or not is_apify_api_token(val):
+            continue
+        if val not in seen:
+            tokens.append(val)
+            seen.add(val)
+        out.pop(key, None)
+        notes.append(f"Đã chuyển token Apify khỏi {key} sang APIFY_TOKENS.")
+    for legacy_key in ("APIFY_TOKEN", "APIFY_TOKEN_BACKUP", "COLLABS_OUTSIDE_APIFY_TOKEN"):
+        val = str(out.get(legacy_key) or "").strip()
+        if val and val not in seen:
+            tokens.append(val)
+            seen.add(val)
+    if tokens:
+        out["APIFY_TOKENS"] = "\n".join(tokens)
+        for legacy_key in ("APIFY_TOKEN", "APIFY_TOKEN_BACKUP", "COLLABS_OUTSIDE_APIFY_TOKEN"):
+            out.pop(legacy_key, None)
+    return out, notes
+
+
+def validate_api_url_env(key: str, value: str) -> str | None:
+    s = str(value or "").strip()
+    if not s:
+        return None
+    if is_apify_api_token(s):
+        return (
+            f"{key} đang là token Apify (bị ghi nhầm). "
+            "Token Apify chỉ điền vào APIFY_TOKENS; URL API phải bắt đầu bằng https://."
+        )
+    if not is_http_api_url(s):
+        return f"{key} không hợp lệ (cần URL bắt đầu bằng http:// hoặc https://)."
+    return None
+
+
+def assert_uppromote_api_url(base_url: str) -> str:
+    url = str(base_url or "").strip()
+    if not url:
+        raise RuntimeError("Thiếu UPPROMOTE_API_URL trong .env")
+    err = validate_api_url_env("UPPROMOTE_API_URL", url)
+    if err:
+        raise RuntimeError(err)
+    return url
+
+
 def host_key(raw: str) -> str:
     if not raw:
         return ""
@@ -352,6 +421,109 @@ def visits_formatted_from_engagement(eng: dict | None) -> str:
     if float(visits).is_integer():
         return str(int(visits))
     return f"{visits:.2f}".rstrip("0").rstrip(".")
+
+
+def _first_non_empty_value(*values):
+    for v in values:
+        if v is None:
+            continue
+        if isinstance(v, str) and not v.strip():
+            continue
+        return v
+    return None
+
+
+def format_visit_duration_cell(raw) -> str:
+    """Chuẩn hoá thời gian ở lại (giây hoặc chuỗi có sẵn) để hiển thị Excel."""
+    if raw is None:
+        return ""
+    if isinstance(raw, bool):
+        return ""
+    s = str(raw).strip()
+    if not s:
+        return ""
+    if re.search(r"[a-zA-Z]", s) and not re.fullmatch(r"-?\d+(?:[.,]\d+)?", s):
+        return s
+    if re.fullmatch(r"\d{1,2}:\d{2}(?::\d{2})?", s):
+        parts = [int(x) for x in s.split(":")]
+        if len(parts) == 2:
+            sec = parts[0] * 60 + parts[1]
+        else:
+            sec = parts[0] * 3600 + parts[1] * 60 + parts[2]
+        if sec <= 0:
+            return ""
+        raw = sec
+        s = str(sec)
+    try:
+        sec_f = float(str(raw).replace(",", "."))
+    except ValueError:
+        return s
+    if sec_f <= 0:
+        return ""
+    sec_i = int(round(sec_f))
+    if sec_i < 60:
+        return f"{sec_i}s"
+    minutes, seconds = divmod(sec_i, 60)
+    if minutes >= 60:
+        hours, minutes = divmod(minutes, 60)
+        if seconds:
+            return f"{hours}h {minutes}m {seconds}s"
+        if minutes:
+            return f"{hours}h {minutes}m"
+        return f"{hours}h"
+    if seconds:
+        return f"{minutes}m {seconds}s"
+    return f"{minutes}m"
+
+
+def visit_duration_from_item(item: dict | None, eng: dict | None = None) -> str:
+    """Thời gian ở lại (visit duration) từ Similarweb / Apify."""
+    src_item = item if isinstance(item, dict) else {}
+    src_eng = eng if isinstance(eng, dict) else engagement_from_item(src_item)
+    item_low = {str(k).strip().lower(): v for k, v in src_item.items()}
+    eng_low = {str(k).strip().lower(): v for k, v in (src_eng or {}).items()}
+    eng_in = src_item.get("engagement") or src_item.get("Engagement") or {}
+    if not isinstance(eng_in, dict):
+        eng_in = {}
+    eng_in_low = {str(k).strip().lower(): v for k, v in eng_in.items()}
+    raw = _first_non_empty_value(
+        src_eng.get("TimeOnSite"),
+        src_eng.get("timeOnSite"),
+        src_eng.get("VisitDuration"),
+        src_eng.get("AvgVisitDuration"),
+        src_eng.get("avgVisitDuration"),
+        src_eng.get("AvgVisitDurationSeconds"),
+        src_eng.get("avgVisitDurationSeconds"),
+        src_eng.get("AverageVisitDuration"),
+        src_eng.get("TimeOnSiteFormatted"),
+        src_eng.get("AvgVisitDurationFormatted"),
+        eng_low.get("timeonsite"),
+        eng_low.get("visitduration"),
+        eng_low.get("avgvisitduration"),
+        eng_low.get("avgvisitdurationseconds"),
+        src_item.get("TimeOnSite"),
+        src_item.get("timeOnSite"),
+        src_item.get("VisitDuration"),
+        src_item.get("AvgVisitDuration"),
+        src_item.get("avgVisitDuration"),
+        src_item.get("AvgVisitDurationSeconds"),
+        src_item.get("avgVisitDurationSeconds"),
+        src_item.get("AverageVisitDuration"),
+        src_item.get("TimeOnSiteFormatted"),
+        src_item.get("AvgVisitDurationFormatted"),
+        item_low.get("timeonsite"),
+        item_low.get("visitduration"),
+        item_low.get("avgvisitduration"),
+        item_low.get("avgvisitdurationseconds"),
+        eng_in.get("timeOnSite"),
+        eng_in.get("TimeOnSite"),
+        eng_in.get("avgVisitDuration"),
+        eng_in.get("avgVisitDurationSeconds"),
+        eng_in_low.get("timeonsite"),
+        eng_in_low.get("avgvisitduration"),
+        eng_in_low.get("avgvisitdurationseconds"),
+    )
+    return format_visit_duration_cell(raw)
 
 
 def format_estimated_monthly_visits(raw) -> str:
@@ -1966,30 +2138,16 @@ def _apify_run_actor_with_token(actor_id: str, run_input: dict, wait_secs: int, 
 def _apify_run_actor(actor_id: str, run_input: dict, wait_secs: int = 180, token: str | None = None) -> tuple[str, str]:
     """
     Run Apify actor và trả về (defaultDatasetId, token_đã_dùng).
-    token=None → thử APIFY_TOKEN rồi APIFY_TOKEN_BACKUP khi lỗi quota/quyền.
+    token=None → thử lần lượt mọi token trong APIFY_TOKENS khi lỗi quota/quyền.
     """
     if str(token or "").strip():
         t = str(token).strip()
         return _apify_run_actor_with_token(actor_id, run_input, wait_secs, t), t
-    candidates = apify_effective_token_candidates()
-    if not candidates:
-        raise RuntimeError("Thiếu APIFY_TOKEN trong .env (cần để chạy Apify actor Google Search).")
-    last_fail: Exception | None = None
-    for idx, tok in enumerate(candidates):
-        try:
-            ds = _apify_run_actor_with_token(actor_id, run_input, wait_secs, tok)
-            if idx > 0:
-                print("Apify Google actor: đã dùng token dự phòng (APIFY_TOKEN_BACKUP).")
-            return ds, tok
-        except ApifyTokenFailover as exc:
-            last_fail = exc
-            if idx + 1 < len(candidates):
-                print(f"Apify Google actor: token lỗi — thử dự phòng: {exc}")
-                continue
-            raise RuntimeError(f"Apify Google: hết token thử: {exc}") from exc
-    if last_fail:
-        raise RuntimeError(str(last_fail)) from last_fail
-    raise RuntimeError("Apify: không có token.")
+    ds, used = _apify_run_with_token_failover(
+        "Google actor",
+        lambda tok: _apify_run_actor_with_token(actor_id, run_input, wait_secs, tok),
+    )
+    return ds, used
 
 
 def _extract_urls_from_google_actor_items(items: list) -> list[str]:
@@ -2034,7 +2192,7 @@ def _fetch_google_result_urls_via_apify(
     """
     Lấy URL từ Google Search theo đúng cú pháp (inurl/OR/ngoặc) bằng Apify actor.
     Yêu cầu env:
-    - APIFY_TOKEN (và tuỳ chọn APIFY_TOKEN_BACKUP) — dùng chung với Similarweb
+    - APIFY_TOKENS (mỗi dòng một token, failover tự động) — dùng chung với Similarweb
     - COLLABS_OUTSIDE_GOOGLE_ACTOR_ID (vd: apify/google-search-scraper)
     """
     q = str(query or "").strip()
@@ -2601,6 +2759,7 @@ UPPROMOTE_CSV_HEADER_VI = [
     "Traffic (hiển thị)",
     "Traffic ước tính/tháng",
     "Trang/lượt xem",
+    "Thời gian ở lại",
     "Tỷ lệ thanh toán",
     "Tỷ lệ duyệt",
     "Tỷ lệ thoát",
@@ -2611,6 +2770,7 @@ UPPROMOTE_CSV_HEADER_VI = [
     "Điểm gợi ý",
     "Duyệt đơn",
     "Chu kỳ thanh toán",
+    "Danh sách phương thức thanh toán",
     "Chi tiết khuyến mãi",
     "Kênh được phép",
     "Đối tượng vị trí",
@@ -2636,6 +2796,7 @@ GOAFF_CSV_HEADER = [
     "Traffic ước tính/tháng",
     "Link đăng ký",
     "Trang/lượt xem",
+    "Thời gian ở lại",
     "Duyệt tự động",
     "Top từ khóa",
     "Tỷ lệ thoát",
@@ -2661,6 +2822,7 @@ REFERSION_CSV_HEADER = [
     "Traffic (hiển thị)",
     "Traffic ước tính/tháng",
     "Trang/lượt xem",
+    "Thời gian ở lại",
     "Tỷ lệ thoát",
     "Top quốc gia",
     "Top từ khóa",
@@ -2687,6 +2849,7 @@ COLLABS_CSV_HEADER = [
     "Traffic (hiển thị)",
     "Traffic ước tính/tháng",
     "Trang/lượt xem",
+    "Thời gian ở lại",
     "Tỷ lệ thoát",
     "Top quốc gia",
     "Top từ khóa",
@@ -2710,6 +2873,7 @@ def build_uppromote_csv_row_vi(offer: dict, item: dict, status: str) -> list:
         eng.get("VisitsFormatted", ""),
         estimated_monthly,
         eng.get("PagePerVisit", ""),
+        visit_duration_from_item(item, eng),
         format_percent_cell(offer.get("payout_rate", "")),
         format_percent_cell(offer.get("approval_rate", "")),
         format_percent_cell(eng.get("BounceRate", "")),
@@ -2720,6 +2884,7 @@ def build_uppromote_csv_row_vi(offer: dict, item: dict, status: str) -> list:
         offer.get("recommend_score", ""),
         offer.get("application_review", ""),
         offer.get("payments", ""),
+        uppromote_payment_methods_csv(offer),
         join_list(offer.get("promotion_details")),
         join_list(offer.get("target_audience_customer_channels")),
         join_list(offer.get("target_audience_locations")),
@@ -2753,6 +2918,7 @@ def build_goaff_csv_row(offer: dict, item: dict, status: str) -> list:
         estimated_monthly,
         goaff_create_account_url(offer),
         eng.get("PagePerVisit", ""),
+        visit_duration_from_item(item, eng),
         fmt_yes_no_01(offer.get("goaff_is_approved_automatically")),
         top_keywords_csv(keyword_shares_from_item(item)),
         format_percent_cell(eng.get("BounceRate", "")),
@@ -2782,6 +2948,7 @@ def build_refersion_csv_row(offer: dict, item: dict, status: str) -> list:
         eng.get("VisitsFormatted", ""),
         estimated_monthly,
         eng.get("PagePerVisit", ""),
+        visit_duration_from_item(item, eng),
         format_percent_cell(eng.get("BounceRate", "")),
         top_countries_csv(item.get("TopCountryShares") or []),
         top_keywords_csv(keyword_shares_from_item(item)),
@@ -2821,6 +2988,7 @@ def build_collabs_csv_row(offer: dict, item: dict, status: str) -> list:
         visits_display,
         estimated_monthly,
         eng.get("PagePerVisit", ""),
+        visit_duration_from_item(item, eng),
         format_percent_cell(eng.get("BounceRate", "")),
         top_countries_csv(item.get("TopCountryShares") or []),
         top_keywords_csv(keyword_shares_from_item(item)),
@@ -3740,9 +3908,7 @@ def fetch_uppromote_page(base_url: str, page: int) -> dict:
 
 
 def fetch_all_uppromote_offers() -> list:
-    base_url = (os.getenv("UPPROMOTE_API_URL") or "").strip()
-    if not base_url:
-        raise RuntimeError("Thiếu UPPROMOTE_API_URL trong .env")
+    base_url = assert_uppromote_api_url(os.getenv("UPPROMOTE_API_URL") or "")
 
     enforce_fixed_fetch_defaults()
     max_pages_cap = uppromote_max_pages_cap()
@@ -3935,6 +4101,75 @@ def join_list(value, sep="; "):
     return ""
 
 
+UPPROMOTE_PAYMENT_METHOD_LABELS = {
+    "paypal": "Paypal",
+    "bank": "Bank transfer",
+    "debit": "Debit card",
+    "cheque": "Check",
+    "venmo": "Venmo",
+    "paytm": "PayTM",
+    "upi": "UPI",
+    "store_credit": "Store credit",
+    "other": "Other",
+}
+
+
+def _normalize_payment_support(raw):
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return None
+        try:
+            obj = json.loads(text)
+        except Exception:
+            try:
+                obj = ast.literal_eval(text)
+            except Exception:
+                return None
+        return obj if isinstance(obj, dict) else None
+    return None
+
+
+def _payment_support_method_on(support: dict, method_key: str) -> bool:
+    if not method_key or not isinstance(support, dict):
+        return False
+    if method_key not in support:
+        return False
+    v = support[method_key]
+    if v is True:
+        return True
+    if v is False or v is None:
+        return False
+    try:
+        return int(v) == 1
+    except (TypeError, ValueError):
+        return str(v).strip() == "1"
+
+
+def uppromote_payment_methods_csv(offer: dict) -> str:
+    """Danh sách phương thức thanh toán bật trong payment_support, vd: Paypal, Bank transfer."""
+    support = _normalize_payment_support((offer or {}).get("payment_support"))
+    if not support:
+        return ""
+    labels: list[str] = []
+    seen: set[str] = set()
+    for key, label in UPPROMOTE_PAYMENT_METHOD_LABELS.items():
+        if _payment_support_method_on(support, key):
+            labels.append(label)
+            seen.add(key)
+    for key in support:
+        k = str(key).strip().lower()
+        if not k or k in seen:
+            continue
+        if _payment_support_method_on(support, k):
+            labels.append(k.replace("_", " ").title())
+    return ", ".join(labels)
+
+
 def keyword_shares_from_item(item):
     eng = item.get("Engagments") or item.get("Engagements") or {}
     candidates = [
@@ -3989,27 +4224,106 @@ def _normalize_apify_actor_id(actor_id: str) -> str:
 
 
 class ApifyTokenFailover(Exception):
-    """Token Apify chính có thể hết quota / hết hạn — thử APIFY_TOKEN_BACKUP."""
+    """Token Apify hiện tại hết quota / lỗi quyền — thử token tiếp theo trong APIFY_TOKENS."""
+
+
+def parse_apify_tokens_list(raw: str | None) -> list[str]:
+    """Tách danh sách token Apify (mỗi dòng một token), bỏ trùng giữ thứ tự."""
+    if raw is None:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for line in str(raw).replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        tok = line.strip()
+        if not tok or tok in seen:
+            continue
+        seen.add(tok)
+        out.append(tok)
+    if len(out) <= 1:
+        return out
+    deduped: list[str] = []
+    for tok in out:
+        if any(other != tok and other.startswith(tok) for other in out):
+            continue
+        deduped.append(tok)
+    return deduped
+
+
+def apify_tokens_from_env() -> list[str]:
+    """
+    Danh sách token Apify theo thứ tự ưu tiên.
+    Ưu tiên APIFY_TOKENS (nhiều dòng); tương thích .env cũ APIFY_TOKEN + APIFY_TOKEN_BACKUP.
+    """
+    multi = parse_apify_tokens_list(os.getenv("APIFY_TOKENS"))
+    if multi:
+        return multi
+    out: list[str] = []
+    seen: set[str] = set()
+    for key in ("APIFY_TOKEN", "COLLABS_OUTSIDE_APIFY_TOKEN", "APIFY_TOKEN_BACKUP"):
+        tok = (os.getenv(key) or "").strip()
+        if tok and tok not in seen:
+            out.append(tok)
+            seen.add(tok)
+    return out
 
 
 def apify_primary_token() -> str:
-    """
-    Token Apify chính (dùng cho Similarweb + Google Search Collabs ngoài Discovery).
-    COLLABS_OUTSIDE_APIFY_TOKEN chỉ còn để tương thích .env cũ khi APIFY_TOKEN trống.
-    """
-    return ((os.getenv("APIFY_TOKEN") or "").strip() or (os.getenv("COLLABS_OUTSIDE_APIFY_TOKEN") or "").strip())
+    """Token Apify đầu tiên trong danh sách (Similarweb + Google Collabs ngoài Discovery)."""
+    tokens = apify_tokens_from_env()
+    return tokens[0] if tokens else ""
 
 
 def apify_effective_token_candidates() -> list[str]:
-    """Chính rồi dự phòng (không trùng)."""
-    primary = apify_primary_token()
-    backup = (os.getenv("APIFY_TOKEN_BACKUP") or "").strip()
-    out: list[str] = []
-    if primary:
-        out.append(primary)
-    if backup and backup not in out:
-        out.append(backup)
-    return out
+    return apify_tokens_from_env()
+
+
+def sync_apify_token_env(tokens: list[str] | None = None) -> None:
+    """Đồng bộ biến môi trường legacy sau khi đọc/lưu APIFY_TOKENS."""
+    lst = tokens if tokens is not None else apify_tokens_from_env()
+    if lst:
+        os.environ["APIFY_TOKENS"] = "\n".join(lst)
+        os.environ["APIFY_TOKEN"] = lst[0]
+        if len(lst) > 1:
+            os.environ["APIFY_TOKEN_BACKUP"] = lst[1]
+        else:
+            os.environ.pop("APIFY_TOKEN_BACKUP", None)
+    else:
+        os.environ.pop("APIFY_TOKENS", None)
+        os.environ.pop("APIFY_TOKEN", None)
+        os.environ.pop("APIFY_TOKEN_BACKUP", None)
+
+
+def _apify_tokens_missing_error(context: str = "") -> RuntimeError:
+    prefix = f"Apify ({context}): " if context else "Apify: "
+    return RuntimeError(
+        f"{prefix}Thiếu token Apify (APIFY_TOKENS) — cần ít nhất một token (mỗi dòng một token)."
+    )
+
+
+def _apify_run_with_token_failover(label: str, runner):
+    """Chạy runner(token) lần lượt với từng token; chỉ lỗi khi hết token."""
+    candidates = apify_effective_token_candidates()
+    if not candidates:
+        raise _apify_tokens_missing_error(label)
+    last_fail: Exception | None = None
+    total = len(candidates)
+    for idx, tok in enumerate(candidates):
+        try:
+            result = runner(tok)
+            if idx > 0:
+                print(f"Apify ({label}): đã chuyển sang token #{idx + 1}/{total}.")
+            return result, tok
+        except ApifyTokenFailover as exc:
+            last_fail = exc
+            if idx + 1 < total:
+                print(f"Apify ({label}): token #{idx + 1}/{total} lỗi — thử token tiếp theo: {exc}")
+                continue
+            raise RuntimeError(
+                f"Apify ({label}): tất cả {total} token đã hết quota hoặc lỗi quyền: {exc}"
+            ) from exc
+    if last_fail:
+        raise RuntimeError(str(last_fail)) from last_fail
+    raise _apify_tokens_missing_error(label)
 
 
 def _apify_http_suggests_token_failover(status: int, body: str) -> bool:
@@ -4112,29 +4426,12 @@ def _apify_store_actor_dataset_id_with_token(
 def _apify_store_actor_dataset_id(actor_id: str, run_input: dict, *, wait_secs: int | None = None) -> tuple[str, str]:
     """
     Chạy actor Apify Store (POST + poll), trả về (defaultDatasetId, token_đã_dùng).
-    Token chính (APIFY_TOKEN) hết quota/401… → tự thử APIFY_TOKEN_BACKUP nếu có.
+    Thử lần lượt mọi token trong APIFY_TOKENS; chỉ lỗi khi tất cả token hết quota/lỗi quyền.
     """
-    candidates = apify_effective_token_candidates()
-    if not candidates:
-        raise RuntimeError(
-            "Thiếu APIFY_TOKEN trong .env (Similarweb và tìm Google Collabs ngoài Discovery dùng chung một token)."
-        )
-    last_fail: Exception | None = None
-    for idx, tok in enumerate(candidates):
-        try:
-            ds = _apify_store_actor_dataset_id_with_token(actor_id, run_input, wait_secs=wait_secs, token=tok)
-            if idx > 0:
-                print("Apify: đã dùng token dự phòng (APIFY_TOKEN_BACKUP) sau lỗi token chính.")
-            return ds, tok
-        except ApifyTokenFailover as exc:
-            last_fail = exc
-            if idx + 1 < len(candidates):
-                print(f"Apify token lỗi quota/quyền — chuyển sang token dự phòng: {exc}")
-                continue
-            raise RuntimeError(f"Apify: hết token thử (quota/quyền): {exc}") from exc
-    if last_fail:
-        raise RuntimeError(str(last_fail)) from last_fail
-    raise RuntimeError("Apify: không có token hợp lệ.")
+    return _apify_run_with_token_failover(
+        "Similarweb",
+        lambda tok: _apify_store_actor_dataset_id_with_token(actor_id, run_input, wait_secs=wait_secs, token=tok),
+    )
 
 
 def apify_call_actor(domains: list) -> tuple[str, str]:
@@ -4271,6 +4568,17 @@ def normalize_radeance_similarweb_item(raw: dict) -> dict:
     br = raw.get("bounceRate")
     if br is None:
         br = eng_in.get("bounceRate")
+    tos = raw.get("timeOnSite")
+    if tos is None:
+        tos = raw.get("avgVisitDurationSeconds")
+    if tos is None:
+        tos = raw.get("avgVisitDuration")
+    if tos is None:
+        tos = eng_in.get("timeOnSite")
+    if tos is None:
+        tos = eng_in.get("avgVisitDurationSeconds")
+    if tos is None:
+        tos = eng_in.get("avgVisitDuration")
     monthly_df = raw.get("monthlyVisitsDateFormat") or low.get("monthlyvisitsdateformat") or {}
     if isinstance(monthly_df, str) and monthly_df.strip().startswith("{"):
         try:
@@ -4344,6 +4652,7 @@ def normalize_radeance_similarweb_item(raw: dict) -> dict:
             "VisitsFormatted": _format_visits_integer_display(visits_f),
             "PagePerVisit": ppg,
             "BounceRate": br,
+            "TimeOnSite": tos,
         },
         "EstimatedMonthlyVisits": monthly_df,
         "TopCountryShares": top_country_shares,
@@ -4454,12 +4763,13 @@ def merge_outside_similarweb_fallback_batch(part_domains: list, batch_items: lis
 
 
 def check_apify_connection() -> str:
-    """Kiểm tra kết nối Apify; thử token chính rồi token dự phòng."""
+    """Kiểm tra kết nối Apify; thử lần lượt mọi token trong APIFY_TOKENS."""
     candidates = apify_effective_token_candidates()
     if not candidates:
-        raise RuntimeError("Thiếu APIFY_TOKEN trong .env")
+        raise _apify_tokens_missing_error("connection check")
     last_err = ""
-    for tok in candidates:
+    total = len(candidates)
+    for idx, tok in enumerate(candidates):
         url = f"https://api.apify.com/v2/users/me?token={tok}"
         try:
             res = requests.get(url, timeout=20)
@@ -4469,6 +4779,8 @@ def check_apify_connection() -> str:
         if not res.ok:
             last_err = f"HTTP {res.status_code}: {res.text[:300]}"
             if _apify_http_suggests_token_failover(res.status_code, res.text or ""):
+                if idx + 1 < total:
+                    print(f"Apify (connection check): token #{idx + 1}/{total} lỗi — thử token tiếp theo.")
                 continue
             raise RuntimeError(f"Apify connection check lỗi HTTP {res.status_code}: {res.text[:300]}")
         try:
@@ -4482,16 +4794,21 @@ def check_apify_connection() -> str:
             or str(data.get("id") or "").strip()
             or "unknown-user"
         )
+        if idx > 0:
+            print(f"Apify (connection check): đã chuyển sang token #{idx + 1}/{total}.")
         return username
-    raise RuntimeError(f"Apify connection check thất bại với mọi token đã cấu hình: {last_err}")
+    raise RuntimeError(
+        f"Apify: tất cả {total} token đã hết quota hoặc lỗi quyền (connection check): {last_err}"
+    )
 
 
 def apify_list_items(dataset_id: str, token: str | None = None) -> list:
-    tok = (str(token or "").strip() or apify_primary_token())
-    if not tok:
+    if str(token or "").strip():
+        tok = str(token).strip()
+    else:
         cand = apify_effective_token_candidates()
         if not cand:
-            raise RuntimeError("Thiếu APIFY_TOKEN trong .env")
+            raise _apify_tokens_missing_error("list items")
         tok = cand[0]
     http_retries = int(os.getenv("APIFY_HTTP_RETRIES", "3") or "3")
     if http_retries < 1:

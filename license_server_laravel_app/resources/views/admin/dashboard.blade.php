@@ -47,7 +47,10 @@
                     <input type="hidden" name="tab" value="tab-refersion">
                     <div class="token-field">
                         <label class="field-label" for="refersion_token">Refersion token</label>
-                        <input id="refersion_token" name="refersion_token" type="text" value="{{ $refersionToken }}" autocomplete="off" placeholder="Dán token Refersion vào đây">
+                        <div class="flex-input-row">
+                            <input id="refersion_token" name="refersion_token" type="text" value="{{ $refersionToken }}" autocomplete="off" placeholder="Dán token Refersion vào đây">
+                            <button id="btn-refresh-refersion-token" type="button" class="btn btn-warn" style="flex-shrink:0;" title="Lấy token từ phiên Refersion đang đăng nhập trên trình duyệt">Update</button>
+                        </div>
                     </div>
                     <div class="form-actions">
                         <button type="submit" class="btn btn-primary">Lưu token</button>
@@ -360,6 +363,43 @@
             input.value = 'AFL1-' + randomBlock(4) + '-' + randomBlock(4) + '-' + randomBlock(4);
             input.focus();
         });
+    })();
+</script>
+<script>
+    (function () {
+        var btn = document.getElementById('btn-refresh-refersion-token');
+        var input = document.getElementById('refersion_token');
+        if (!btn || !input) return;
+        var edgeApiUrl = @json(route('admin.settings.refersion_token.from_edge'));
+
+        btn.addEventListener('click', async function () {
+            btn.disabled = true;
+            try {
+                var res = await fetch(edgeApiUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-CSRF-TOKEN': @json(csrf_token())
+                    },
+                    body: JSON.stringify({})
+                });
+                var data = await res.json().catch(function () { return {}; });
+                if (!res.ok || !data.ok) {
+                    alert(data.error || 'Không lấy được Refersion token từ Edge CDP.');
+                    return;
+                }
+                var token = String(data.token || '').trim();
+                input.value = token;
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+                input.dispatchEvent(new Event('change', { bubbles: true }));
+                alert(data.message || 'Đã cập nhật Refersion token từ Edge CDP.');
+            } catch (e) {
+                alert('Lỗi gọi backend lấy Refersion token: ' + (e && e.message ? e.message : e));
+            } finally {
+                btn.disabled = false;
+            }
+        });
+
     })();
 </script>
 <script>

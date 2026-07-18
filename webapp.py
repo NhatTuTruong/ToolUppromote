@@ -40,6 +40,7 @@ from app import (
     offer_passes_filters,
     row_is_dat,
     save_env,
+    validate_web_settings,
 )
 
 import license_guard
@@ -331,9 +332,7 @@ def _resolve_export_page_range(filters: dict, source: str) -> tuple[int, int]:
 
 
 def fetch_offers_uppromote(filters: dict) -> list:
-    base_url = (os.getenv("UPPROMOTE_API_URL") or "").strip()
-    if not base_url:
-        raise RuntimeError("Thiếu UPPROMOTE_API_URL trong cài đặt")
+    base_url = core.assert_uppromote_api_url(os.getenv("UPPROMOTE_API_URL") or "")
     core.enforce_fixed_fetch_defaults()
     max_pages_cap = core.uppromote_max_pages_cap()
     start_page = int(filters.get("start_page") or 1)
@@ -1355,7 +1354,13 @@ def api_settings():
 @app.post("/api/settings")
 def api_save_settings():
     payload = filter_web_settings_payload(request.get_json(force=True))
-    save_env(payload)
+    errors = validate_web_settings(payload)
+    if errors:
+        return jsonify({"ok": False, "error": "; ".join(errors)}), 400
+    try:
+        save_env(payload)
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
     return jsonify({"ok": True})
 
 

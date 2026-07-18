@@ -75,8 +75,7 @@ let pollStatusBusy = false;
 
 /** Khớp với ô nhập trong templates/index.html — không gồm AFF_LICENSE_* (chỉnh trong .env, không có field trên web). */
 const settingKeys = [
-  "APIFY_TOKEN",
-  "APIFY_TOKEN_BACKUP",
+  "APIFY_TOKENS",
   "UPPROMOTE_API_URL",
   "UPPROMOTE_BEARER_TOKEN",
   "UPPROMOTE_PER_PAGE",
@@ -101,8 +100,7 @@ function clampOffersPerPageField(id) {
 
 /** Không .trim() — giữ nguyên JWT/Bearer (chỉ chuẩn hóa xuống dòng Windows). */
 const SECRET_SETTING_KEYS = new Set([
-  "APIFY_TOKEN",
-  "APIFY_TOKEN_BACKUP",
+  "APIFY_TOKENS",
   "UPPROMOTE_BEARER_TOKEN",
   "GOAFFPRO_BEARER_TOKEN",
   "REFERSION_TOKEN",
@@ -280,7 +278,11 @@ function setSecretFieldRowOpen(row, open) {
   const input = id ? $(id) : null;
   if (!input) return;
   row.classList.toggle("is-open", open);
-  input.type = open ? "text" : "password";
+  if (input.tagName === "TEXTAREA") {
+    input.readOnly = !open;
+  } else {
+    input.type = open ? "text" : "password";
+  }
   const btn = row.querySelector(".secret-eye-btn[aria-expanded]");
   if (btn) {
     btn.setAttribute("aria-expanded", open ? "true" : "false");
@@ -528,8 +530,9 @@ async function saveSettings() {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
+  const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    alert("Không lưu được cài đặt.");
+    alert(data.error || "Không lưu được cài đặt.");
     return;
   }
   closeAllSecretFieldRows();

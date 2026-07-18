@@ -41,8 +41,7 @@ class RunControl:
 
 
 ENV_SAVE_KEY_ORDER = [
-    "APIFY_TOKEN",
-    "APIFY_TOKEN_BACKUP",
+    "APIFY_TOKENS",
     "UPPROMOTE_API_URL",
     "UPPROMOTE_BEARER_TOKEN",
     "UPPROMOTE_PER_PAGE",
@@ -62,8 +61,7 @@ ENV_SAVE_KEY_ORDER = [
 
 SECRET_ENV_KEYS = frozenset(
     {
-        "APIFY_TOKEN",
-        "APIFY_TOKEN_BACKUP",
+        "APIFY_TOKENS",
         "UPPROMOTE_BEARER_TOKEN",
         "GOAFFPRO_BEARER_TOKEN",
         "REFERSION_TOKEN",
@@ -76,8 +74,7 @@ SECRET_ENV_KEYS = frozenset(
 # Biến mà tab Cài đặt của webapp có ô nhập (templates/index.html). POST /api/settings chỉ được merge các key này — tránh ghi rỗng đè lên key chỉ chỉnh tay trong .env (AFF_LICENSE_*, HMAC, …).
 WEB_SETTINGS_SAVE_KEYS = frozenset(
     {
-        "APIFY_TOKEN",
-        "APIFY_TOKEN_BACKUP",
+        "APIFY_TOKENS",
         "UPPROMOTE_API_URL",
         "UPPROMOTE_BEARER_TOKEN",
         "UPPROMOTE_PER_PAGE",
@@ -92,11 +89,69 @@ WEB_SETTINGS_SAVE_KEYS = frozenset(
     }
 )
 
+WEB_URL_SETTINGS_KEYS = frozenset(
+    {
+        "UPPROMOTE_API_URL",
+        "GOAFFPRO_API_URL",
+        "REFERSION_API_URL",
+        "COLLABS_API_URL",
+    }
+)
+
+
+def _restore_missing_api_urls_from_backup(merged: dict) -> tuple[dict, list[str]]:
+    """Khôi phục URL API bị mất sau repair từ dist/.env (nếu có)."""
+    backup_path = BASE_DIR / "dist" / ".env"
+    if not backup_path.exists():
+        return merged, []
+    backup = core.parse_env_file(backup_path)
+    out = dict(merged)
+    notes: list[str] = []
+    for key in WEB_URL_SETTINGS_KEYS:
+        cur = str(out.get(key) or "").strip()
+        if cur and core.is_http_api_url(cur) and not core.is_apify_api_token(cur):
+            continue
+        bak = str(backup.get(key) or "").strip()
+        if bak and core.is_http_api_url(bak) and not core.is_apify_api_token(bak):
+            out[key] = bak
+            notes.append(f"Đã khôi phục {key} từ dist/.env.")
+    return out, notes
+
+
+def _persist_merged_env(merged: dict) -> None:
+    keys_out = [k for k in ENV_SAVE_KEY_ORDER if k in merged]
+    for k in sorted(merged.keys()):
+        if k not in keys_out:
+            keys_out.append(k)
+    lines = [f"{k}={_format_env_value_for_write(k, merged[k])}" for k in keys_out]
+    ENV_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    for k, v in merged.items():
+        os.environ[k] = v
+    core.sync_apify_token_env()
+
+
+def _repair_env_dict(merged: dict) -> tuple[dict, list[str]]:
+    merged, notes = core.repair_misplaced_apify_tokens(merged)
+    merged, restore_notes = _restore_missing_api_urls_from_backup(merged)
+    notes.extend(restore_notes)
+    return merged, notes
+
 
 def filter_web_settings_payload(raw: dict | None) -> dict:
     if not raw:
         return {}
     return {k: v for k, v in raw.items() if k in WEB_SETTINGS_SAVE_KEYS}
+
+
+def validate_web_settings(values: dict) -> list[str]:
+    errors: list[str] = []
+    for key in WEB_URL_SETTINGS_KEYS:
+        if key not in values:
+            continue
+        err = core.validate_api_url_env(key, values.get(key, ""))
+        if err:
+            errors.append(err)
+    return errors
 
 
 def _parse_env_file_to_dict(path: Path) -> dict:
@@ -126,10 +181,23 @@ def save_env(values: dict):
             vs = "" if v is None else str(v)
             if not vs.strip():
                 continue
+            merged[k] = vs.replace("\r\n", "\n").replace("\r", "\n")
+        elif k in WEB_URL_SETTINGS_KEYS:
+            vs = str(v).strip() if v is not None else ""
+            if not vs:
+                continue
+            if core.is_apify_api_token(vs):
+                continue
             merged[k] = vs
         else:
             vs = str(v).strip() if v is not None else ""
             merged[k] = vs
+    merged, repair_notes = _repair_env_dict(merged)
+    for note in repair_notes:
+        print(note)
+    url_errors = validate_web_settings({k: merged.get(k, "") for k in WEB_URL_SETTINGS_KEYS if k in merged})
+    if url_errors:
+        raise ValueError("; ".join(url_errors))
     for _fixed in (
         "APIFY_MAX_DOMAINS_PER_RUN",
         "UPPROMOTE_MAX_PAGES",
@@ -143,8 +211,9 @@ def save_env(values: dict):
             merged[_pg] = str(core.clamp_offers_per_page(merged[_pg]))
     if "COLLABS_LIMIT" in merged:
         merged["COLLABS_LIMIT"] = str(core.clamp_collabs_limit(merged["COLLABS_LIMIT"]))
-    # Gộp token Apify: không giữ key cũ tách riêng khi đã có token chính trong lần lưu này.
-    if "APIFY_TOKEN" in values and str(values.get("APIFY_TOKEN") or "").strip():
+    if "APIFY_TOKENS" in values and str(values.get("APIFY_TOKENS") or "").strip():
+        merged.pop("APIFY_TOKEN", None)
+        merged.pop("APIFY_TOKEN_BACKUP", None)
         merged.pop("COLLABS_OUTSIDE_APIFY_TOKEN", None)
     keys_out = [k for k in ENV_SAVE_KEY_ORDER if k in merged]
     for k in sorted(merged.keys()):
@@ -152,22 +221,52 @@ def save_env(values: dict):
             keys_out.append(k)
     lines = [f"{k}={_format_env_value_for_write(k, merged[k])}" for k in keys_out]
     ENV_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    if "APIFY_TOKENS" in merged and str(merged.get("APIFY_TOKENS") or "").strip():
+        os.environ["APIFY_TOKENS"] = str(merged["APIFY_TOKENS"]).replace("\r\n", "\n")
+        core.sync_apify_token_env()
 
 
 def apply_settings_for_run(settings: dict):
     """Áp settings cho worker: token/secret rỗng → lấy từ file .env (không ghi đè bằng rỗng)."""
     disk = _parse_env_file_to_dict(ENV_PATH)
+    disk, _repair_notes = _repair_env_dict(disk)
     for k, v in settings.items():
         if k in SECRET_ENV_KEYS:
             s = "" if v is None else str(v).replace("\r\n", "\n").replace("\r", "\n")
             if s.strip():
-                os.environ[k] = s.rstrip("\r\n")
+                os.environ[k] = s.rstrip("\n")
             else:
                 dv = disk.get(k) or ""
                 if dv.strip():
-                    os.environ[k] = dv.rstrip("\r\n")
+                    os.environ[k] = dv.rstrip("\n")
+        elif k in WEB_URL_SETTINGS_KEYS:
+            s = str(v).strip() if v is not None else ""
+            if core.is_apify_api_token(s):
+                s = ""
+            if s:
+                os.environ[k] = s
+            else:
+                dv = str(disk.get(k) or "").strip()
+                if dv and not core.is_apify_api_token(dv):
+                    os.environ[k] = dv
         else:
             os.environ[k] = str(v).strip() if v is not None else ""
+    core.sync_apify_token_env()
+
+
+def apify_tokens_display_value() -> str:
+    """Giá trị hiển thị trong textarea APIFY_TOKENS (gộp .env cũ nếu cần)."""
+    multi = (os.getenv("APIFY_TOKENS") or "").replace("\r\n", "\n").strip()
+    if multi:
+        return multi
+    parts: list[str] = []
+    seen: set[str] = set()
+    for key in ("APIFY_TOKEN", "COLLABS_OUTSIDE_APIFY_TOKEN", "APIFY_TOKEN_BACKUP"):
+        tok = (os.getenv(key) or "").strip()
+        if tok and tok not in seen:
+            parts.append(tok)
+            seen.add(tok)
+    return "\n".join(parts)
 
 
 def row_is_dat(offer: dict, filters: dict, source: str, visits: float, min_traffic: float) -> bool:
@@ -178,10 +277,23 @@ def row_is_dat(offer: dict, filters: dict, source: str, visits: float, min_traff
 
 
 def load_env_defaults():
-    core.load_env_file(ENV_PATH)
+    merged = _parse_env_file_to_dict(ENV_PATH)
+    merged, repair_notes = _repair_env_dict(merged)
+    if repair_notes:
+        for note in repair_notes:
+            print(note)
+        try:
+            _persist_merged_env(merged)
+        except OSError as exc:
+            print(f"Không ghi được .env sau repair: {exc}")
+    else:
+        core.load_env_file(ENV_PATH)
+        for k, v in merged.items():
+            if k not in os.environ or core.is_apify_api_token(os.environ.get(k, "")):
+                os.environ[k] = v
+        core.sync_apify_token_env()
     return {
-        "APIFY_TOKEN": (os.getenv("APIFY_TOKEN") or os.getenv("COLLABS_OUTSIDE_APIFY_TOKEN") or "").strip(),
-        "APIFY_TOKEN_BACKUP": os.getenv("APIFY_TOKEN_BACKUP", ""),
+        "APIFY_TOKENS": apify_tokens_display_value(),
         "UPPROMOTE_API_URL": os.getenv("UPPROMOTE_API_URL", ""),
         "UPPROMOTE_BEARER_TOKEN": os.getenv("UPPROMOTE_BEARER_TOKEN", ""),
         "UPPROMOTE_PER_PAGE": str(core.clamp_offers_per_page(os.getenv("UPPROMOTE_PER_PAGE"))),

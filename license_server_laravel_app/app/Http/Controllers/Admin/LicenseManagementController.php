@@ -7,9 +7,13 @@ use App\Models\AppSetting;
 use App\Models\LicenseActivation;
 use App\Models\LicenseKey;
 use Illuminate\Http\RedirectResponse;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Str;
 use Illuminate\View\View;
+use Symfony\Component\Process\Process;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class LicenseManagementController extends Controller
@@ -94,13 +98,40 @@ class LicenseManagementController extends Controller
         $activations = $activationsQuery->paginate(20, ['*'], 'activations_page')
             ->appends(request()->only(['tab', 'keys_q']));
 
+        $refersionIngestNonce = (string) Str::uuid();
+        Cache::put('refersion_ingest_nonce:'.$refersionIngestNonce, true, now()->addMinutes(10));
+
         return view('admin.dashboard', [
             'activeTab' => $activeTab,
             'keys' => $keys,
             'activations' => $activations,
             'usageDayVn' => $todayVn,
             'refersionToken' => AppSetting::getValue('refersion_token', ''),
+            'refersionIngestNonce' => $refersionIngestNonce,
+            'refersionIngestUrl' => route('admin.settings.refersion_token.ingest'),
         ]);
+    }
+
+    public function ingestRefersionToken(Request $request): JsonResponse
+    {
+        $data = $request->validate([
+            'nonce' => ['required', 'string', 'max:120'],
+            'token' => ['required', 'string', 'max:4000'],
+        ]);
+        $nonce = trim((string) $data['nonce']);
+        $token = trim((string) $data['token']);
+        if ($nonce === '' || $token === '') {
+            return response()->json(['ok' => false, 'error' => 'Thiếu nonce/token'], 400);
+        }
+        $cacheKey = 'refersion_ingest_nonce:'.$nonce;
+        if (!Cache::pull($cacheKey)) {
+            return response()->json(['ok' => false, 'error' => 'Nonce không hợp lệ hoặc đã hết hạn'], 403);
+        }
+        AppSetting::query()->updateOrCreate(
+            ['key' => 'refersion_token'],
+            ['value' => $token]
+        );
+        return response()->json(['ok' => true, 'message' => 'Đã cập nhật Refersion token.']);
     }
 
     public function updateRefersionToken(Request $request): RedirectResponse
@@ -117,6 +148,50 @@ class LicenseManagementController extends Controller
         );
 
         return $this->redirectToDashboard($request, 'tab-refersion')->with('success', 'Đã cập nhật Refersion token.');
+    }
+
+    public function refreshRefersionTokenFromEdge(Request $request): JsonResponse
+    {
+        $node = trim((string) env('NODE_BIN', 'node'));
+        $script = base_path('scripts/refersion_token_from_edge.mjs');
+        if (!is_file($script)) {
+            return response()->json(['ok' => false, 'error' => 'Thiếu script JS lấy token từ Edge CDP.'], 500);
+        }
+        $process = new Process([$node, $script], base_path());
+        $process->setTimeout(120);
+        try {
+            $process->run();
+        } catch (\Throwable $e) {
+            return response()->json(['ok' => false, 'error' => 'Không chạy được tiến trình Node: '.$e->getMessage()], 500);
+        }
+        $stdout = trim((string) $process->getOutput());
+        $stderr = trim((string) $process->getErrorOutput());
+        if (!$process->isSuccessful()) {
+            return response()->json([
+                'ok' => false,
+                'error' => $stderr !== '' ? $stderr : ($stdout !== '' ? $stdout : 'Lấy token từ Edge CDP thất bại.'),
+            ], 400);
+        }
+        $payload = json_decode($stdout, true);
+        if (!is_array($payload) || !($payload['ok'] ?? false)) {
+            return response()->json([
+                'ok' => false,
+                'error' => is_array($payload) ? (string) ($payload['error'] ?? 'Payload không hợp lệ.') : ($stdout ?: 'Payload không hợp lệ.'),
+            ], 400);
+        }
+        $token = trim((string) ($payload['token'] ?? ''));
+        if ($token === '') {
+            return response()->json(['ok' => false, 'error' => 'Không đọc được refersion-token từ Edge CDP.'], 400);
+        }
+        AppSetting::query()->updateOrCreate(
+            ['key' => 'refersion_token'],
+            ['value' => $token]
+        );
+        return response()->json([
+            'ok' => true,
+            'token' => $token,
+            'message' => 'Đã cập nhật Refersion token từ Edge CDP.',
+        ]);
     }
 
     public function storeKey(Request $request): RedirectResponse

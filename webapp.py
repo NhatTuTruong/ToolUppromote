@@ -73,6 +73,17 @@ def auto_apply_collabs_enabled() -> bool:
         return True
 
 
+def auto_apply_refersion_enabled() -> bool:
+    # Feature flag: bật/tắt Auto Apply Refersion trên server + theo license key.
+    if not _env_flag("ENABLE_AUTO_APPLY_REFERSION", True):
+        return False
+    try:
+        lic = license_guard.license_status_payload()
+        return bool(lic.get("auto_apply_refersion_enabled", True))
+    except Exception:
+        return True
+
+
 class RunControl:
     def __init__(self):
         self.stop_event = threading.Event()
@@ -234,6 +245,8 @@ class AutoApplyState:
 AUTO_APPLY_STATE = AutoApplyState()
 AUTO_APPLY_HISTORY_PATH = BASE_DIR / "auto-apply-history.json"
 AUTO_APPLY_HISTORY_LOCK = threading.Lock()
+REFERSION_HISTORY_PATH = BASE_DIR / "refersion-history.json"
+REFERSION_HISTORY_LOCK = threading.Lock()
 
 
 def _load_auto_apply_history() -> list[dict]:
@@ -267,6 +280,38 @@ def _append_auto_apply_history(entry: dict) -> None:
         # Giữ tối đa 200 phiên để file không phình to.
         items = items[:200]
         _save_auto_apply_history(items)
+
+
+def _load_refersion_history() -> list[dict]:
+    if not REFERSION_HISTORY_PATH.exists():
+        return []
+    try:
+        raw = REFERSION_HISTORY_PATH.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    try:
+        data = json.loads(raw or "[]")
+    except Exception:
+        return []
+    return data if isinstance(data, list) else []
+
+
+def _save_refersion_history(items: list[dict]) -> None:
+    try:
+        REFERSION_HISTORY_PATH.write_text(
+            json.dumps(items, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
+def _append_refersion_history(entry: dict) -> None:
+    with REFERSION_HISTORY_LOCK:
+        items = _load_refersion_history()
+        items.insert(0, entry)
+        items = items[:200]
+        _save_refersion_history(items)
 
 
 _root = bundle_dir()
@@ -1343,7 +1388,7 @@ def _worker(settings: dict, min_traffic: int, filters: dict, source: str = "uppr
 
 @app.get("/")
 def index():
-    return render_template("index.html", auto_apply_collabs_enabled=auto_apply_collabs_enabled())
+    return render_template("index.html", auto_apply_collabs_enabled=auto_apply_collabs_enabled(), auto_apply_refersion_enabled=auto_apply_refersion_enabled())
 
 
 @app.get("/api/settings")
@@ -1739,6 +1784,115 @@ def api_auto_collabs_template():
     wb.save(bio)
     bio.seek(0)
     safe_name = "auto-collabs-template.xlsx"
+    return send_file(
+        bio,
+        as_attachment=True,
+        download_name=safe_name,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        max_age=0,
+        conditional=False,
+    )
+
+
+@app.get("/api/auto-refersion/files")
+def api_auto_refersion_files():
+    files = []
+    for p in sorted(BASE_DIR.glob("refersion_import_*.xlsx"), key=lambda x: x.stat().st_mtime, reverse=True):
+        files.append(
+            {
+                "name": p.name,
+                "size": p.stat().st_size,
+                "modified": int(p.stat().st_mtime),
+            }
+        )
+    return jsonify({"files": files})
+
+
+@app.post("/api/auto-refersion/import")
+def api_auto_refersion_import():
+    if "file" not in request.files:
+        return jsonify({"ok": False, "error": "Thiếu file upload."}), 400
+    upl = request.files.get("file")
+    if not upl:
+        return jsonify({"ok": False, "error": "Thiếu file upload."}), 400
+    original_name = str(getattr(upl, "filename", "") or "").strip()
+    ext = Path(original_name).suffix.lower()
+    if ext != ".xlsx":
+        return jsonify({"ok": False, "error": "Chỉ hỗ trợ file .xlsx."}), 400
+
+    now = datetime.now()
+    safe_name = f"refersion_import_{now.day}-{now.month}-{now.year}_{now.hour}-{now.minute:02d}-{now.second:02d}.xlsx"
+    full = BASE_DIR / safe_name
+    try:
+        upl.save(str(full))
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"Không lưu được file: {exc}"}), 500
+
+    try:
+        links = auto_apply_core.extract_apply_links_from_xlsx(full, apply_mode="all")
+    except Exception as exc:
+        try:
+            if full.exists():
+                full.unlink()
+        except OSError:
+            pass
+        return jsonify({"ok": False, "error": f"Không đọc được file Excel: {exc}"}), 400
+    if not links:
+        try:
+            if full.exists():
+                full.unlink()
+        except OSError:
+            pass
+        return jsonify({"ok": False, "error": "Không tìm thấy link hợp lệ trong file Excel."}), 400
+
+    return jsonify({"ok": True, "name": safe_name, "total_links": len(links)})
+
+
+@app.get("/api/auto-refersion/template")
+def api_auto_refersion_template():
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import PatternFill
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"Thiếu thư viện openpyxl để tạo file mẫu: {exc}"}), 500
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Auto Refersion"
+
+    header = ["Trạng thái", "Link đăng ký"]
+    ws.append(header)
+
+    ws.append(["ĐẠT", "https://www.refersion.com/affiliate/new"])
+    ws.append(["", "https://www.refersion.com/affiliate/new"])
+
+    fill_head = PatternFill("solid", fgColor="1F2937")
+    fill_head_font = "FFFFFF"
+    for cell in ws[1]:
+        try:
+            cell.fill = fill_head
+            cell.font = cell.font.copy(color=fill_head_font, bold=True)
+        except Exception:
+            pass
+    fill_dat = PatternFill("solid", fgColor="DCFCE7")
+    for row in ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=1, max_col=1):
+        c = row[0]
+        if str(c.value or "").strip().lower() == "đạt":
+            try:
+                c.fill = fill_dat
+            except Exception:
+                pass
+
+    try:
+        ws.column_dimensions["A"].width = 14
+        ws.column_dimensions["B"].width = 70
+    except Exception:
+        pass
+
+    bio = BytesIO()
+    wb.save(bio)
+    bio.seek(0)
+    safe_name = "auto-refersion-template.xlsx"
     return send_file(
         bio,
         as_attachment=True,
@@ -2924,7 +3078,200 @@ def api_auto_apply_history():
     return _no_cache_json({"items": items[:100]})
 
 
+@app.get("/api/auto-refersion/history")
+def api_auto_refersion_history():
+    if not auto_apply_refersion_enabled():
+        return _no_cache_json({"items": []})
+    file_name = str(request.args.get("name") or "").strip()
+    safe_name = Path(file_name).name if file_name else ""
+    with REFERSION_HISTORY_LOCK:
+        items = _load_refersion_history()
+    if safe_name:
+        items = [it for it in items if str((it or {}).get("file") or "") == safe_name]
+    return _no_cache_json({"items": items[:100]})
+
+
+# ===== AUTO REFERSION API =====
+
+REFERSION_APPLY_STATE = {
+    "running": False,
+    "running_file": "",
+    "logs": [],
+    "result": None,
+    "error": "",
+    "lock": threading.Lock(),
+}
+
+
+@app.post("/api/auto-refersion/start")
+def api_auto_refersion_start():
+    if not auto_apply_refersion_enabled():
+        return jsonify({"ok": False, "error": "Auto Refersion đang tắt trên server."}), 403
+    payload = request.get_json(force=True) or {}
+    name = str(payload.get("name") or "").strip()
+    safe_name = Path(name).name
+    full = BASE_DIR / safe_name
+    if not full.is_file():
+        return jsonify({"ok": False, "error": f"Không tìm thấy file: {safe_name}"}), 404
+
+    profile_in = payload.get("profile") or {}
+    profile = profile_in if isinstance(profile_in, dict) else {}
+    auto_submit = bool(payload.get("auto_submit", True))
+    use_cdp = bool(payload.get("use_cdp", True))
+    cdp_url = str(payload.get("cdp_url") or "").strip() or "http://127.0.0.1:9222"
+    apply_mode = str(payload.get("apply_mode") or "only_dat").strip() or "only_dat"
+    try:
+        row_start = int(payload.get("row_start")) if str(payload.get("row_start") or "").strip() else None
+    except (TypeError, ValueError):
+        row_start = None
+    try:
+        row_end = int(payload.get("row_end")) if str(payload.get("row_end") or "").strip() else None
+    except (TypeError, ValueError):
+        row_end = None
+
+    try:
+        links = auto_apply_core.extract_apply_links_from_xlsx(
+            full,
+            apply_mode=apply_mode,
+            row_start=row_start,
+            row_end=row_end,
+        )
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"Không đọc được file: {exc}"}), 400
+
+    if not links:
+        return jsonify({"ok": False, "error": "Không tìm thấy link hợp lệ trong file."}), 400
+
+    st = REFERSION_APPLY_STATE
+    with st["lock"]:
+        if st["running"]:
+            return jsonify({"ok": False, "error": "Auto Refersion đang chạy sẵn."}), 400
+        st["running"] = True
+        st["running_file"] = safe_name
+        st["logs"] = []
+        st["result"] = None
+        st["error"] = ""
+
+    def _log(msg: str) -> None:
+        with st["lock"]:
+            st["logs"].append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+
+    def _should_stop() -> bool:
+        with st["lock"]:
+            return not st["running"]
+
+    def _worker():
+        started_local = datetime.now()
+        try:
+            _log(f"Bắt đầu Auto Refersion với {len(links)} link...")
+            result = auto_apply_core.run_auto_refersion_signup(
+                links=links,
+                profile=profile,
+                auto_submit=auto_submit,
+                cdp_url=cdp_url if use_cdp else None,
+                log=_log,
+                should_stop=_should_stop,
+            )
+            with st["lock"]:
+                st["result"] = result
+                st["running"] = False
+            _log(f"Hoàn tất: {result.get('filled', 0)}/{len(links)} đã điền, {result.get('submitted', 0)} đã submit")
+            _append_refersion_history({
+                "file": safe_name,
+                "started_at": started_local.isoformat(),
+                "started_at_display": started_local.strftime("%d/%m/%Y %H:%M:%S"),
+                "submitted_items": result.get("submitted_items") or [],
+                "attempted_items": result.get("attempted_items") or [],
+                "total": result.get("total") or 0,
+                "filled": result.get("filled") or 0,
+                "submitted": result.get("submitted") or 0,
+            })
+        except Exception as exc:
+            with st["lock"]:
+                st["running"] = False
+                st["error"] = str(exc)
+            _log(f"Lỗi: {exc}")
+            _append_refersion_history({
+                "file": safe_name,
+                "started_at": started_local.isoformat(),
+                "started_at_display": started_local.strftime("%d/%m/%Y %H:%M:%S"),
+                "error": str(exc),
+                "attempted_items": [],
+                "submitted_items": [],
+            })
+
+    threading.Thread(target=_worker, daemon=True).start()
+    return jsonify({"ok": True, "total_links": len(links), "file": safe_name})
+
+
+@app.post("/api/auto-refersion/stop")
+def api_auto_refersion_stop():
+    st = REFERSION_APPLY_STATE
+    with st["lock"]:
+        st["running"] = False
+        st["logs"].append(f"[{datetime.now().strftime('%H:%M:%S')}] Đã hủy")
+    return jsonify({"ok": True})
+
+
+EDGE_PATHS = [
+    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+    r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+    "msedge.exe",
+]
+EDGE_DEBUG_PROFILE = Path.home() / "edge-debug-profile"
+
+def _find_edge():
+    for p in EDGE_PATHS:
+        if Path(p).is_file():
+            return p
+    return EDGE_PATHS[-1]
+
+@app.post("/api/open-browser")
+def api_open_browser():
+    # Kiểm tra CDP port đã có browser chưa
+    try:
+        import urllib.request
+        resp = urllib.request.urlopen("http://127.0.0.1:9222/json/version", timeout=2)
+        if resp.status == 200:
+            return jsonify({"ok": True, "message": "Edge đã mở sẵn"})
+    except Exception:
+        pass
+
+    try:
+        edge_path = _find_edge()
+        # Tạo profile folder nếu chưa có
+        EDGE_DEBUG_PROFILE.mkdir(parents=True, exist_ok=True)
+        subprocess.Popen(
+            [edge_path, "--remote-debugging-port=9222", f"--user-data-dir={EDGE_DEBUG_PROFILE}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+        )
+        return jsonify({"ok": True, "message": f"Đã mở Edge với debug port (path: {edge_path})"})
+    except FileNotFoundError:
+        return jsonify({"ok": False, "error": f"Không tìm thấy Edge"}), 404
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.get("/api/auto-refersion/status")
+def api_auto_refersion_status():
+    st = REFERSION_APPLY_STATE
+    with st["lock"]:
+        running = st["running"]
+        file_running = st.get("running_file", "")
+        logs = list(st.get("logs", [])[-100:])
+        result = st.get("result")
+        error = str(st.get("error", ""))
+    return jsonify({
+        "running": running,
+        "file": file_running,
+        "logs": logs,
+        "result": result,
+        "error": error,
+    })
+
+
 if __name__ == "__main__":
     multiprocessing.freeze_support()
-    # threaded=True: worker chạy pipeline không chặn request /api/logs (log theo thời gian thực)
     app.run(host="127.0.0.1", port=5050, debug=False, threaded=True)

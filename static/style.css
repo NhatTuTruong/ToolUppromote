@@ -300,7 +300,17 @@ input.settings-url-input {
 .results-head { display: flex; justify-content: space-between; align-items: center; }
 .results-head-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .muted { color: var(--muted); }
-.file-list { margin-top: 8px; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.file-list { margin-top: 8px; border: 1px solid var(--line); border-radius: 10px 10px 0 0; overflow: hidden; }
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-top: none;
+  border-radius: 0 0 10px 10px;
+}
 .file-row {
   display: grid;
   grid-template-columns: auto 1fr 120px 170px;

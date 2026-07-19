@@ -12,18 +12,20 @@
     body.license-loading .tab-btn[data-tab="runRefersionTab"],
     body.license-loading .tab-btn[data-tab="runCollabsTab"],
     body.license-loading .tab-btn[data-tab="autoCollabsTab"],
+    body.license-loading .tab-btn[data-tab="autoRefersionTab"],
     body.license-loading .tab-btn[data-tab="resultsTab"],
     body.license-loading #runUppromoteTab,
     body.license-loading #runGoaffproTab,
     body.license-loading #runRefersionTab,
     body.license-loading #runCollabsTab,
     body.license-loading #autoCollabsTab,
+    body.license-loading #autoRefersionTab,
     body.license-loading #resultsTab {
       display: none !important;
     }
   </style>
 </head>
-<body class="license-loading" data-auto-apply-collabs-enabled="{{ '1' if auto_apply_collabs_enabled else '0' }}">
+<body class="license-loading" data-auto-apply-collabs-enabled="{{ '1' if auto_apply_collabs_enabled else '0' }}" data-auto-apply-refersion-enabled="{{ '1' if auto_apply_refersion_enabled else '0' }}">
   <div class="app-shell">
     <header class="topbar">
       <div>
@@ -40,6 +42,7 @@
       <button class="tab-btn" data-tab="runRefersionTab">Refersion</button>
       <button class="tab-btn" data-tab="runCollabsTab">Shopify Collabs</button>
       <button class="tab-btn" data-tab="autoCollabsTab">Auto Collabs</button>
+      <button class="tab-btn" data-tab="autoRefersionTab">Auto Refersion</button>
       <button class="tab-btn" data-tab="resultsTab">Kết quả</button>
     </nav>
 
@@ -61,18 +64,6 @@
           </button>
         </div>
        
-        <div class="form-grid">
-          <label class="form-field-label filter-field-full">
-            <span class="form-field-caption">Token Apify (APIFY_TOKENS) — Similarweb + Google Collabs ngoài Discovery. Mỗi dòng một token; dùng theo thứ tự, tự chuyển khi token lỗi.</span>
-            <div class="secret-field-row secret-field-row--textarea" data-secret-for="APIFY_TOKENS">
-              <button type="button" class="secret-eye-btn" aria-expanded="false" aria-label="Hiện để chỉnh sửa" title="Hiện / ẩn để sửa">
-                <svg class="eye-icon eye-icon--shut" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
-                <svg class="eye-icon eye-icon--open" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-              </button>
-              <textarea id="APIFY_TOKENS" class="secret-field-input token-apify" rows="4" spellcheck="false" autocomplete="off" readonly placeholder="token_1&#10;token_2&#10;token_3"></textarea>
-            </div>
-          </label>
-        </div>
         <h3 class="settings-sub" data-settings-source="uppromote">Uppromote</h3>
         <div class="form-grid" data-settings-source="uppromote">
           <label class="form-field-label">
@@ -153,6 +144,18 @@
                 <svg class="eye-icon eye-icon--open" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
               </button>
               <input id="COLLABS_CSRF_TOKEN" class="secret-field-input token-apify" type="password" spellcheck="false" autocomplete="off" />
+            </div>
+          </label>
+        </div>
+        <div class="form-grid">
+          <label class="form-field-label filter-field-full">
+            <span class="form-field-caption">Token Apify (APIFY_TOKENS) — Similarweb + Google Collabs ngoài Discovery. Mỗi dòng một token; dùng theo thứ tự, tự chuyển khi token lỗi.</span>
+            <div class="secret-field-row secret-field-row--textarea" data-secret-for="APIFY_TOKENS">
+              <button type="button" class="secret-eye-btn" aria-expanded="false" aria-label="Hiện để chỉnh sửa" title="Hiện / ẩn để sửa">
+                <svg class="eye-icon eye-icon--shut" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                <svg class="eye-icon eye-icon--open" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              </button>
+              <textarea id="APIFY_TOKENS" class="secret-field-input token-apify" rows="4" spellcheck="false" autocomplete="off" readonly placeholder="token_1&#10;token_2&#10;token_3"></textarea>
             </div>
           </label>
         </div>
@@ -443,6 +446,30 @@
         <div class="file-list" id="autoCollabsFileList"></div>
       </div>
     </section>
+
+    <section id="autoRefersionTab" class="tab-panel">
+      <div class="card">
+        <div class="results-head">
+          <h2>Auto Refersion</h2>
+          <div class="results-head-actions">
+            <button class="btn open-edge-cdp-btn" type="button" title="Mở Edge theo tài khoản (CDP 9222–9231)">⧉</button>
+            <button class="btn" id="refreshAutoRefersionBtn" type="button">Làm mới</button>
+          </div>
+        </div>
+        <div class="actions">
+          <button class="btn" id="downloadAutoRefersionTemplateBtn" type="button">Tải file mẫu</button>
+        </div>
+
+        <div class="actions file-picker-row">
+          <input id="autoRefersionFileInput" class="file-picker-input" type="file" accept=".xlsx" />
+          <label class="btn" for="autoRefersionFileInput" id="autoRefersionPickBtn" type="button">Chọn file</label>
+          <div class="file-picker-name" id="autoRefersionPickedName">Chưa chọn file nào</div>
+          <button class="btn primary" id="importAutoRefersionBtn" type="button">Import Excel</button>
+        </div>
+        <div class="file-list" id="autoRefersionFileList"></div>
+        <div class="pager" id="autoRefersionFilePager"></div>
+      </div>
+    </section>
   </div>
 
   <div class="modal-backdrop hidden" id="autoApplyModal">
@@ -585,6 +612,119 @@
       </div>
     </div>
   </div>
+
+  <div class="modal-backdrop hidden" id="autoRefersionModal">
+    <div class="modal-card">
+      <h3>Auto Refersion - Mẫu đăng ký</h3>
+      <div class="form-grid">
+        <div class="filter-field-full">
+          <h4 style="margin:0 0 6px; font-size:13px; color:#334155;">Chế độ &amp; phạm vi đăng ký</h4>
+          <div class="form-grid compact">
+            <label>Chế độ đăng ký
+              <select id="ar_apply_mode">
+                <option value="only_dat">Chỉ đăng ký hàng ĐẠT trong file</option>
+                <option value="all">Đăng ký tất cả các hàng trong file</option>
+              </select>
+            </label>
+            <label>Từ hàng #<input id="ar_row_start" type="number" min="1" step="1" placeholder="1" /></label>
+            <label>Đến hàng #<input id="ar_row_end" type="number" min="1" step="1" placeholder="10 (để trống = tới cuối)" /></label>
+          </div>
+        </div>
+
+        <label>Tài khoản (số lượng trình duyệt)
+          <input id="ar_account_count" type="text" placeholder="1-5 hoặc 1,4,7" value="1-2" />
+        </label>
+
+        <label>First Name<input id="ar_first_name" type="text" /></label>
+        <label>Last Name<input id="ar_last_name" type="text" /></label>
+        <label>Email<input id="ar_email" type="email" /></label>
+        <label>Password<input id="ar_password" type="password" /></label>
+        <label>Confirm Password<input id="ar_confirm_password" type="password" /></label>
+
+        <label>Reason for wanting to be an affiliate
+          <select id="ar_reason">
+            <option value="social influencer">Social Influencer</option>
+            <option value="breeder">Breeder</option>
+            <option value="big fan">Big Fan</option>
+            <option value="other">Other</option>
+          </select>
+        </label>
+
+        <label>Business Name<input id="ar_business_name" type="text" /></label>
+        <label>Address 1<input id="ar_address1" type="text" /></label>
+        <label>Address 2<input id="ar_address2" type="text" /></label>
+        <label>City<input id="ar_city" type="text" /></label>
+        <label>State<input id="ar_state" type="text" /></label>
+        <label>Country
+          <select id="ar_country">
+            <option value="United States">United States</option>
+            <option value="United Kingdom">United Kingdom</option>
+            <option value="Canada">Canada</option>
+            <option value="Australia">Australia</option>
+            <option value="Germany">Germany</option>
+            <option value="France">France</option>
+            <option value="Netherlands">Netherlands</option>
+            <option value="Sweden">Sweden</option>
+            <option value="Italy">Italy</option>
+            <option value="Spain">Spain</option>
+            <option value="United Arab Emirates">United Arab Emirates</option>
+            <option value="Saudi Arabia">Saudi Arabia</option>
+            <option value="Singapore">Singapore</option>
+            <option value="India">India</option>
+            <option value="Japan">Japan</option>
+            <option value="Vietnam">Vietnam</option>
+            <option value="Philippines">Philippines</option>
+            <option value="Thailand">Thailand</option>
+            <option value="Malaysia">Malaysia</option>
+            <option value="Indonesia">Indonesia</option>
+            <option value="Brazil">Brazil</option>
+            <option value="Mexico">Mexico</option>
+            <option value="South Africa">South Africa</option>
+          </select>
+        </label>
+        <label>ZIP Code<input id="ar_zip" type="text" /></label>
+        <label>Postal Code<input id="ar_postal_code" type="text" /></label>
+        <label>Phone<input id="ar_phone" type="text" /></label>
+        <label>Phone Number<input id="ar_phone_number" type="text" /></label>
+
+        <label>Instagram Handle<input id="ar_instagram" type="text" /></label>
+        <label>TikTok Account<input id="ar_tiktok" type="text" /></label>
+        <label>Blog/ Website<input id="ar_website" type="text" /></label>
+        <label>Facebook URL<input id="ar_facebook" type="url" /></label>
+
+        <label>Social Links to be verified<input id="ar_social_links" type="text" /></label>
+        <label>Affiliate Type
+          <select id="ar_affiliate_type">
+            <option value="Review Website">Review Website</option>
+            <option value="Blog">Blog</option>
+            <option value="Coupon Site">Coupon Site</option>
+            <option value="Social Media Influencer">Social Media Influencer</option>
+            <option value="Paid Search">Paid Search</option>
+            <option value="Email Marketing">Email Marketing</option>
+            <option value="Content Publisher">Content Publisher</option>
+          </select>
+        </label>
+        <label>Your preferred personal promo code<input id="ar_promo_code" type="text" /></label>
+
+        <label class="filter-field-full">Please provide the URL of your website, blog, or primary social media channel
+          <textarea id="ar_channel_url" rows="2"></textarea>
+        </label>
+        <label class="filter-field-full">In a few words, tell us why you want to promote for our company
+          <textarea id="ar_why_promote" rows="2" placeholder="I love creating content and believe this brand aligns perfectly with my audience."></textarea>
+        </label>
+        <label>PayPal<input id="ar_paypal" type="email" /></label>
+        <label class="filter-field-full">Mẫu trả lời dài chung
+          <textarea id="ar_generic_answer" rows="2" placeholder="Điền vào các ô input/textarea chưa nhận diện được Label nào."></textarea>
+        </label>
+      </div>
+      <div class="actions">
+        <button class="btn" type="button" id="ar_cancel_btn">Hủy</button>
+        <button class="btn" type="button" id="ar_save_btn">Lưu</button>
+        <button class="btn primary" type="button" id="ar_confirm_btn">Bắt đầu Auto Refersion</button>
+      </div>
+    </div>
+  </div>
+
   <div class="modal-backdrop hidden" id="edgeCdpAccountsModal">
     <div class="modal-card edge-cdp-modal-card">
       <h3>Mở Edge theo tài khoản</h3>

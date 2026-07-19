@@ -2154,3 +2154,952 @@ def run_auto_apply(
         "limit_exceeded_link_index": int(limit_exceeded_link_index),
     }
 
+
+def run_auto_refersion_signup(
+    links: list[str],
+    profile: dict[str, str],
+    auto_submit: bool,
+    cdp_url: str | None = None,
+    should_stop: Callable[[], bool] | None = None,
+    log: Callable[[str], None] | None = None,
+    brand_timeout_sec: int = 60,
+) -> dict:
+    """Auto signup cho Refersion - không cần login, chỉ mở link và điền form."""
+    try:
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+        from playwright.sync_api import sync_playwright
+    except Exception as exc:
+        raise RuntimeError(
+            "Thiếu Playwright. Cài bằng: pip install playwright && playwright install chromium"
+        ) from exc
+
+    def _log(msg: str) -> None:
+        if log:
+            log(msg)
+
+    def _check_stop(where: str = "") -> None:
+        if should_stop and should_stop():
+            suffix = f" ({where})" if where else ""
+            _log(f"Đã nhận lệnh hủy{suffix}.")
+            raise RuntimeError("Đã hủy Auto Refersion.")
+
+    INPUT_FILL_DELAY_MS = 1500
+
+    def _contexts(page):
+        out = [page]
+        try:
+            for fr in page.frames:
+                if fr is not page.main_frame:
+                    out.append(fr)
+        except Exception:
+            pass
+        return out
+
+    def _fill_first_visible(page, selectors: list[str], value: str) -> bool:
+        if not value:
+            return False
+        for ctx in _contexts(page):
+            for sel in selectors:
+                try:
+                    loc = ctx.locator(sel).first
+                    if loc.count() and loc.is_visible():
+                        loc.fill(value, timeout=1800)
+                        try:
+                            page.wait_for_timeout(INPUT_FILL_DELAY_MS)
+                        except Exception:
+                            pass
+                        return True
+                except Exception:
+                    continue
+        return False
+
+    def _click_first_visible(page, selectors: list[str]) -> bool:
+        for ctx in _contexts(page):
+            for sel in selectors:
+                try:
+                    loc = ctx.locator(sel).first
+                    if loc.count() and loc.is_visible():
+                        loc.click(timeout=1800)
+                        return True
+                except Exception:
+                    continue
+        return False
+
+    def _select_first_visible(page, label: str, value: str) -> bool:
+        if not value:
+            return False
+        for ctx in _contexts(page):
+            try:
+                normalized_label = re.sub(r"[^a-z0-9]+", " ", label.lower()).strip()
+                normalized_value = value.lower().strip()
+
+                # Tìm label gần nhất
+                labels = ctx.query_selector_all("label")
+                for lbl in labels:
+                    try:
+                        lbl_text = re.sub(r"[^a-z0-9]+", " ", (lbl.inner_text() or "").lower()).strip()
+                        if lbl_text == normalized_label or normalized_label in lbl_text:
+                            # Tìm input/select trong label đó
+                            for tag in ["select", "input", "textarea"]:
+                                try:
+                                    el = lbl.query_selector(tag)
+                                    if el:
+                                        tag_name = (el.tag_name or "").lower()
+                                        if tag_name == "select":
+                                            el.select(value, timeout=1000)
+                                            page.wait_for_timeout(INPUT_FILL_DELAY_MS)
+                                            return True
+                                        elif tag_name == "input":
+                                            el.fill(value, timeout=1000)
+                                            page.wait_for_timeout(INPUT_FILL_DELAY_MS)
+                                            return True
+                                except Exception:
+                                    continue
+                            # Tìm id/for attribute
+                            el_id = lbl.get_attribute("for")
+                            if el_id:
+                                try:
+                                    el = ctx.query_selector(f"#{el_id}")
+                                    if el:
+                                        tag_name = (el.tag_name or "").lower()
+                                        if tag_name == "select":
+                                            el.select(value, timeout=1000)
+                                            page.wait_for_timeout(INPUT_FILL_DELAY_MS)
+                                            return True
+                                        elif tag_name == "input":
+                                            el.fill(value, timeout=1000)
+                                            page.wait_for_timeout(INPUT_FILL_DELAY_MS)
+                                            return True
+                                except Exception:
+                                    continue
+                    except Exception:
+                        continue
+            except Exception:
+                continue
+        return False
+
+    def _fill_by_label(page, label_pattern: str, value: str) -> bool:
+        if not value:
+            return False
+        normalized_label = re.sub(r"[^a-z0-9]+", " ", label_pattern.lower()).strip()
+
+        for ctx in _contexts(page):
+            try:
+                labels = ctx.query_selector_all("label")
+                for lbl in labels:
+                    try:
+                        lbl_text = re.sub(r"[^a-z0-9]+", " ", (lbl.inner_text() or "").lower()).strip()
+                        # Kiểm tra exact match hoặc partial match
+                        if lbl_text == normalized_label or normalized_label in lbl_text:
+                            # Loại bỏ phần text không cần thiết như " *"
+                            clean_lbl = re.sub(r"[\*:\?]+$", "", lbl_text).strip()
+
+                            # Tìm input trong label
+                            for tag in ["input", "select", "textarea"]:
+                                try:
+                                    el = lbl.query_selector(tag)
+                                    if el:
+                                        tag_name = (el.tag_name or "").lower()
+                                        input_type = (el.get_attribute("type") or "").lower()
+                                        el_id = (el.get_attribute("id") or "").lower()
+                                        el_name = (el.get_attribute("name") or "").lower()
+                                        el_placeholder = (el.get_attribute("placeholder") or "").lower()
+
+                                        if tag_name == "select":
+                                            # Select: tìm option matching
+                                            try:
+                                                opts = el.query_selector_all("option")
+                                                for opt in opts:
+                                                    opt_text = (opt.inner_text() or "").strip().lower()
+                                                    if normalized_value in opt_text or opt_text == normalized_value:
+                                                        el.select_option(opt.get_attribute("value") or opt.inner_text(), timeout=1000)
+                                                        page.wait_for_timeout(INPUT_FILL_DELAY_MS)
+                                                        return True
+                                                # Fallback: chọn option đầu tiên không phải placeholder
+                                                opts = el.query_selector_all("option")
+                                                for opt in opts:
+                                                    opt_val = (opt.get_attribute("value") or "").strip().lower()
+                                                    if opt_val and opt_val != "0" and "select" not in opt_val:
+                                                        el.select_option(opt.get_attribute("value") or opt.inner_text(), timeout=1000)
+                                                        page.wait_for_timeout(INPUT_FILL_DELAY_MS)
+                                                        return True
+                                            except Exception:
+                                                continue
+                                        elif tag_name == "input":
+                                            if input_type in ("text", "email", "password", "tel", "url", "number"):
+                                                el.fill(value, timeout=1000)
+                                                page.wait_for_timeout(INPUT_FILL_DELAY_MS)
+                                                return True
+                                            elif input_type in ("checkbox", "radio"):
+                                                pass  # Xử lý riêng
+                                        elif tag_name == "textarea":
+                                            el.fill(value, timeout=1000)
+                                            page.wait_for_timeout(INPUT_FILL_DELAY_MS)
+                                            return True
+                                except Exception:
+                                    continue
+
+                            # Tìm input qua id/for
+                            el_id = lbl.get_attribute("for")
+                            if el_id:
+                                try:
+                                    el = ctx.query_selector(f"#{el_id}, [name='{el_id}']")
+                                    if el:
+                                        tag_name = (el.tag_name or "").lower()
+                                        input_type = (el.get_attribute("type") or "").lower()
+                                        if tag_name == "select":
+                                            try:
+                                                el.select(value, timeout=1000)
+                                                page.wait_for_timeout(INPUT_FILL_DELAY_MS)
+                                                return True
+                                            except Exception:
+                                                continue
+                                        elif tag_name in ("input") and input_type in ("text", "email", "password", "tel", "url", "number"):
+                                            el.fill(value, timeout=1000)
+                                            page.wait_for_timeout(INPUT_FILL_DELAY_MS)
+                                            return True
+                                except Exception:
+                                    continue
+                    except Exception:
+                        continue
+
+                # Thử tìm input có placeholder matching
+                for sel in ["input[placeholder*='{}']".format(label_pattern.lower()), "textarea[placeholder*='{}']".format(label_pattern.lower())]:
+                    try:
+                        el = ctx.query_selector(sel)
+                        if el and el.is_visible():
+                            el.fill(value, timeout=1000)
+                            page.wait_for_timeout(INPUT_FILL_DELAY_MS)
+                            return True
+                    except Exception:
+                        continue
+
+            except Exception:
+                continue
+        return False
+
+    def _contexts(page):
+        """Get contexts to search for elements."""
+        yield page
+        for frame in page.frames:
+            yield frame
+
+    def _get_field_key(inp_id: str, inp_name: str, inp_placeholder: str, label_text: str) -> str | None:
+        """Map input/label info to profile key. Cụm từ cụ thể được ưu tiên trước."""
+        combined = f"{inp_id} {inp_name} {inp_placeholder} {label_text}".lower()
+
+        # Confirm password — ưu tiên cao nhất (tránh khớp nhầm keyword "password")
+        if "confirm" in combined and "pass" in combined:
+            return "confirm_password"
+        if any(
+            x in combined
+            for x in (
+                "password_confirm",
+                "password_confirmation",
+                "confirm_password",
+                "confirmpassword",
+                "password2",
+                "pass2",
+            )
+        ):
+            return "confirm_password"
+
+        # Phase 1: cụm từ dài — tránh nhầm "for our company" với Business Name
+        phrase_mappings: list[tuple[str, list[str]]] = [
+            (
+                "why_promote",
+                [
+                    "few words",
+                    "tell us why",
+                    "want to promote",
+                    "why you want",
+                    "why do you want",
+                    "promote for our",
+                    "promote for",
+                    "why want to promote",
+                ],
+            ),
+            ("confirm_password", ["confirm password", "confirm pass", "re enter password", "retype password", "verify password"]),
+            ("business_name", ["business name", "company name"]),
+            ("first_name", ["first name", "given name"]),
+            ("last_name", ["last name", "family name"]),
+            ("address1", ["address 1", "address line 1"]),
+            ("address2", ["address 2", "address line 2"]),
+            ("zip", ["zip code", "postal code", "ma buu dien"]),
+            ("promo_code", ["promo code", "personal promo", "preferred personal promo"]),
+            (
+                "social_links",
+                [
+                    "social links",
+                    "social link",
+                    "social media",
+                    "links to be verified",
+                    "primary social media channel",
+                ],
+            ),
+            ("website", ["blog website", "blog/ website", "website blog"]),
+        ]
+        for key, phrases in phrase_mappings:
+            for phrase in phrases:
+                if phrase in combined:
+                    return key
+
+        # Phase 2: từ khóa đơn — không dùng "company" đơn lẻ (dễ trùng why_promote label)
+        keyword_mappings: list[tuple[str, list[str]]] = [
+            ("why_promote", ["why promote", "tai sao", "vi sao", "about you"]),
+            ("email", ["email", "e-mail", "thu dien tu"]),
+            ("password", ["password", "pass", "mat khau"]),
+            ("first_name", ["firstname"]),
+            ("last_name", ["lastname"]),
+            ("business_name", ["organization", "doanh nghiep", "cong ty"]),
+            ("address1", ["address", "street", "dia chi", "duong"]),
+            ("address2", ["suite", "apartment"]),
+            ("city", ["city", "thanh pho", "town"]),
+            ("zip", ["zip", "postal", "zipcode"]),
+            ("phone", ["phone", "telephone", "mobile", "dien thoai", "so dien thoai", "sdt"]),
+            ("instagram", ["instagram", "insta"]),
+            ("tiktok", ["tiktok", "tik tok"]),
+            ("website", ["website", "web site", "url", "site"]),
+            ("facebook", ["facebook", " fb"]),
+            ("social_links", ["social", "mang xa hoi"]),
+            ("paypal", ["paypal"]),
+            ("promo_code", ["promo", "coupon", "referral"]),
+        ]
+        for key, keywords in keyword_mappings:
+            for kw in keywords:
+                if kw in combined:
+                    return key
+        return None
+
+    def _get_label_text(inp, page) -> str:
+        """Get label text near an input."""
+        # Thu tu uu tien tim label
+        for ctx in _contexts(page):
+            try:
+                # Tim label co for
+                inp_id = inp.get_attribute("id")
+                if inp_id:
+                    lbl = ctx.locator(f"label[for='{inp_id}']").first
+                    if lbl.count() > 0:
+                        return lbl.inner_text() or ""
+                # Tim label bao quanh (parent)
+                parent_lbl = inp.evaluate("""el => {
+                    const parent = el.closest('label');
+                    if (parent) return parent.textContent || '';
+                    return '';
+                }""")
+                if parent_lbl.strip():
+                    return parent_lbl
+                # Tim label truoc do (previous sibling)
+                prev = inp.evaluate("""el => {
+                    let sib = el.previousElementSibling;
+                    if (sib && sib.tagName === 'LABEL') return sib.textContent || '';
+                    // Tim trong cha
+                    const grandParent = el.parentElement;
+                    if (grandParent) {
+                        const labels = grandParent.querySelectorAll('label');
+                        for (let l of labels) {
+                            if (grandParent.contains(l) && l !== el) return l.textContent || '';
+                        }
+                    }
+                    return '';
+                }""")
+                if prev.strip():
+                    return prev
+            except:
+                pass
+        return ""
+
+    def _fill_refersion_form(page) -> int:
+        filled = 0
+        profile_values = {
+            "email": profile.get("email", ""),
+            "password": profile.get("password", ""),
+            "confirm_password": profile.get("confirm_password", "") or profile.get("password", ""),
+            "first_name": profile.get("first_name", ""),
+            "last_name": profile.get("last_name", ""),
+            "business_name": profile.get("business_name", ""),
+            "address1": profile.get("address1", ""),
+            "address2": profile.get("address2", ""),
+            "city": profile.get("city", ""),
+            "zip": profile.get("zip", "") or profile.get("postal_code", ""),
+            "phone": profile.get("phone", "") or profile.get("phone_number", ""),
+            "instagram": profile.get("instagram", ""),
+            "tiktok": profile.get("tiktok", ""),
+            "website": profile.get("website", ""),
+            "facebook": profile.get("facebook", ""),
+            "social_links": profile.get("social_links", ""),
+            "why_promote": profile.get("why_promote", "") or profile.get("message", "") or profile.get("reason", ""),
+            "paypal": profile.get("paypal", ""),
+            "promo_code": profile.get("promo_code", ""),
+        }
+        _log("  - Bat dau fill...")
+
+        # BUOC 1: SCAN & SAP XEP SELECTS - Country luon truoc State
+        _log("  - Buoc 1: Fill selects...")
+
+        # Scan tat ca selects de xac dinh loai
+        country_select = None
+        state_select = None
+        other_selects = []
+        for sel in page.locator("select").all():
+            if not sel.is_visible() or sel.is_disabled():
+                continue
+            sel_id = (sel.get_attribute("id") or "").lower()
+            sel_name = (sel.get_attribute("name") or "").lower()
+            sel_ph = (sel.get_attribute("placeholder") or "").lower()
+            label_text = ""
+            for ctx in _contexts(page):
+                try:
+                    sel_id_attr = sel.get_attribute("id")
+                    if sel_id_attr:
+                        lbl = ctx.locator(f"label[for='{sel_id_attr}']").first
+                        if lbl.count() > 0:
+                            label_text = lbl.inner_text() or ""
+                            break
+                except:
+                    pass
+            combined = f"{sel_id} {sel_name} {sel_ph} {label_text}".lower()
+
+            if sel_id == "country" or "country" in combined:
+                country_select = sel
+            elif sel_id == "state" or "state" in combined:
+                state_select = sel
+            else:
+                other_selects.append((sel, combined))
+
+        # Fill Country truoc (bat ke thu tu DOM)
+        if country_select:
+            try:
+                opts = country_select.locator("option").all()
+                country_val = profile.get("country", "") or "United States"
+                target_val = None
+                for o in opts:
+                    ot = (o.inner_text() or "").lower()
+                    ov = o.get_attribute("value") or ""
+                    if country_val.lower() in ot or ov.lower() in ("us", "usa"):
+                        target_val = ov
+                        break
+                if not target_val:
+                    for o in opts:
+                        ot = (o.inner_text() or "").lower()
+                        if "united states" in ot:
+                            target_val = o.get_attribute("value")
+                            break
+                if target_val:
+                    country_select.evaluate(f"el => {{ el.value = '{target_val}'; el.dispatchEvent(new Event('change', {{bubbles: true}})); }}")
+                    filled += 1
+                    _log(f"  - Select [country] = {target_val}")
+                    page.wait_for_timeout(2500)
+            except Exception as e:
+                _log(f"  - loi country: {e}")
+
+        # Fill State sau Country
+        if state_select:
+            try:
+                opts = state_select.locator("option").all()
+                state_val = profile.get("state", "")
+                target_val = None
+                if state_val:
+                    state_lower = state_val.lower().strip()
+                    # Map state name -> abbreviation
+                    state_abbrevs = {
+                        "california": "CA", "ca": "CA",
+                        "texas": "TX", "tx": "TX",
+                        "new york": "NY", "ny": "NY",
+                        "florida": "FL", "fl": "FL",
+                        "washington": "WA", "wa": "WA",
+                        "oregon": "OR", "or": "OR",
+                        "nevada": "NV", "nv": "NV",
+                        "arizona": "AZ", "az": "AZ",
+                    }
+                    abbrev = state_abbrevs.get(state_lower, state_val[:2].upper())
+
+                    for o in opts:
+                        ot = (o.inner_text() or "").lower()
+                        ov = (o.get_attribute("value") or "").upper()
+                        # Match full name OR abbreviation
+                        if state_lower in ot or abbrev == ov:
+                            target_val = o.get_attribute("value")
+                            break
+                if not target_val:
+                    for o in opts:
+                        ot = (o.inner_text() or "").lower()
+                        if "california" in ot:
+                            target_val = o.get_attribute("value")
+                            break
+                if target_val:
+                    state_select.evaluate(f"el => {{ el.value = '{target_val}'; el.dispatchEvent(new Event('change', {{bubbles: true}})); }}")
+                    filled += 1
+                    _log(f"  - Select [state] = {target_val}")
+                    page.wait_for_timeout(500)
+            except Exception as e:
+                _log(f"  - loi state: {e}")
+
+        # Fill cac select khac
+        for sel, combined in other_selects:
+            try:
+                opts = sel.locator("option").all()
+                target_val = None
+                if any(x in combined for x in ["affiliate", "type", "category", "how", "you"]):
+                    aff_type = profile.get("affiliate_type", "")
+                    if aff_type:
+                        for o in opts:
+                            ot = (o.inner_text() or "").lower()
+                            if aff_type.lower() in ot:
+                                target_val = o.get_attribute("value")
+                                break
+                    if not target_val:
+                        for o in opts:
+                            ot = (o.inner_text() or "").lower()
+                            if "review" in ot or "website" in ot or "blog" in ot:
+                                target_val = o.get_attribute("value")
+                                break
+                elif any(x in combined for x in ["city"]):
+                    city_val = profile.get("city", "")
+                    if city_val:
+                        for o in opts:
+                            ot = (o.inner_text() or "").lower()
+                            if city_val.lower() in ot:
+                                target_val = o.get_attribute("value")
+                                break
+                if not target_val:
+                    for o in opts:
+                        ov = (o.get_attribute("value") or "").strip()
+                        ot = (o.inner_text() or "").strip().lower()
+                        if ov and ot not in ("", "select", "choose", "--", "-", "please select"):
+                            target_val = ov
+                            break
+                if target_val:
+                    sel.evaluate(f"el => {{ el.value = '{target_val}'; }}")
+                    filled += 1
+                    _log(f"  - Select [other] = {target_val}")
+            except Exception as e:
+                _log(f"  - loi select khac: {e}")
+                continue
+
+        page.wait_for_timeout(1000)
+        for inp_type in ["text", "email", "password", "tel", "url", "number"]:
+            inputs = page.locator(f"input[type='{inp_type}']").all()
+            for inp in inputs:
+                try:
+                    if not inp.is_visible() or inp.is_disabled():
+                        continue
+                    inp_id = (inp.get_attribute("id") or "").lower()
+                    inp_name = (inp.get_attribute("name") or "").lower()
+                    inp_ph = (inp.get_attribute("placeholder") or "").lower()
+                    # Bo qua submit/button
+                    if any(x in inp_id + inp_name for x in ["submit", "btn", "button", "save", "search"]):
+                        continue
+                    # Da co gia tri thi bo qua
+                    try:
+                        current = (inp.input_value() or "").strip()
+                        if current:
+                            continue
+                    except:
+                        pass
+                    # Lay label
+                    label_text = _get_label_text(inp, page)
+                    # Map ra key
+                    key = _get_field_key(inp_id, inp_name, inp_ph, label_text)
+                    if key and profile_values.get(key):
+                        val = profile_values[key]
+                        if val and val.strip():
+                            safe_val = val.strip().replace("'", "\\'")
+                            inp.evaluate(f"el => {{ el.value = '{safe_val}'; }}")
+                            filled += 1
+                            _log(f"  - Fill [{key}] label='{label_text.strip()[:30]}'")
+                            page.wait_for_timeout(500)  # Delay giua cac input
+                except Exception as e:
+                    _log(f"  - loi input: {e}")
+                    continue
+
+        # Fill textareas — dùng chung _get_label_text + _get_field_key (đã ưu tiên why_promote trước business_name)
+        for ta in page.locator("textarea").all():
+            try:
+                if not ta.is_visible() or ta.is_disabled():
+                    continue
+                try:
+                    current = (ta.input_value() or "").strip()
+                    if current:
+                        continue
+                except Exception:
+                    pass
+                ta_id = (ta.get_attribute("id") or "").lower()
+                ta_name = (ta.get_attribute("name") or "").lower()
+                ta_ph = (ta.get_attribute("placeholder") or "").lower()
+                label_text = _get_label_text(ta, page)
+                key = _get_field_key(ta_id, ta_name, ta_ph, label_text)
+                val = profile_values.get(key or "") if key else None
+                if val and val.strip():
+                    safe_val = val.strip().replace("'", "\\'")
+                    ta.evaluate(f"el => {{ el.value = '{safe_val}'; }}")
+                    filled += 1
+                    _log(f"  - Fill textarea [{key}] label='{label_text.strip()[:50]}'")
+            except Exception as e:
+                _log(f"  - loi textarea: {e}")
+                continue
+
+        page.wait_for_timeout(500)
+
+        # BUOC 3: TICK TOS CHECKBOX (neu co)
+        try:
+            tos_cb = page.locator("#affiliate_tos").first
+            if tos_cb.count() > 0 and tos_cb.is_visible() and not tos_cb.is_checked():
+                tos_cb.check(timeout=2000)
+                _log("  - Checked TOS checkbox")
+                page.wait_for_timeout(300)
+        except Exception as e:
+            _log(f"  - loi tos: {e}")
+
+        # BUOC 4: CHECKBOXES
+        for ctx in _contexts(page):
+            for cb in ctx.query_selector_all("input[type='checkbox']"):
+                try:
+                    if not cb.is_visible() or cb.is_disabled() or cb.is_checked():
+                        continue
+                    lbl = (cb.query_selector("xpath=..").inner_text() or "").lower() if cb.query_selector("xpath=..") else ""
+                    for kw in ["social influencer", "influencer", "breeder", "fan", "other"]:
+                        if kw in lbl:
+                            cb.check(timeout=1000)
+                            filled += 1
+                            _log(f"  - Checked {kw}")
+                            break
+                    else:
+                        if lbl.strip() and "agree" not in lbl and "terms" not in lbl:
+                            cb.check(timeout=1000)
+                            filled += 1
+                except:
+                    continue
+        page.wait_for_timeout(500)
+        _log(f"  - Done: {filled} fields")
+
+        # BUOC 4b: FALLBACK - điền generic_answer vào các ô còn trống chưa nhận diện được
+        generic_answer = profile.get("generic_answer") or ""
+        if generic_answer:
+            _log("  - Fallback: điền generic answer vào các ô còn trống...")
+            filled_fb = 0
+            for ctx in _contexts(page):
+                for sel in ["input[type='text']", "input[type='email']", "input[type='tel']", "input[type='url']", "textarea"]:
+                    for el in (ctx.query_selector_all(sel) or []):
+                        try:
+                            if not el.is_visible() or el.is_disabled():
+                                continue
+                            current_val = (el.input_value(timeout=300) or "").strip()
+                            if current_val:
+                                continue
+                            el.fill(generic_answer, timeout=500)
+                            filled_fb += 1
+                        except Exception:
+                            continue
+            _log(f"  - Fallback filled: {filled_fb} fields")
+
+        return filled
+
+    # BUOC 5: SUBMIT
+
+    def _click_submit(page) -> bool:
+        """Tìm và bấm nút submit/signup."""
+        # Đợi form stabilize
+        page.wait_for_timeout(2000)
+
+        # Thu click button dau tien co tren form
+        for ctx in _contexts(page):
+            try:
+                # Các selector cho nút submit
+                submit_selectors = [
+                    "button[type='submit']",
+                    "input[type='submit']",
+                    "button:has-text('Sign Up')",
+                    "button:has-text('Sign up')",
+                    "button:has-text('Submit')",
+                    "button:has-text('Apply')",
+                    "button:has-text('Register')",
+                    "a:has-text('Sign Up')",
+                    "a:has-text('Submit')",
+                    "button:has-text('Create')",
+                    "button:has-text('Join')",
+                ]
+                for sel in submit_selectors:
+                    try:
+                        loc = ctx.locator(sel).first
+                        if loc.count() and loc.is_visible() and not loc.is_disabled():
+                            loc.click(timeout=2000)
+                            page.wait_for_timeout(1000)  # Cho submit xu ly
+                            return True
+                    except Exception:
+                        continue
+            except Exception:
+                continue
+        return False
+
+    def _has_registration_errors(page) -> tuple[bool, str]:
+        """True neu co #registration-errors (ke ca element co text nhung chua visible).
+        Trả về (True, full_text) hoặc (True, 'Error|msg1|msg2') cho multi-li."""
+        for ctx in _contexts(page):
+            try:
+                loc = ctx.locator("#registration-errors")
+                if loc.count() == 0:
+                    continue
+                err_el = loc.first
+                err_text = (err_el.inner_text() or err_el.text_content() or "").strip()
+                if err_text:
+                    # Trích xuất từng <li> bên trong
+                    try:
+                        li_els = err_el.query_selector_all("li")
+                        if li_els:
+                            msgs = [li.inner_text().strip() for li in li_els if li.inner_text().strip()]
+                            if msgs:
+                                return True, "Error|" + "|".join(msgs)
+                    except Exception:
+                        pass
+                    return True, err_text
+                html = (err_el.inner_html() or "").strip()
+                if html:
+                    return True, err_text
+                try:
+                    if err_el.is_visible():
+                        return True, err_text
+                except Exception:
+                    pass
+            except Exception:
+                continue
+        return False, ""
+
+    def _has_success_message(page) -> tuple[bool, str]:
+        """Kiểm tra thành công: alert-success class hoặc 'Thank you for your registration'."""
+        for ctx in _contexts(page):
+            try:
+                # Cách 1: element có class="alert-success"
+                success_el = ctx.locator(".alert-success").first
+                if success_el.count() > 0:
+                    txt = (success_el.inner_text() or "").strip()
+                    if txt:
+                        return True, txt[:200]
+                # Cách 2: text chứa "Thank you for your registration"
+                body_text = (ctx.inner_text("body") or "").lower()
+                if "thank you for your registration" in body_text:
+                    return True, "Registration successful"
+                # Cách 3: text chứa "thank you" chung + success indicator
+                if "thank you" in body_text and ("success" in body_text or "registered" in body_text):
+                    return True, "Registration successful"
+            except Exception:
+                continue
+        return False, ""
+
+    def _reload_signup_page(page, signup_link: str) -> None:
+        """Reload trang dang ky (F5), fallback mo lai link neu reload loi."""
+        _log("  - RELOAD (F5) trang dang ky...")
+        try:
+            page.reload(wait_until="domcontentloaded", timeout=brand_timeout_sec * 1000)
+        except Exception as exc:
+            _log(f"  - Reload loi ({exc}), mo lai link dang ky...")
+            page.goto(signup_link, timeout=brand_timeout_sec * 1000, wait_until="domcontentloaded")
+        page.wait_for_timeout(3000)
+
+    def _submit_success(page) -> bool:
+        """Kiem tra submit thanh cong — khong tin neu van con registration-errors."""
+        has_err, _ = _has_registration_errors(page)
+        if has_err:
+            return False
+        page_text = (page.inner_text("body") or "").lower()
+        success_indicators = [
+            "success",
+            "thank you",
+            "cảm ơn",
+            "welcome",
+            "registered",
+            "submitted",
+            "application",
+        ]
+        return any(ind in page_text for ind in success_indicators)
+
+    # Bắt đầu xử lý
+    total = len(links)
+    ok_count = 0
+    submit_count = 0
+    submitted_items: list[dict] = []
+    attempted_items: list[dict] = []
+    using_cdp = bool(cdp_url)
+
+    if using_cdp:
+        parsed = urlparse(cdp_url)
+        host = f"{parsed.scheme}://{parsed.hostname}"
+        port = parsed.port or 9222
+    else:
+        host = "http://127.0.0.1"
+        port = 9222
+
+    _log(f"[Auto Refersion] Bắt đầu với {total} link...")
+
+    browser = None
+    context = None
+    page = None
+
+    try:
+        pw = sync_playwright().start()
+        browser = pw.chromium.connect_over_cdp(cdp_url or f"http://127.0.0.1:{port}")
+
+        # Kiểm tra browser có context không
+        if not browser.contexts:
+            _log("  - Tạo context mới...")
+            context = browser.new_context()
+        else:
+            context = browser.contexts[0]
+
+        # Lấy hoặc tạo page
+        if context.pages:
+            page = context.pages[0]
+            _log(f"  - Dùng page có sẵn: {page.url}")
+        else:
+            page = context.new_page()
+            _log("  - Tạo page mới")
+
+        for i, link in enumerate(links, 1):
+            _check_stop(f"link {i}")
+            _log(f"[{i}/{total}] Mở: {link}")
+
+            # Tao page moi cho moi link de tranh bi reload giua cac link
+            try:
+                page = context.new_page()
+            except Exception as e:
+                _log(f"  - Loi tao page moi: {e}")
+                # Thu lai voi page cu
+                if not context.pages:
+                    context = browser.new_context()
+                page = context.new_page()
+
+            try:
+                page.goto(link, timeout=brand_timeout_sec * 1000, wait_until="domcontentloaded")
+                page.wait_for_timeout(3000)  # Đợi form load
+
+                # Debug: chụp screenshot và log HTML structure
+                try:
+                    page.screenshot(path=f"debug_refersion_{i}.png")
+                    _log(f"  - Screenshot: debug_refersion_{i}.png")
+                    # Log số lượng input fields
+                    input_count = page.locator("input").count()
+                    _log(f"  - Trang có {input_count} input fields")
+                except Exception as e:
+                    _log(f"  - Debug screenshot lỗi: {e}")
+
+                # Điền form
+                filled = _fill_refersion_form(page)
+                _log(f"  - Đã điền {filled} ô")
+
+                if filled > 0:
+                    ok_count += 1
+                    attempted_items.append({
+                        "link": link,
+                        "filled": filled,
+                    })
+
+                    # Đợi form stabilize truoc submit
+                    page.wait_for_timeout(1500)
+
+                    # Thử submit nếu auto_submit=True
+                    if auto_submit:
+                        max_attempts = 2  # lan 1 + reload F5 thu lai 1 lan
+                        submit_success = False
+
+                        for attempt in range(1, max_attempts + 1):
+                            # Xóa error của attempt trước (nếu có) — để retry thành công thì không còn bị đánh dấu lỗi
+                            if attempted_items:
+                                attempted_items[-1].pop("registration_error", None)
+
+                            if attempt > 1:
+                                _reload_signup_page(page, link)
+                                filled = _fill_refersion_form(page)
+                                _log(f"  - Da dien lai {filled} o sau reload")
+                                page.wait_for_timeout(1500)
+
+                            _log(f"  - Submit lan {attempt}/{max_attempts}...")
+                            if not _click_submit(page):
+                                _log("  - Chua bam duoc submit")
+                                break
+
+                            _log("  - Da click submit, doi phan hoi...")
+                            page.wait_for_timeout(3000)
+
+                            has_err, err_text = _has_registration_errors(page)
+                            if has_err:
+                                _log(
+                                    f"  - PHAT HIEN error: "
+                                    f"{err_text[:200] or '(co element loi)'}"
+                                )
+                                # Chỉ ghi error khi đã hết retry và vẫn lỗi
+                                if attempt >= max_attempts:
+                                    attempted_items[-1]["registration_error"] = err_text[:500]
+                                if attempt < max_attempts:
+                                    _log("  - Se RELOAD (F5) va thu dang ky lai 1 lan nua...")
+                                    continue
+                                _log("  - Van loi sau retry, bo qua link nay -> chuyen link tiep theo.")
+                                break
+
+                            # Kiểm tra thành công trước
+                            has_ok, ok_text = _has_success_message(page)
+                            if has_ok:
+                                submit_success = True
+                                _log(f"  - Submit THANH CONG: {ok_text}")
+                                break
+                            # Không có error cũng không có success → retry
+                            _log("  - Khong thay error, coi nhu da gui form.")
+                            if attempt < max_attempts:
+                                _log("  - Se RELOAD (F5) va thu dang ky lai 1 lan nua...")
+                                continue
+                            # Attempt cuối mà không có success → vẫn coi là thành công
+                            submit_success = True
+                            break
+
+                        if submit_success:
+                            submit_count += 1
+                            submitted_items.append({
+                                "email": str(profile.get("email") or "").strip(),
+                                "link": link,
+                                "success": True,
+                                "success_message": ok_text if has_ok else "",
+                            })
+
+            except PlaywrightTimeoutError:
+                _log(f"  - Timeout khi mở trang")
+                attempted_items.append({"link": link, "error": "timeout"})
+            except Exception as exc:
+                _log(f"  - Lỗi: {exc}")
+                attempted_items.append({"link": link, "error": str(exc)})
+            finally:
+                # Dong page sau khi xu ly xong link
+                try:
+                    page.close()
+                except Exception:
+                    pass
+
+        _log(f"[Auto Refersion] Hoàn tất: {ok_count}/{total} đã điền, {submit_count} đã submit")
+
+    except Exception as exc:
+        _log(f"[Auto Refersion] Lỗi: {exc}")
+        raise
+    finally:
+        # Close context and browser (pages already closed in loop)
+        if not using_cdp:
+            try:
+                if context:
+                    context.close()
+            except Exception:
+                pass
+            try:
+                if browser:
+                    browser.close()
+            except Exception:
+                pass
+        try:
+            pw.stop()
+        except Exception:
+            pass
+
+    return {
+        "total": total,
+        "filled": ok_count,
+        "submitted": submit_count,
+        "submitted_items": submitted_items,
+        "attempted_items": attempted_items,
+    }

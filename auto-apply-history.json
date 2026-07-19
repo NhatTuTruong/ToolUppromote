@@ -1,5 +1,47 @@
 [
   {
+    "file": "collabs_import_18-7-2026_19-15-43.xlsx",
+    "started_at": "2026-07-19T10:07:40",
+    "started_at_display": "19/07/2026 10:07:40",
+    "email": "nhatdt2020@gmail.com",
+    "submitted_count": 0,
+    "submitted_items": [],
+    "attempted_items": [
+      {
+        "brand": "Nutrisense Affiliate Program - Powered by Refersion",
+        "domain": "nutrisense.refersion.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://nutrisense.refersion.com",
+        "submitted": false,
+        "note": "not_in_collabs_after_apply"
+      },
+      {
+        "brand": "Muenster Pet Affiliate Program - Powered by Refersion",
+        "domain": "muensterpet.refersion.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://muensterpet.refersion.com",
+        "submitted": false,
+        "note": "no_apply_cta"
+      },
+      {
+        "brand": "Shopify Collabs · You don’t meet the requirements, yet",
+        "domain": "themadhatterco.refersion.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://themadhatterco.refersion.com",
+        "submitted": false,
+        "note": "no_fields_detected"
+      },
+      {
+        "brand": "Calmerceuticals Affiliate Program - Powered by Refersion",
+        "domain": "calmerceuticals.refersion.com",
+        "email": "nhatdt2020@gmail.com",
+        "link": "https://calmerceuticals.refersion.com",
+        "submitted": false,
+        "note": "no_apply_cta"
+      }
+    ]
+  },
+  {
     "file": "collabs_page100-100_27-5-2026_14-59.xlsx",
     "started_at": "2026-05-27T15:07:26",
     "started_at_display": "27/05/2026 15:07:26",

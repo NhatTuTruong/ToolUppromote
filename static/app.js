@@ -9,11 +9,29 @@ const state = {
     runToken: "",
     notifiedToken: "",
   },
+  autoApplyRefersion: {
+    lastRunning: false,
+    lastFile: "",
+    lastResultSig: "",
+    runToken: "",
+    notifiedToken: "",
+    reopenModal: null, // ()=>void — mở lại popup log sau khi tắt
+  },
 };
 
 function isAutoApplyCollabsEnabled() {
   try {
     const v = document.body?.dataset?.autoApplyCollabsEnabled;
+    if (v == null || String(v).trim() === "") return true;
+    return String(v).trim() === "1";
+  } catch (_) {
+    return true;
+  }
+}
+
+function isAutoApplyRefersionEnabled() {
+  try {
+    const v = document.body?.dataset?.autoApplyRefersionEnabled;
     if (v == null || String(v).trim() === "") return true;
     return String(v).trim() === "1";
   } catch (_) {
@@ -66,7 +84,20 @@ const AUTO_APPLY_DEFAULTS = {
   aa_multi_account_emails: "",
   aa_multi_apply_flow: "replay_all_accounts",
 };
+
+const AUTO_REFERSION_DEFAULTS = {
+  ar_apply_mode: "only_dat",
+  ar_row_start: "1",
+  ar_row_end: "",
+  ar_account_count: "1-2",
+  ar_reason: "social influencer",
+  ar_affiliate_type: "Review Website",
+  ar_country: "United States",
+  ar_generic_answer: "",
+};
+
 const LS_AUTO_APPLY_HISTORY = "aff_auto_apply_history_v1";
+const LS_AUTO_REFERSION_HISTORY = "aff_refersion_history_v1";
 
 /** Poll nhanh hơn khi đang chạy; server phải threaded=True để /api/logs không bị chặn bởi worker. */
 const POLL_MS = 120;
@@ -412,6 +443,7 @@ const TAB_SOURCE_MAP = {
   runRefersionTab: "refersion",
   runCollabsTab: "collabs",
   autoCollabsTab: "collabs",
+  autoRefersionTab: "refersion",
 };
 
 function normalizeAllowedSourcesFromLicense(lic) {
@@ -486,6 +518,12 @@ function applyLicenseSourceVisibility(lic) {
     try {
       const enabled = isAutoApplyCollabsEnabled();
       setTabVisible("autoCollabsTab", enabled && allowed.has("collabs"));
+    } catch (_) {
+      /* ignore */
+    }
+    try {
+      const enabledAr = isAutoApplyRefersionEnabled();
+      setTabVisible("autoRefersionTab", enabledAr && allowed.has("refersion"));
     } catch (_) {
       /* ignore */
     }
@@ -597,10 +635,12 @@ async function pollStatus() {
   pollStatusBusy = true;
   try {
     const aaReq = isAutoApplyCollabsEnabled() ? fetchAutoApplyStatus().catch(() => ({})) : Promise.resolve({});
-    const [stRes, lgRes, aa] = await Promise.all([
+    const arReq = isAutoApplyRefersionEnabled() ? fetchAutoRefersionStatus().catch(() => ({})) : Promise.resolve({});
+    const [stRes, lgRes, aa, ar] = await Promise.all([
       fetch("/api/status", { cache: "no-store" }),
       fetch(`/api/logs?since=${state.logCursor}`, { cache: "no-store" }),
       aaReq,
+      arReq,
     ]);
     const st = await stRes.json();
     const lg = await lgRes.json();
@@ -696,11 +736,66 @@ async function pollStatus() {
       }
     }
 
+    // Auto Refersion notification
+    if (isAutoApplyRefersionEnabled()) {
+      const arRunning = !!ar?.running;
+      const arFile = String(ar?.file || "");
+      const arResult = ar?.result || null;
+      const arErr = String(ar?.error || "");
+      const arSig = JSON.stringify({ arFile, arResult, arErr });
+      state.autoApplyRefersion.lastRunning = arRunning;
+      state.autoApplyRefersion.lastFile = arFile;
+      const arFinished = !arRunning && (!!arResult || !!arErr);
+      const hasArToken = !!state.autoApplyRefersion.runToken;
+      const shouldArNotifyByToken = hasArToken && state.autoApplyRefersion.notifiedToken !== state.autoApplyRefersion.runToken;
+      const shouldArNotifyBySig = !hasArToken && state.autoApplyRefersion.lastResultSig !== arSig;
+      if (arFinished && (shouldArNotifyByToken || shouldArNotifyBySig)) {
+        state.autoApplyRefersion.lastResultSig = arSig;
+        if (hasArToken) state.autoApplyRefersion.notifiedToken = state.autoApplyRefersion.runToken;
+        if (arResult && typeof arResult === "object") {
+          // Lưu local history để hiển thị khi backend chưa kịp ghi
+          appendLocalRefersionHistory({
+            file: arFile,
+            started_at_display: new Date().toLocaleString("vi-VN"),
+            submitted_items: Array.isArray(arResult.submitted_items) ? arResult.submitted_items : [],
+            attempted_items: Array.isArray(arResult.attempted_items) ? arResult.attempted_items : [],
+            total: arResult.total || 0,
+            filled: arResult.filled || 0,
+            submitted: arResult.submitted || 0,
+          });
+          const arBody = `File: ${arFile}\nTổng: ${arResult.total || 0} | Điền: ${arResult.filled || 0} | Submit: ${arResult.submitted || 0}`;
+          sendBrowserNotification("Auto Refersion hoàn tất", arBody, () => {
+            if (state.autoApplyRefersion.reopenModal) state.autoApplyRefersion.reopenModal();
+          });
+          alert(`Auto Refersion xong.\n${arBody}`);
+        } else if (arErr) {
+          appendLocalRefersionHistory({
+            file: arFile,
+            started_at_display: new Date().toLocaleString("vi-VN"),
+            error: arErr,
+            attempted_items: [],
+            submitted_items: [],
+          });
+          sendBrowserNotification("Auto Refersion lỗi", `File: ${arFile}\nLỗi: ${arErr}`, null);
+          alert(`Auto Refersion lỗi.\nFile: ${arFile}\nLỗi: ${arErr}`);
+        } else {
+          sendBrowserNotification("Auto Refersion đã dừng", `File: ${arFile}`, null);
+          alert(`Auto Refersion đã dừng.\nFile: ${arFile}`);
+        }
+        await loadResults();
+      }
+    }
+
     // Chỉ dừng polling khi cả pipeline và auto-apply (nếu bật) đều đã dừng.
     const aaRunningForStop = isAutoApplyCollabsEnabled() ? !!aa?.running : false;
-    if (!st.running && !aaRunningForStop && state.pollTimer) {
+    const arRunningForStop = isAutoApplyRefersionEnabled() ? !!ar?.running : false;
+    if (!st.running && !aaRunningForStop && !arRunningForStop && state.pollTimer) {
       clearInterval(state.pollTimer);
       state.pollTimer = null;
+      state.autoApplyRefersion.reopenModal = null;
+      state.autoApplyRefersion.runToken = "";
+      state.autoApplyRefersion.notifiedToken = "";
+      state.autoApplyRefersion.lastResultSig = "";
       await Promise.all([loadResults(), loadAutoCollabsFiles()]);
       await loadLicense();
     }
@@ -1477,6 +1572,105 @@ async function fetchAutoApplyStatus() {
   return await res.json().catch(() => ({}));
 }
 
+async function fetchAutoRefersionStatus() {
+  if (!isAutoApplyRefersionEnabled()) return {};
+  const res = await fetch("/api/auto-refersion/status", { cache: "no-store" });
+  return await res.json().catch(() => ({}));
+}
+
+async function stopAutoRefersion() {
+  if (!isAutoApplyRefersionEnabled()) {
+    alert("Auto Refersion đang tắt trên server.");
+    return;
+  }
+  const res = await fetch("/api/auto-refersion/stop", { method: "POST" });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.ok) {
+    alert(data.error || "Không hủy được Auto Refersion.");
+    return;
+  }
+  // Dọn state để nút Auto Refersion trở lại bình thường
+  state.autoApplyRefersion.runToken = "";
+  state.autoApplyRefersion.notifiedToken = "";
+  state.autoApplyRefersion.lastResultSig = "";
+  state.autoApplyRefersion.reopenModal = null;
+  await Promise.all([loadResults(), loadAutoRefersionFiles()]);
+}
+
+async function autoApplyRefersionFromResultFile(name) {
+  if (!isAutoApplyRefersionEnabled()) {
+    alert("Auto Refersion đang tắt trên server.");
+    return;
+  }
+  // Thu thập profile từ form modal Auto Refersion
+  const profile = await collectAutoRefersionProfile();
+  if (!profile) return;
+
+  // Xóa log cũ trước khi bắt đầu
+  const logsBox = document.getElementById("ar_logs_box");
+  if (logsBox) logsBox.textContent = "";
+
+  // Tự động mở Edge với debug port nếu chưa mở
+  try {
+    const browserRes = await fetch("/api/open-browser", { method: "POST" });
+    browserRes.json().catch(() => ({}));
+  } catch (_) { /* ignore */ }
+  await new Promise(r => setTimeout(r, 2000));
+
+  const cdpUrl = "http://127.0.0.1:9222";
+
+  // Tạo modal progress
+  const modal = createProgressModal({
+    id: "ar_progress",
+    title: `Auto Refersion - ${name}`,
+    onStop: () => fetch("/api/auto-refersion/stop", { method: "POST" }),
+    logsContainerId: "ar_logs_box",
+    logsEndpoint: "/api/auto-refersion/status",
+    pollIntervalMs: 1500,
+  });
+  // Lưu hàm mở lại popup (để nhấn nút Auto Refersion khi popup đang đóng vẫn mở được)
+  state.autoApplyRefersion.reopenModal = () => modal.show();
+  modal.show();
+  appendLog("ar_logs_box", `Bắt đầu Auto Refersion (file: ${name})...`);
+
+  const runToken = `${Date.now()}`;
+  state.autoApplyRefersion.runToken = runToken;
+  state.autoApplyRefersion.notifiedToken = "";
+  state.autoApplyRefersion.lastResultSig = "";
+  state.autoApplyRefersion.lastRunning = true;
+  state.autoApplyRefersion.lastFile = String(name || "");
+
+  if (!state.pollTimer) {
+    state.pollTimer = setInterval(pollStatus, POLL_MS);
+  }
+  await loadResults();
+
+  try {
+    const res = await fetch("/api/auto-refersion/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name,
+        profile,
+        auto_submit: true,
+        use_cdp: true,
+        cdp_url: cdpUrl,
+        apply_mode: profile.apply_mode || "only_dat",
+        row_start: profile.row_start || "1",
+        row_end: profile.row_end || "",
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) {
+      appendLog("ar_logs_box", `Lỗi (${res.status}): ${data.error || "Không bắt đầu được."}`);
+      return;
+    }
+    appendLog("ar_logs_box", `Đã bắt đầu xử lý ${data.total_links || 0} link...`);
+  } catch (exc) {
+    appendLog("ar_logs_box", `Lỗi kết nối: ${exc.message || exc}`);
+  }
+}
+
 function readLocalApplyHistory() {
   try {
     const raw = localStorage.getItem(LS_AUTO_APPLY_HISTORY);
@@ -1493,7 +1687,23 @@ function appendLocalApplyHistory(entry) {
   localStorage.setItem(LS_AUTO_APPLY_HISTORY, JSON.stringify(items.slice(0, 200)));
 }
 
-async function openApplyHistory(name) {
+function readLocalRefersionHistory() {
+  try {
+    const raw = localStorage.getItem(LS_AUTO_REFERSION_HISTORY);
+    const arr = JSON.parse(raw || "[]");
+    return Array.isArray(arr) ? arr : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function appendLocalRefersionHistory(entry) {
+  const items = readLocalRefersionHistory();
+  items.unshift(entry);
+  localStorage.setItem(LS_AUTO_REFERSION_HISTORY, JSON.stringify(items.slice(0, 200)));
+}
+
+async function openApplyRefersionHistory(name) {
   if (!isAutoApplyCollabsEnabled()) {
     alert("Auto Apply Collabs đang tắt trên server.");
     return;
@@ -1688,6 +1898,294 @@ function applyRefersionTokenFromLicense(lic) {
   input.value = token;
 }
 
+async function openApplyRefersionHistory(name) {
+  if (!isAutoApplyRefersionEnabled()) {
+    alert("Auto Refersion đang tắt trên server.");
+    return;
+  }
+  let modal = $("refersionHistoryModal");
+  let box = $("refersionHistoryBox");
+  let closeBtn = $("refersionHistoryCloseBtn");
+  if (!modal || !box || !closeBtn) {
+    modal = document.createElement("div");
+    modal.className = "modal-backdrop hidden";
+    modal.id = "refersionHistoryModal";
+    modal.innerHTML = `
+      <div class="modal-card" style="max-width:900px;">
+        <h3>Lịch sử Apply Refersion</h3>
+        <div id="refersionHistoryBox" class="log-box" style="max-height:60vh;overflow-y:auto;"></div>
+        <div class="actions">
+          <button class="btn" type="button" id="refersionHistoryCloseBtn">Đóng</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+    box = $("refersionHistoryBox");
+    closeBtn = $("refersionHistoryCloseBtn");
+  }
+  if (!modal || !box || !closeBtn) return;
+
+  let items = [];
+  let apiOk = false;
+  try {
+    const res = await fetch(`/api/auto-refersion/history?name=${encodeURIComponent(name || "")}`, { cache: "no-store" });
+    if (res.ok) {
+      const data = await res.json().catch(() => ({}));
+      items = Array.isArray(data.items) ? data.items : [];
+      apiOk = true;
+    }
+  } catch (_) {}
+  if (!apiOk) {
+    const local = readLocalRefersionHistory();
+    items = local.filter((it) => String((it || {}).file || "") === String(name || ""));
+  }
+
+  box.innerHTML = "";
+  if (!items.length) {
+    box.textContent = "Chưa có lịch sử apply Refersion cho file này.";
+  } else {
+    items.forEach((entry) => {
+      const title = String(entry.started_at_display || entry.started_at || "").trim() || "(không rõ thời gian)";
+      const wrap = document.createElement("div");
+      wrap.style.marginBottom = "20px";
+      wrap.style.borderBottom = "1px solid #334155";
+      wrap.style.paddingBottom = "12px";
+
+      const head = document.createElement("div");
+      head.textContent = title;
+      head.style.fontSize = "16px";
+      head.style.fontWeight = "700";
+      head.style.marginBottom = "8px";
+      head.style.color = "#60a5fa";
+      wrap.appendChild(head);
+
+      // Tổng kết
+      const summary = document.createElement("div");
+      summary.style.marginBottom = "8px";
+      summary.style.color = "#94a3b8";
+      summary.style.fontSize = "13px";
+      summary.textContent = `Tổng: ${entry.total || 0} | Điền: ${entry.filled || 0} | Submit thành công: ${entry.submitted || 0}`;
+      wrap.appendChild(summary);
+
+      const domainFromLink = (link) => {
+        try {
+          const u = new URL(String(link || ""));
+          let h = String(u.host || "").toLowerCase();
+          if (h.startsWith("www.")) h = h.slice(4);
+          return h;
+        } catch (_) {
+          return String(link || "").slice(0, 60);
+        }
+      };
+
+      // === ĐÃ SUBMIT THÀNH CÔNG ===
+      const submitted = Array.isArray(entry.submitted_items) ? entry.submitted_items : [];
+      if (submitted.length) {
+        const okDiv = document.createElement("div");
+        okDiv.style.marginBottom = "10px";
+
+        const okHead = document.createElement("div");
+        okHead.textContent = `✓ Thành công (${submitted.length})`;
+        okHead.style.fontWeight = "700";
+        okHead.style.color = "#4ade80";
+        okHead.style.marginBottom = "6px";
+        okDiv.appendChild(okHead);
+
+        const okGrid = document.createElement("div");
+        okGrid.style.display = "flex";
+        okGrid.style.flexWrap = "wrap";
+        okGrid.style.gap = "6px";
+        submitted.forEach((it) => {
+          const badge = document.createElement("span");
+          const domain = String(it.domain || "").trim() || domainFromLink(it.link);
+          const msg = it.success_message ? ` — ${it.success_message}` : "";
+          badge.textContent = domain + msg;
+          badge.style.background = "rgba(6,78,59,0.2)";
+          badge.style.border = "1px solid #14532d";
+          badge.style.color = "#86efac";
+          badge.style.borderRadius = "4px";
+          badge.style.padding = "3px 8px";
+          badge.style.fontSize = "12px";
+          badge.style.maxWidth = "280px";
+          badge.style.overflow = "hidden";
+          badge.style.textOverflow = "ellipsis";
+          badge.style.whiteSpace = "nowrap";
+          okGrid.appendChild(badge);
+        });
+        okDiv.appendChild(okGrid);
+        wrap.appendChild(okDiv);
+      }
+
+      // === LỖI SUBMIT ===
+      const attempted = Array.isArray(entry.attempted_items) ? entry.attempted_items : [];
+      const withErrors = attempted.filter((it) => !!it && !!it.registration_error);
+      if (withErrors.length) {
+        const errDiv = document.createElement("div");
+        errDiv.style.marginBottom = "10px";
+
+        const errHead = document.createElement("div");
+        errHead.textContent = `✗ Lỗi đăng ký (${withErrors.length})`;
+        errHead.style.fontWeight = "700";
+        errHead.style.color = "#f87171";
+        errHead.style.marginBottom = "6px";
+        errDiv.appendChild(errHead);
+
+        withErrors.forEach((it) => {
+          const itemDiv = document.createElement("div");
+          itemDiv.style.border = "1px solid #7f1d1d";
+          itemDiv.style.borderRadius = "6px";
+          itemDiv.style.padding = "8px 10px";
+          itemDiv.style.marginBottom = "6px";
+          itemDiv.style.background = "rgba(127,29,29,0.15)";
+
+          const domainEl = document.createElement("div");
+          domainEl.textContent = domainFromLink(it.link);
+          domainEl.style.fontWeight = "600";
+          domainEl.style.color = "#fca5a5";
+          domainEl.style.marginBottom = "4px";
+          domainEl.style.fontSize = "13px";
+          itemDiv.appendChild(domainEl);
+
+          const rawErr = String(it.registration_error || "");
+          let errMsgs = [];
+          if (rawErr.startsWith("Error|")) {
+            errMsgs = rawErr.slice(6).split("|").map((s) => s.trim()).filter(Boolean);
+          } else {
+            errMsgs = [rawErr];
+          }
+
+          errMsgs.forEach((msg) => {
+            const msgEl = document.createElement("div");
+            msgEl.textContent = msg;
+            msgEl.style.color = "#fca5a5";
+            msgEl.style.fontSize = "12px";
+            msgEl.style.paddingLeft = "8px";
+            msgEl.style.borderLeft = "2px solid #f87171";
+            msgEl.style.marginBottom = "3px";
+            itemDiv.appendChild(msgEl);
+          });
+
+          errDiv.appendChild(itemDiv);
+        });
+        wrap.appendChild(errDiv);
+      }
+
+      // === CHƯA SUBMIT (điền form nhưng chưa submit) ===
+      const notSubmitted = attempted.filter((it) => !!it && !it.registration_error && !it.submitted && !it.error);
+      if (notSubmitted.length) {
+        const nsDiv = document.createElement("div");
+        nsDiv.style.marginBottom = "10px";
+
+        const nsHead = document.createElement("div");
+        nsHead.textContent = `△ Chưa submit (${notSubmitted.length})`;
+        nsHead.style.fontWeight = "700";
+        nsHead.style.color = "#fbbf24";
+        nsHead.style.marginBottom = "6px";
+        nsDiv.appendChild(nsHead);
+
+        const nsGrid = document.createElement("div");
+        nsGrid.style.display = "flex";
+        nsGrid.style.flexWrap = "wrap";
+        nsGrid.style.gap = "6px";
+        notSubmitted.forEach((it) => {
+          const badge = document.createElement("span");
+          badge.textContent = domainFromLink(it.link);
+          badge.style.background = "rgba(161,98,7,0.15)";
+          badge.style.border = "1px solid #92400e";
+          badge.style.color = "#fcd34d";
+          badge.style.borderRadius = "4px";
+          badge.style.padding = "3px 8px";
+          badge.style.fontSize = "12px";
+          badge.style.maxWidth = "220px";
+          badge.style.overflow = "hidden";
+          badge.style.textOverflow = "ellipsis";
+          badge.style.whiteSpace = "nowrap";
+          nsGrid.appendChild(badge);
+        });
+        nsDiv.appendChild(nsGrid);
+        wrap.appendChild(nsDiv);
+      }
+
+      // === LỖI KHÁC ===
+      const withOtherErrors = attempted.filter((it) => !!it && !!it.error && !it.registration_error);
+      if (withOtherErrors.length) {
+        const oeDiv = document.createElement("div");
+        oeDiv.style.marginBottom = "10px";
+
+        const oeHead = document.createElement("div");
+        oeHead.textContent = `✗ Lỗi khác (${withOtherErrors.length})`;
+        oeHead.style.fontWeight = "700";
+        oeHead.style.color = "#f87171";
+        oeHead.style.marginBottom = "6px";
+        oeDiv.appendChild(oeHead);
+
+        withOtherErrors.forEach((it) => {
+          const itemDiv = document.createElement("div");
+          itemDiv.style.border = "1px solid #7f1d1d";
+          itemDiv.style.borderRadius = "6px";
+          itemDiv.style.padding = "8px 10px";
+          itemDiv.style.marginBottom = "6px";
+          itemDiv.style.background = "rgba(127,29,29,0.15)";
+
+          const domainEl = document.createElement("div");
+          domainEl.textContent = domainFromLink(it.link);
+          domainEl.style.fontWeight = "600";
+          domainEl.style.color = "#fca5a5";
+          domainEl.style.marginBottom = "3px";
+          domainEl.style.fontSize = "13px";
+          itemDiv.appendChild(domainEl);
+
+          const errEl = document.createElement("div");
+          errEl.textContent = it.error || "Lỗi không rõ";
+          errEl.style.color = "#fca5a5";
+          errEl.style.fontSize = "12px";
+          errEl.style.paddingLeft = "8px";
+          errEl.style.borderLeft = "2px solid #f87171";
+          itemDiv.appendChild(errEl);
+
+          oeDiv.appendChild(itemDiv);
+        });
+        wrap.appendChild(oeDiv);
+      }
+
+      if (entry.error) {
+        const errBanner = document.createElement("div");
+        errBanner.style.color = "#f87171";
+        errBanner.style.fontSize = "13px";
+        errBanner.style.marginTop = "6px";
+        errBanner.textContent = `Lỗi: ${entry.error}`;
+        wrap.appendChild(errBanner);
+      }
+
+      box.appendChild(wrap);
+    });
+  }
+
+  if (!apiOk) {
+    const note = document.createElement("div");
+    note.style.marginTop = "8px";
+    note.style.color = "#9aa7bd";
+    note.style.fontSize = "12px";
+    note.textContent = "Đang dùng lịch sử local.";
+    box.appendChild(note);
+  }
+
+  modal.classList.remove("hidden");
+
+  const close = () => {
+    modal.classList.add("hidden");
+    closeBtn.removeEventListener("click", onClose);
+    modal.removeEventListener("click", onBackdrop);
+    document.removeEventListener("keydown", onEsc);
+  };
+  const onClose = () => close();
+  const onBackdrop = (e) => { if (e.target === modal) close(); };
+  const onEsc = (e) => { if (e.key === "Escape") close(); };
+  closeBtn.addEventListener("click", onClose);
+  modal.addEventListener("click", onBackdrop);
+  document.addEventListener("keydown", onEsc);
+}
+
 async function loadLicense() {
   try {
     const res = await fetch("/api/license", { cache: "no-store" });
@@ -1773,19 +2271,26 @@ async function deactivateLicense() {
 }
 
 async function loadResults() {
-  const [res, aa] = await Promise.all([
+  const [res, aa, ar] = await Promise.all([
     fetch("/api/results"),
     isAutoApplyCollabsEnabled() ? fetchAutoApplyStatus() : Promise.resolve({}),
+    isAutoApplyRefersionEnabled() ? fetchAutoRefersionStatus() : Promise.resolve({}),
   ]);
   state.autoApply.lastRunning = isAutoApplyCollabsEnabled() ? !!aa?.running : false;
   state.autoApply.lastFile = isAutoApplyCollabsEnabled() ? String(aa?.file || "") : "";
+  state.autoApplyRefersion.lastRunning = isAutoApplyRefersionEnabled() ? !!ar?.running : false;
+  state.autoApplyRefersion.lastFile = isAutoApplyRefersionEnabled() ? String(ar?.file || "") : "";
   const data = await res.json();
   const list = $("resultFileList");
   list.innerHTML = "";
-  (data.files || []).forEach((f) => list.appendChild(buildResultLikeFileRow(f, aa, /^collabs_/i.test(String(f.name || "")))));
+  (data.files || []).forEach((f) => {
+    const isCollabs = /^collabs_/i.test(String(f.name || ""));
+    const isRefersion = /^refersion_/i.test(String(f.name || ""));
+    list.appendChild(buildResultLikeFileRow(f, aa, ar, isCollabs, isRefersion));
+  });
 }
 
-function buildResultLikeFileRow(f, aa, enableAutoApply) {
+function buildResultLikeFileRow(f, aa, ar, enableAutoApplyCollabs, enableAutoApplyRefersion) {
   const row = document.createElement("div");
   row.className = "file-row";
   const actions = document.createElement("div");
@@ -1800,15 +2305,12 @@ function buildResultLikeFileRow(f, aa, enableAutoApply) {
   btnDel.className = "btn sm danger";
   btnDel.textContent = "Xóa";
   btnDel.addEventListener("click", () => deleteResultFile(f.name));
-  const isRunning = !!aa?.running;
-  const sameFile = String(aa?.file || "") === String(f.name || "");
-  const btnHistory = document.createElement("button");
-  btnHistory.type = "button";
-  btnHistory.className = "btn sm";
-  btnHistory.textContent = "Lịch sử Apply";
-  btnHistory.addEventListener("click", () => openApplyHistory(f.name));
   actions.appendChild(btnDl);
-  if (isAutoApplyCollabsEnabled() && enableAutoApply) {
+
+  // Nút Auto Apply cho Collabs
+  if (isAutoApplyCollabsEnabled() && enableAutoApplyCollabs) {
+    const isRunning = !!aa?.running;
+    const sameFile = String(aa?.file || "") === String(f.name || "");
     const btnAutoApply = document.createElement("button");
     btnAutoApply.type = "button";
     btnAutoApply.className = "btn sm";
@@ -1817,13 +2319,55 @@ function buildResultLikeFileRow(f, aa, enableAutoApply) {
       btnAutoApply.className = "btn sm danger";
       btnAutoApply.addEventListener("click", () => stopAutoApply());
     } else {
-      btnAutoApply.textContent = "Auto Apply";
+      btnAutoApply.textContent = "Auto Collabs";
       btnAutoApply.addEventListener("click", () => autoApplyFromResultFile(f.name));
     }
     btnAutoApply.disabled = isRunning && !sameFile;
     actions.appendChild(btnAutoApply);
+
+    const btnHistory = document.createElement("button");
+    btnHistory.type = "button";
+    btnHistory.className = "btn sm";
+    btnHistory.textContent = "Lịch sử Apply";
+    btnHistory.addEventListener("click", () => openApplyHistory(f.name));
     actions.appendChild(btnHistory);
   }
+
+  // Nút Auto Refersion cho file Refersion
+  if (isAutoApplyRefersionEnabled() && enableAutoApplyRefersion) {
+    const isRunning = !!ar?.running;
+    const sameFile = String(ar?.file || "") === String(f.name || "");
+    const btnAutoRefersion = document.createElement("button");
+    btnAutoRefersion.type = "button";
+    btnAutoRefersion.className = "btn sm";
+    if (isRunning && sameFile) {
+      btnAutoRefersion.textContent = "Hủy";
+      btnAutoRefersion.className = "btn sm danger";
+      btnAutoRefersion.addEventListener("click", () => stopAutoRefersion());
+    } else {
+      btnAutoRefersion.textContent = "Auto Refersion";
+      btnAutoRefersion.addEventListener("click", () => {
+        // Nếu popup đang đóng nhưng Auto Refersion còn chạy → mở lại popup log
+        const existing = document.getElementById("ar_progress");
+        if (existing && existing.classList.contains("hidden") && state.autoApplyRefersion.lastRunning) {
+          if (state.autoApplyRefersion.reopenModal) state.autoApplyRefersion.reopenModal();
+          return;
+        }
+        autoApplyRefersionFromResultFile(f.name);
+      });
+    }
+    btnAutoRefersion.disabled = isRunning && !sameFile;
+    actions.appendChild(btnAutoRefersion);
+
+    // Nút Lịch sử Refersion
+    const btnHist = document.createElement("button");
+    btnHist.type = "button";
+    btnHist.className = "btn sm";
+    btnHist.textContent = "Lịch sử Apply";
+    btnHist.addEventListener("click", () => openApplyRefersionHistory(f.name));
+    actions.appendChild(btnHist);
+  }
+
   actions.appendChild(btnDel);
   const nameEl = document.createElement("div");
   nameEl.textContent = f.name;
@@ -1923,6 +2467,542 @@ async function downloadAutoCollabsTemplate() {
   }, 200);
 }
 
+async function importAutoRefersionFile() {
+  const input = $("autoRefersionFileInput");
+  if (!input || !input.files || !input.files[0]) {
+    alert("Chọn file .xlsx trước khi import.");
+    return;
+  }
+  const form = new FormData();
+  form.append("file", input.files[0]);
+  const btn = $("importAutoRefersionBtn");
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch("/api/auto-refersion/import", {
+      method: "POST",
+      body: form,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) {
+      alert(data.error || "Import file thất bại.");
+      return;
+    }
+    input.value = "";
+    syncAutoRefersionPickedFileUI();
+    await loadAutoRefersionFiles();
+    alert(`Import thành công: ${data.name}\nTổng link hợp lệ: ${data.total_links || 0}`);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function syncAutoRefersionPickedFileUI() {
+  const input = $("autoRefersionFileInput");
+  const nameEl = $("autoRefersionPickedName");
+  if (!nameEl) return;
+  const file = input && input.files && input.files[0] ? input.files[0] : null;
+  if (!file) {
+    nameEl.textContent = "Chưa chọn file nào";
+    nameEl.classList.remove("is-picked");
+    return;
+  }
+  nameEl.textContent = file.name || "Đã chọn 1 file";
+  nameEl.classList.add("is-picked");
+}
+
+const AR_FILES_PER_PAGE = 20;
+let arFilesCurrentPage = 1;
+let arFilesData = [];
+
+async function loadAutoRefersionFiles() {
+  const res = await fetch("/api/auto-refersion/files", { cache: "no-store" });
+  const data = await res.json().catch(() => ({}));
+  const list = $("autoRefersionFileList");
+  if (!list) return;
+  arFilesData = Array.isArray(data.files) ? data.files : [];
+  arFilesCurrentPage = 1;
+  renderArFilesPage(1);
+}
+
+function renderArFilesPage(page) {
+  const list = $("autoRefersionFileList");
+  const pager = $("autoRefersionFilePager");
+  if (!list) return;
+
+  const total = arFilesData.length;
+  const totalPages = Math.max(1, Math.ceil(total / AR_FILES_PER_PAGE));
+  const curPage = Math.min(Math.max(1, page), totalPages);
+  arFilesCurrentPage = curPage;
+
+  list.innerHTML = "";
+  const start = (curPage - 1) * AR_FILES_PER_PAGE;
+  const end = start + AR_FILES_PER_PAGE;
+  const pageFiles = arFilesData.slice(start, end);
+
+  if (!pageFiles.length && total === 0) {
+    list.innerHTML = '<div style="color:#9aa7bd;padding:10px;">Chưa có file nào.</div>';
+  } else {
+    pageFiles.forEach((f) => list.appendChild(buildAutoRefersionFileRow(f)));
+  }
+
+  // Render pager
+  if (!pager) return;
+  pager.innerHTML = "";
+  if (totalPages <= 1) return;
+
+  const prevBtn = document.createElement("button");
+  prevBtn.type = "button";
+  prevBtn.className = "btn sm";
+  prevBtn.textContent = "←";
+  prevBtn.disabled = curPage <= 1;
+  prevBtn.addEventListener("click", () => renderArFilesPage(curPage - 1));
+  pager.appendChild(prevBtn);
+
+  const pageInfo = document.createElement("span");
+  pageInfo.textContent = `Trang ${curPage} / ${totalPages}`;
+  pageInfo.style.margin = "0 10px";
+  pageInfo.style.color = "#9aa7bd";
+  pager.appendChild(pageInfo);
+
+  const nextBtn = document.createElement("button");
+  nextBtn.type = "button";
+  nextBtn.className = "btn sm";
+  nextBtn.textContent = "→";
+  nextBtn.disabled = curPage >= totalPages;
+  nextBtn.addEventListener("click", () => renderArFilesPage(curPage + 1));
+  pager.appendChild(nextBtn);
+
+  const totalInfo = document.createElement("span");
+  totalInfo.textContent = ` (${total} file)`;
+  totalInfo.style.marginLeft = "10px";
+  totalInfo.style.color = "#9aa7bd";
+  pager.appendChild(totalInfo);
+}
+
+function buildAutoRefersionFileRow(f) {
+  const row = document.createElement("div");
+  row.className = "file-row";
+  const actions = document.createElement("div");
+  actions.className = "file-actions";
+  const btnDl = document.createElement("button");
+  btnDl.type = "button";
+  btnDl.className = "btn sm primary";
+  btnDl.textContent = "Tải xuống";
+  btnDl.addEventListener("click", () => downloadResultFile(f.name));
+  const btnDel = document.createElement("button");
+  btnDel.type = "button";
+  btnDel.className = "btn sm danger";
+  btnDel.textContent = "Xóa";
+  btnDel.addEventListener("click", () => deleteResultFile(f.name));
+  const btnAutoApply = document.createElement("button");
+  btnAutoApply.type = "button";
+  btnAutoApply.className = "btn sm";
+  btnAutoApply.textContent = "Auto Refersion";
+  btnAutoApply.addEventListener("click", () => openAutoRefersionModal(f.name));
+  actions.appendChild(btnDl);
+  actions.appendChild(btnAutoApply);
+  actions.appendChild(btnDel);
+  const nameEl = document.createElement("div");
+  nameEl.textContent = f.name;
+  const sizeEl = document.createElement("div");
+  sizeEl.className = "file-meta";
+  sizeEl.textContent = `${(f.size || 0).toLocaleString("vi-VN")} byte`;
+  const dt = new Date((f.modified || 0) * 1000);
+  const timeEl = document.createElement("div");
+  timeEl.className = "file-meta";
+  timeEl.textContent = isNaN(dt.getTime()) ? "" : dt.toLocaleString("vi-VN");
+  row.appendChild(actions);
+  row.appendChild(nameEl);
+  row.appendChild(sizeEl);
+  row.appendChild(timeEl);
+  return row;
+}
+
+async function downloadAutoRefersionTemplate() {
+  const origin = window.location.origin || "";
+  const url = `${origin}/api/auto-refersion/template?t=${Date.now()}`;
+  const iframe = document.createElement("iframe");
+  iframe.setAttribute("sandbox", "allow-downloads allow-same-origin");
+  iframe.style.cssText =
+    "position:fixed;width:0;height:0;border:none;opacity:0;pointer-events:none;left:-9999px";
+  iframe.src = url;
+  document.body.appendChild(iframe);
+  window.setTimeout(() => {
+    try {
+      iframe.remove();
+    } catch (_) {}
+  }, 120000);
+
+  window.setTimeout(() => {
+    const a = document.createElement("a");
+    a.href = url;
+    a.setAttribute("download", "auto-refersion-template.xlsx");
+    a.rel = "noopener noreferrer";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }, 200);
+}
+
+function collectAutoRefersionProfile() {
+  const keep = (k, v) => localStorage.setItem(k, v || "");
+  const read = (k) => {
+    const fromLs = localStorage.getItem(k);
+    if (fromLs != null && String(fromLs).trim() !== "") return fromLs;
+    return AUTO_REFERSION_DEFAULTS[k] || "";
+  };
+  const modal = $("autoRefersionModal");
+  const applyModeEl = $("ar_apply_mode");
+  const rowStartEl = $("ar_row_start");
+  const rowEndEl = $("ar_row_end");
+  const accountCountEl = $("ar_account_count");
+  const firstNameEl = $("ar_first_name");
+  const lastNameEl = $("ar_last_name");
+  const emailEl = $("ar_email");
+  const passwordEl = $("ar_password");
+  const confirmPasswordEl = $("ar_confirm_password");
+  const reasonEl = $("ar_reason");
+  const businessNameEl = $("ar_business_name");
+  const address1El = $("ar_address1");
+  const address2El = $("ar_address2");
+  const cityEl = $("ar_city");
+  const stateEl = $("ar_state");
+  const countryEl = $("ar_country");
+  const zipEl = $("ar_zip");
+  const postalCodeEl = $("ar_postal_code");
+  const phoneEl = $("ar_phone");
+  const phoneNumberEl = $("ar_phone_number");
+  const instagramEl = $("ar_instagram");
+  const tiktokEl = $("ar_tiktok");
+  const websiteEl = $("ar_website");
+  const facebookEl = $("ar_facebook");
+  const socialLinksEl = $("ar_social_links");
+  const affiliateTypeEl = $("ar_affiliate_type");
+  const promoCodeEl = $("ar_promo_code");
+  const channelUrlEl = $("ar_channel_url");
+  const whyPromoteEl = $("ar_why_promote");
+  const paypalEl = $("ar_paypal");
+  const genericAnswerEl = $("ar_generic_answer");
+  const btnCancel = $("ar_cancel_btn");
+  const btnSave = $("ar_save_btn");
+  const btnConfirm = $("ar_confirm_btn");
+
+  if (!modal) {
+    alert("Thiếu popup Auto Refersion trong giao diện.");
+    return Promise.resolve(null);
+  }
+
+  accountCountEl.value = read("ar_account_count") || "1-2";
+  applyModeEl.value = read("ar_apply_mode") || "only_dat";
+  rowStartEl.value = read("ar_row_start") || "1";
+  rowEndEl.value = read("ar_row_end") || "";
+  firstNameEl.value = read("ar_first_name");
+  lastNameEl.value = read("ar_last_name");
+  emailEl.value = read("ar_email");
+  passwordEl.value = read("ar_password");
+  confirmPasswordEl.value = read("ar_confirm_password");
+  reasonEl.value = read("ar_reason") || "social influencer";
+  businessNameEl.value = read("ar_business_name");
+  address1El.value = read("ar_address1");
+  address2El.value = read("ar_address2");
+  cityEl.value = read("ar_city");
+  stateEl.value = read("ar_state");
+  countryEl.value = read("ar_country") || "United States";
+  zipEl.value = read("ar_zip");
+  postalCodeEl.value = read("ar_postal_code");
+  phoneEl.value = read("ar_phone");
+  phoneNumberEl.value = read("ar_phone_number");
+  instagramEl.value = read("ar_instagram");
+  tiktokEl.value = read("ar_tiktok");
+  websiteEl.value = read("ar_website");
+  facebookEl.value = read("ar_facebook");
+  socialLinksEl.value = read("ar_social_links");
+  affiliateTypeEl.value = read("ar_affiliate_type") || "Review Website";
+  promoCodeEl.value = read("ar_promo_code");
+  channelUrlEl.value = read("ar_channel_url");
+  whyPromoteEl.value = read("ar_why_promote");
+  paypalEl.value = read("ar_paypal");
+  genericAnswerEl.value = read("ar_generic_answer");
+
+  modal.classList.remove("hidden");
+  window.setTimeout(() => firstNameEl.focus(), 0);
+
+  return new Promise((resolve) => {
+    let done = false;
+    const cleanup = () => {
+      modal.classList.add("hidden");
+      btnCancel.removeEventListener("click", onCancel);
+      btnSave.removeEventListener("click", onSave);
+      btnConfirm.removeEventListener("click", onConfirm);
+    };
+    const finish = (val) => {
+      if (done) return;
+      done = true;
+      cleanup();
+      resolve(val);
+    };
+    const onCancel = () => finish(null);
+
+    const persistFormToLocalStorage = () => {
+      keep("ar_account_count", accountCountEl.value);
+      keep("ar_apply_mode", applyModeEl.value);
+      keep("ar_row_start", rowStartEl.value);
+      keep("ar_row_end", rowEndEl.value);
+      keep("ar_first_name", firstNameEl.value);
+      keep("ar_last_name", lastNameEl.value);
+      keep("ar_email", emailEl.value);
+      keep("ar_password", passwordEl.value);
+      keep("ar_confirm_password", confirmPasswordEl.value);
+      keep("ar_reason", reasonEl.value);
+      keep("ar_business_name", businessNameEl.value);
+      keep("ar_address1", address1El.value);
+      keep("ar_address2", address2El.value);
+      keep("ar_city", cityEl.value);
+      keep("ar_state", stateEl.value);
+      keep("ar_country", countryEl.value);
+      keep("ar_zip", zipEl.value);
+      keep("ar_postal_code", postalCodeEl.value);
+      keep("ar_phone", phoneEl.value);
+      keep("ar_phone_number", phoneNumberEl.value);
+      keep("ar_instagram", instagramEl.value);
+      keep("ar_tiktok", tiktokEl.value);
+      keep("ar_website", websiteEl.value);
+      keep("ar_facebook", facebookEl.value);
+      keep("ar_social_links", socialLinksEl.value);
+      keep("ar_affiliate_type", affiliateTypeEl.value);
+      keep("ar_promo_code", promoCodeEl.value);
+      keep("ar_channel_url", channelUrlEl.value);
+      keep("ar_why_promote", whyPromoteEl.value);
+      keep("ar_paypal", paypalEl.value);
+      keep("ar_generic_answer", genericAnswerEl.value);
+    };
+
+    const onSave = () => {
+      persistFormToLocalStorage();
+      alert("Đã lưu mẫu đăng ký.");
+    };
+    const onConfirm = () => {
+      persistFormToLocalStorage();
+      const email = String(emailEl.value || "").trim();
+      if (!email) {
+        alert("Vui lòng nhập Email.");
+        return;
+      }
+      const password = String(passwordEl.value || "").trim();
+      if (!password) {
+        alert("Vui lòng nhập Password.");
+        return;
+      }
+      const confirmPassword = String(confirmPasswordEl.value || "").trim();
+      if (password !== confirmPassword) {
+        alert("Password và Confirm Password không khớp.");
+        return;
+      }
+      const profile = {
+        apply_mode: String(applyModeEl.value || "only_dat").trim(),
+        row_start: String(rowStartEl.value || "1").trim() || "1",
+        row_end: String(rowEndEl.value || "").trim(),
+        account_count: String(accountCountEl.value || "1-2").trim(),
+        first_name: String(firstNameEl.value || "").trim(),
+        last_name: String(lastNameEl.value || "").trim(),
+        email,
+        password,
+        confirm_password: confirmPassword,
+        reason: String(reasonEl.value || "").trim(),
+        business_name: String(businessNameEl.value || "").trim(),
+        address1: String(address1El.value || "").trim(),
+        address2: String(address2El.value || "").trim(),
+        city: String(cityEl.value || "").trim(),
+        state: String(stateEl.value || "").trim(),
+        country: String(countryEl.value || "United States").trim(),
+        zip: String(zipEl.value || "").trim(),
+        postal_code: String(postalCodeEl.value || "").trim(),
+        phone: String(phoneEl.value || "").trim(),
+        phone_number: String(phoneNumberEl.value || "").trim(),
+        instagram: String(instagramEl.value || "").trim(),
+        tiktok: String(tiktokEl.value || "").trim(),
+        website: String(websiteEl.value || "").trim(),
+        facebook: String(facebookEl.value || "").trim(),
+        social_links: String(socialLinksEl.value || "").trim(),
+        affiliate_type: String(affiliateTypeEl.value || "Review Website").trim(),
+        promo_code: String(promoCodeEl.value || "").trim(),
+        channel_url: String(channelUrlEl.value || "").trim(),
+        why_promote: String(whyPromoteEl.value || "").trim(),
+        paypal: String(paypalEl.value || "").trim(),
+        generic_answer: String(genericAnswerEl.value || "").trim(),
+      };
+      finish(profile);
+    };
+    btnCancel.addEventListener("click", onCancel);
+    btnSave.addEventListener("click", onSave);
+    btnConfirm.addEventListener("click", onConfirm);
+  });
+}
+
+async function openAutoRefersionModal(fileName) {
+  const profile = await collectAutoRefersionProfile();
+  if (!profile) return;
+  runAutoRefersion(profile, fileName);
+}
+
+async function runAutoRefersion(profile, fileName) {
+  if (!isAutoApplyRefersionEnabled()) {
+    alert("Auto Refersion đang tắt trên server.");
+    return;
+  }
+
+  // Tự động mở Edge với debug port nếu chưa mở
+  appendLog("ar_logs_box", "Đang kiểm tra/mở Edge...");
+  try {
+    const browserRes = await fetch("/api/open-browser", { method: "POST" });
+    const browserData = await browserRes.json().catch(() => ({}));
+    if (browserData.ok) {
+      appendLog("ar_logs_box", browserData.message || "Edge đã sẵn sàng.");
+    } else {
+      appendLog("ar_logs_box", "Cảnh báo: " + (browserData.error || "Không mở được Edge. Mở thủ công: msedge.exe --remote-debugging-port=9222"));
+    }
+  } catch (e) {
+    appendLog("ar_logs_box", "Lỗi: Không gọi được API mở browser.");
+  }
+  // Đợi Edge khởi động
+  await new Promise(r => setTimeout(r, 2000));
+
+  const cdpUrl = "http://127.0.0.1:9222";
+  const btnText = "Auto Refersion";
+  const startLog = `Bắt đầu Auto Refersion (file: ${fileName})...`;
+  const batchId = `rf_${Date.now()}`;
+
+  // Tạo modal progress
+  const modal = createProgressModal({
+    id: "ar_progress",
+    title: `Auto Refersion - ${fileName}`,
+    onStop: () => fetch("/api/auto-refersion/stop", { method: "POST" }),
+    logsContainerId: "ar_logs_box",
+    logsEndpoint: "/api/auto-refersion/status",
+    pollIntervalMs: 1500,
+  });
+  modal.show();
+  appendLog("ar_logs_box", startLog);
+
+  try {
+    const res = await fetch("/api/auto-refersion/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: fileName,
+        profile,
+        auto_submit: true,
+        use_cdp: true,
+        cdp_url: cdpUrl,
+        apply_mode: profile.apply_mode || "only_dat",
+        row_start: profile.row_start || "1",
+        row_end: profile.row_end || "",
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) {
+      const errMsg = data.error || `HTTP ${res.status}`;
+      appendLog("ar_logs_box", `Lỗi (${res.status}): ${errMsg}`);
+      if (data.error && data.error.includes("Không tìm thấy file")) {
+        appendLog("ar_logs_box", "Gợi ý: Import file trước khi chạy Auto Refersion");
+      }
+      return;
+    }
+    appendLog("ar_logs_box", "Đã bắt đầu xử lý...");
+  } catch (exc) {
+    appendLog("ar_logs_box", `Lỗi kết nối: ${exc.message || exc}`);
+  }
+}
+
+function createProgressModal({ id, title, onStop, logsContainerId, logsEndpoint, pollIntervalMs = 1500 }) {
+  let pollTimer = null;
+  let hidden = true;
+
+  // Tạo / reuse overlay (không xoá khi ẩn — giữ lại để mở lại được)
+  let overlay = document.getElementById(id);
+  if (!overlay) {
+    overlay = document.createElement("div");
+    overlay.className = "modal-backdrop";
+    overlay.id = id;
+    document.body.appendChild(overlay);
+  }
+  overlay.innerHTML = `
+    <div class="modal-card" style="max-width:700px;max-height:80vh;overflow:hidden;display:flex;flex-direction:column;">
+      <div style="display:flex;align-items:center;justify-content:space-between;padding-bottom:10px;border-bottom:1px solid #e2e8f0;">
+        <h3 style="margin:0;">${title}</h3>
+        <button class="btn danger" id="${id}_stop_btn" type="button">Dừng lại</button>
+      </div>
+      <div id="${logsContainerId}" class="log-box" style="flex:1;overflow-y:auto;margin:10px 0;padding:10px;background:#1e293b;color:#e2e8f0;border-radius:6px;font-family:monospace;font-size:12px;min-height:200px;max-height:400px;"></div>
+      <div style="display:flex;justify-content:flex-end;padding-top:10px;border-top:1px solid #e2e8f0;">
+        <button class="btn" id="${id}_close_btn" type="button">Đóng</button>
+      </div>
+    </div>
+  `;
+  document.getElementById(`${id}_stop_btn`).addEventListener("click", () => {
+    if (onStop) onStop();
+    appendLog(logsContainerId, "Đang dừng...");
+  });
+  document.getElementById(`${id}_close_btn`).addEventListener("click", () => {
+    hide();
+  });
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) hide();
+  });
+
+  function show() {
+    overlay.classList.remove("hidden");
+    hidden = false;
+    startPolling();
+  }
+  function hide() {
+    overlay.classList.add("hidden");
+    hidden = true;
+    stopPolling();
+  }
+  function startPolling() {
+    stopPolling();
+    pollTimer = setInterval(async () => {
+      if (hidden) { stopPolling(); return; }
+      try {
+        const res = await fetch(logsEndpoint);
+        const data = await res.json().catch(() => ({}));
+        const logs = Array.isArray(data.logs) ? data.logs : [];
+        const result = data.result;
+        const logsBox = document.getElementById(logsContainerId);
+        if (logsBox && logs.length) {
+          const existing = logsBox.textContent || "";
+          const lastLog = logs[logs.length - 1] || "";
+          if (!existing.includes(lastLog)) {
+            logs.forEach(l => appendLog(logsContainerId, l));
+          }
+        }
+        if (result && !data.running) {
+          appendLog(logsContainerId, `=== HOÀN TẤT ===`);
+          appendLog(logsContainerId, `Tổng: ${result.total || 0}, Đã điền: ${result.filled || 0}, Đã submit: ${result.submitted || 0}`);
+          stopPolling();
+        }
+      } catch (_) {}
+    }, pollIntervalMs);
+  }
+  function stopPolling() {
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+  }
+
+  return { show, hide, startPolling, stopPolling };
+}
+
+function appendLog(containerId, msg) {
+  const box = document.getElementById(containerId);
+  if (!box) return;
+  const line = document.createElement("div");
+  line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  box.appendChild(line);
+  box.scrollTop = box.scrollHeight;
+}
+
 function bindEvents() {
   document.querySelectorAll(".tab-btn").forEach((btn) => {
     btn.addEventListener("click", () => switchTab(btn.dataset.tab, true));
@@ -1991,6 +3071,22 @@ function bindEvents() {
       downloadAutoCollabsTemplate();
     });
   }
+  const importAutoRefersionBtn = $("importAutoRefersionBtn");
+  if (importAutoRefersionBtn) importAutoRefersionBtn.addEventListener("click", importAutoRefersionFile);
+  const refreshAutoRefersionBtn = $("refreshAutoRefersionBtn");
+  if (refreshAutoRefersionBtn) refreshAutoRefersionBtn.addEventListener("click", loadAutoRefersionFiles);
+  const autoRefersionFileInput = $("autoRefersionFileInput");
+  if (autoRefersionFileInput) autoRefersionFileInput.addEventListener("change", syncAutoRefersionPickedFileUI);
+  const downloadAutoRefersionTemplateBtn = $("downloadAutoRefersionTemplateBtn");
+  if (downloadAutoRefersionTemplateBtn) {
+    downloadAutoRefersionTemplateBtn.addEventListener("click", (e) => {
+      try {
+        e.preventDefault();
+        e.stopPropagation();
+      } catch (_) {}
+      downloadAutoRefersionTemplate();
+    });
+  }
   document.querySelectorAll(".open-edge-cdp-btn").forEach((edgeBtn) => {
     edgeBtn.addEventListener("click", (e) => {
       try {
@@ -2041,7 +3137,34 @@ async function init() {
   await loadLicense();
   await loadResults();
   await loadAutoCollabsFiles();
+  await loadAutoRefersionFiles();
   await pollStatus();
+  requestNotificationPermission();
+}
+
+function requestNotificationPermission() {
+  if (!("Notification" in window)) return;
+  if (Notification.permission === "granted") return;
+  if (Notification.permission === "denied") return;
+  Notification.requestPermission();
+}
+
+function sendBrowserNotification(title, body, onClick) {
+  if (!("Notification" in window)) return;
+  if (Notification.permission !== "granted") return;
+  const n = new Notification(title, {
+    body,
+    icon: "/static/icon.png",
+    badge: "/static/icon.png",
+    requireInteraction: false,
+    silent: false,
+  });
+  n.onclick = () => {
+    window.focus();
+    n.close();
+    if (onClick) onClick();
+  };
+  setTimeout(() => n.close(), 15000);
 }
 
 init();

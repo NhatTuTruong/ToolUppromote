@@ -19,6 +19,7 @@ class LicenseKey extends Model
         'max_machines',
         'allowed_sources',
         'allow_auto_apply_collabs',
+        'allow_auto_apply_refersion',
         'expires_at',
         'notes',
     ];
@@ -27,6 +28,7 @@ class LicenseKey extends Model
         'expires_at' => 'datetime',
         'allowed_sources' => 'array',
         'allow_auto_apply_collabs' => 'boolean',
+        'allow_auto_apply_refersion' => 'boolean',
     ];
 
     public function activations(): HasMany

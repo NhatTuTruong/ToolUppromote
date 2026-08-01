@@ -15,6 +15,9 @@ const state = {
     lastResultSig: "",
     runToken: "",
     notifiedToken: "",
+    observedRunning: false, // true sau khi backend xác nhận đang chạy trong phiên hiện tại
+    registrationEmail: "",
+    progressModal: null,
     reopenModal: null, // ()=>void — mở lại popup log sau khi tắt
   },
 };
@@ -89,7 +92,6 @@ const AUTO_REFERSION_DEFAULTS = {
   ar_apply_mode: "only_dat",
   ar_row_start: "1",
   ar_row_end: "",
-  ar_account_count: "1-2",
   ar_reason: "social influencer",
   ar_affiliate_type: "Review Website",
   ar_country: "United States",
@@ -745,8 +747,16 @@ async function pollStatus() {
       const arSig = JSON.stringify({ arFile, arResult, arErr });
       state.autoApplyRefersion.lastRunning = arRunning;
       state.autoApplyRefersion.lastFile = arFile;
-      const arFinished = !arRunning && (!!arResult || !!arErr);
       const hasArToken = !!state.autoApplyRefersion.runToken;
+      if (hasArToken && arRunning) {
+        state.autoApplyRefersion.observedRunning = true;
+      }
+      // Chỉ thông báo khi phiên hiện tại đã thực sự chạy rồi dừng (tránh alert kết quả cũ lần 2+)
+      const arFinished =
+        hasArToken &&
+        state.autoApplyRefersion.observedRunning &&
+        !arRunning &&
+        (!!arResult || !!arErr);
       const shouldArNotifyByToken = hasArToken && state.autoApplyRefersion.notifiedToken !== state.autoApplyRefersion.runToken;
       const shouldArNotifyBySig = !hasArToken && state.autoApplyRefersion.lastResultSig !== arSig;
       if (arFinished && (shouldArNotifyByToken || shouldArNotifyBySig)) {
@@ -757,17 +767,27 @@ async function pollStatus() {
           appendLocalRefersionHistory({
             file: arFile,
             started_at_display: new Date().toLocaleString("vi-VN"),
+            email: getRefersionRegistrationEmail(arResult),
             submitted_items: Array.isArray(arResult.submitted_items) ? arResult.submitted_items : [],
             attempted_items: Array.isArray(arResult.attempted_items) ? arResult.attempted_items : [],
             total: arResult.total || 0,
             filled: arResult.filled || 0,
             submitted: arResult.submitted || 0,
+            failed: arResult.failed || 0,
+            skipped: arResult.skipped || 0,
+            submit_failed: arResult.submit_failed || 0,
+            cancelled: !!arResult.cancelled,
           });
-          const arBody = `File: ${arFile}\nTổng: ${arResult.total || 0} | Điền: ${arResult.filled || 0} | Submit: ${arResult.submitted || 0}`;
-          sendBrowserNotification("Auto Refersion hoàn tất", arBody, () => {
-            if (state.autoApplyRefersion.reopenModal) state.autoApplyRefersion.reopenModal();
-          });
-          alert(`Auto Refersion xong.\n${arBody}`);
+          const emailLine = formatRefersionResultHeader(arResult);
+          const arBody = `File: ${arFile}${emailLine ? `\n${emailLine}` : ""}\n${formatRefersionSummary(arResult)}`;
+          sendBrowserNotification(
+            arResult.cancelled ? "Auto Refersion đã hủy" : "Auto Refersion hoàn tất",
+            arBody,
+            () => {
+              if (state.autoApplyRefersion.reopenModal) state.autoApplyRefersion.reopenModal();
+            }
+          );
+          alert(`${arResult.cancelled ? "Auto Refersion đã hủy." : "Auto Refersion xong."}\n${arBody}`);
         } else if (arErr) {
           appendLocalRefersionHistory({
             file: arFile,
@@ -782,6 +802,7 @@ async function pollStatus() {
           sendBrowserNotification("Auto Refersion đã dừng", `File: ${arFile}`, null);
           alert(`Auto Refersion đã dừng.\nFile: ${arFile}`);
         }
+        state.autoApplyRefersion.observedRunning = false;
         await loadResults();
       }
     }
@@ -796,6 +817,12 @@ async function pollStatus() {
       state.autoApplyRefersion.runToken = "";
       state.autoApplyRefersion.notifiedToken = "";
       state.autoApplyRefersion.lastResultSig = "";
+      state.autoApplyRefersion.observedRunning = false;
+      state.autoApplyRefersion.registrationEmail = "";
+      state.autoApplyRefersion.progressModal = null;
+      state.autoApply.runToken = "";
+      state.autoApply.notifiedToken = "";
+      state.autoApply.lastResultSig = "";
       await Promise.all([loadResults(), loadAutoCollabsFiles()]);
       await loadLicense();
     }
@@ -1538,6 +1565,10 @@ async function autoApplyFromResultFile(name) {
     return;
   }
   // Bật poll để theo dõi kết thúc auto-apply (popup + đổi nút Hủy về Auto Apply).
+  // Xóa log box trước khi bắt đầu lượt mới
+  const boxes = [logBox(), logBoxCb()].filter(Boolean);
+  boxes.forEach((box) => { box.textContent = ""; });
+  state.logCursor = 0;
   if (!state.pollTimer) {
     state.pollTimer = setInterval(pollStatus, POLL_MS);
   }
@@ -1578,6 +1609,29 @@ async function fetchAutoRefersionStatus() {
   return await res.json().catch(() => ({}));
 }
 
+function stopAutoRefersionProgressPolling() {
+  if (state.autoApplyRefersion.progressModal) {
+    try {
+      state.autoApplyRefersion.progressModal.stopPolling();
+    } catch (_) {
+      /* ignore */
+    }
+  }
+  const oldOverlay = document.getElementById("ar_progress");
+  if (oldOverlay && oldOverlay.dataset.pollTimerId) {
+    clearInterval(Number(oldOverlay.dataset.pollTimerId));
+    oldOverlay.dataset.pollTimerId = "";
+  }
+}
+
+async function resetAutoRefersionBackend() {
+  try {
+    await fetch("/api/auto-refersion/reset", { method: "POST", cache: "no-store" });
+  } catch (_) {
+    /* ignore */
+  }
+}
+
 async function stopAutoRefersion() {
   if (!isAutoApplyRefersionEnabled()) {
     alert("Auto Refersion đang tắt trên server.");
@@ -1593,7 +1647,10 @@ async function stopAutoRefersion() {
   state.autoApplyRefersion.runToken = "";
   state.autoApplyRefersion.notifiedToken = "";
   state.autoApplyRefersion.lastResultSig = "";
+  state.autoApplyRefersion.observedRunning = false;
+  state.autoApplyRefersion.registrationEmail = "";
   state.autoApplyRefersion.reopenModal = null;
+  stopAutoRefersionProgressPolling();
   await Promise.all([loadResults(), loadAutoRefersionFiles()]);
 }
 
@@ -1606,9 +1663,16 @@ async function autoApplyRefersionFromResultFile(name) {
   const profile = await collectAutoRefersionProfile();
   if (!profile) return;
 
-  // Xóa log cũ trước khi bắt đầu
-  const logsBox = document.getElementById("ar_logs_box");
-  if (logsBox) logsBox.textContent = "";
+  stopAutoRefersionProgressPolling();
+  await resetAutoRefersionBackend();
+
+  const runToken = `${Date.now()}`;
+  state.autoApplyRefersion.runToken = runToken;
+  state.autoApplyRefersion.notifiedToken = "";
+  state.autoApplyRefersion.lastResultSig = "";
+  state.autoApplyRefersion.observedRunning = false;
+  state.autoApplyRefersion.registrationEmail = String(profile.email || "").trim();
+  state.autoApplyRefersion.lastFile = String(name || "");
 
   // Tự động mở Edge với debug port nếu chưa mở
   try {
@@ -1619,32 +1683,8 @@ async function autoApplyRefersionFromResultFile(name) {
 
   const cdpUrl = "http://127.0.0.1:9222";
 
-  // Tạo modal progress
-  const modal = createProgressModal({
-    id: "ar_progress",
-    title: `Auto Refersion - ${name}`,
-    onStop: () => fetch("/api/auto-refersion/stop", { method: "POST" }),
-    logsContainerId: "ar_logs_box",
-    logsEndpoint: "/api/auto-refersion/status",
-    pollIntervalMs: 1500,
-  });
-  // Lưu hàm mở lại popup (để nhấn nút Auto Refersion khi popup đang đóng vẫn mở được)
-  state.autoApplyRefersion.reopenModal = () => modal.show();
-  modal.show();
-  appendLog("ar_logs_box", `Bắt đầu Auto Refersion (file: ${name})...`);
-
-  const runToken = `${Date.now()}`;
-  state.autoApplyRefersion.runToken = runToken;
-  state.autoApplyRefersion.notifiedToken = "";
-  state.autoApplyRefersion.lastResultSig = "";
-  state.autoApplyRefersion.lastRunning = true;
-  state.autoApplyRefersion.lastFile = String(name || "");
-
-  if (!state.pollTimer) {
-    state.pollTimer = setInterval(pollStatus, POLL_MS);
-  }
-  await loadResults();
-
+  // Gọi start TRƯỚC khi mở modal polling — tránh đọc kết quả cũ từ lần chạy trước
+  let totalLinks = 0;
   try {
     const res = await fetch("/api/auto-refersion/start", {
       method: "POST",
@@ -1662,13 +1702,39 @@ async function autoApplyRefersionFromResultFile(name) {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok || !data.ok) {
-      appendLog("ar_logs_box", `Lỗi (${res.status}): ${data.error || "Không bắt đầu được."}`);
+      alert(`Lỗi (${res.status}): ${data.error || "Không bắt đầu được."}`);
+      state.autoApplyRefersion.runToken = "";
       return;
     }
-    appendLog("ar_logs_box", `Đã bắt đầu xử lý ${data.total_links || 0} link...`);
+    totalLinks = data.total_links || 0;
+    state.autoApplyRefersion.observedRunning = true;
   } catch (exc) {
-    appendLog("ar_logs_box", `Lỗi kết nối: ${exc.message || exc}`);
+    alert(`Lỗi kết nối: ${exc.message || exc}`);
+    state.autoApplyRefersion.runToken = "";
+    return;
   }
+
+  // Tạo modal progress sau khi backend đã bắt đầu phiên mới
+  const modal = createProgressModal({
+    id: "ar_progress",
+    title: `Auto Refersion - ${name}`,
+    onStop: () => fetch("/api/auto-refersion/stop", { method: "POST" }),
+    logsContainerId: "ar_logs_box",
+    logsEndpoint: "/api/auto-refersion/status",
+    pollIntervalMs: 1500,
+  });
+  state.autoApplyRefersion.reopenModal = () => modal.show(true);
+  state.autoApplyRefersion.progressModal = modal;
+  modal.show();
+  appendLog("ar_logs_box", `Bắt đầu Auto Refersion (file: ${name})...`);
+  const regEmail = String(profile.email || "").trim();
+  if (regEmail) appendLog("ar_logs_box", `Email đăng ký: ${regEmail}`);
+  appendLog("ar_logs_box", `Đã bắt đầu xử lý ${totalLinks} link...`);
+
+  if (!state.pollTimer) {
+    state.pollTimer = setInterval(pollStatus, POLL_MS);
+  }
+  await loadResults();
 }
 
 function readLocalApplyHistory() {
@@ -1685,6 +1751,132 @@ function appendLocalApplyHistory(entry) {
   const items = readLocalApplyHistory();
   items.unshift(entry);
   localStorage.setItem(LS_AUTO_APPLY_HISTORY, JSON.stringify(items.slice(0, 200)));
+}
+
+function getRefersionRegistrationEmail(source) {
+  const r = source && typeof source === "object" ? source : {};
+  const direct = String(r.email || r.registration_email || "").trim();
+  if (direct) return direct;
+  const submitted = Array.isArray(r.submitted_items) ? r.submitted_items : [];
+  for (const it of submitted) {
+    const em = String(it?.email || "").trim();
+    if (em) return em;
+  }
+  const fromState = String(state.autoApplyRefersion.registrationEmail || "").trim();
+  return fromState;
+}
+
+function formatRefersionResultHeader(source) {
+  const email = getRefersionRegistrationEmail(source);
+  return email ? `Email đăng ký: ${email}` : "";
+}
+
+function computeRefersionStats(source) {
+  const r = source && typeof source === "object" ? source : {};
+  const attempted = Array.isArray(r.attempted_items) ? r.attempted_items : [];
+  const submittedItems = Array.isArray(r.submitted_items) ? r.submitted_items : [];
+  const total = Number(r.total) || 0;
+  const filled = Number(r.filled) || attempted.filter((it) => Number(it?.filled || 0) > 0).length;
+  const submitted = Number(r.submitted) || submittedItems.length;
+  const failed =
+    Number(r.failed) ||
+    attempted.filter((it) => !!it && (!!it.error || !!it.registration_error)).length;
+  const skipped =
+    Number(r.skipped) ||
+    attempted.filter((it) => !!it && String(it.note || "") === "khong_dien_duoc_form").length;
+  const submitFailed =
+    Number(r.submit_failed) ||
+    attempted.filter(
+      (it) =>
+        !!it &&
+        Number(it.filled || 0) > 0 &&
+        !it.submitted &&
+        !it.error &&
+        !it.registration_error
+    ).length;
+  return { total, filled, submitted, failed, skipped, submitFailed, cancelled: !!r.cancelled };
+}
+
+function formatRefersionSummary(source) {
+  const s = computeRefersionStats(source);
+  const parts = [
+    `Tổng link: ${s.total}`,
+    `Đã điền form: ${s.filled}`,
+    `Submit OK: ${s.submitted}`,
+  ];
+  if (s.submitFailed > 0) parts.push(`Chưa submit: ${s.submitFailed}`);
+  if (s.skipped > 0) parts.push(`Bỏ qua: ${s.skipped}`);
+  if (s.failed > 0) parts.push(`Lỗi: ${s.failed}`);
+  if (s.cancelled) parts.push("Đã hủy");
+  return parts.join(" | ");
+}
+
+function refersionNoteLabel(noteRaw) {
+  const note = String(noteRaw || "").trim();
+  if (!note) return "";
+  if (note === "submit_khong_thanh_cong") return "Đã điền form nhưng chưa submit được";
+  if (note === "khong_dien_duoc_form") return "Không điền được ô nào trên form";
+  if (note === "khong_auto_submit") return "Đã điền form (không bật auto submit)";
+  return note;
+}
+
+function appendRefersionResultDetails(containerId, result) {
+  const attempted = Array.isArray(result?.attempted_items) ? result.attempted_items : [];
+  const submitted = Array.isArray(result?.submitted_items) ? result.submitted_items : [];
+  const emailLine = formatRefersionResultHeader(result);
+  if (emailLine) appendLog(containerId, emailLine);
+  appendLog(containerId, formatRefersionSummary(result));
+  if (submitted.length > 0) {
+    appendLog(containerId, "");
+    appendLog(containerId, `--- Submit OK (${submitted.length}) ---`);
+    submitted.forEach((item, idx) => {
+      appendLog(containerId, `  ${idx + 1}. ${item.brand || item.link || ""}`);
+    });
+  }
+  const regErrors = attempted.filter((it) => !!it?.registration_error);
+  if (regErrors.length > 0) {
+    appendLog(containerId, "");
+    appendLog(containerId, `--- Loi dang ky (${regErrors.length}) ---`);
+    regErrors.forEach((item, idx) => {
+      const brand = item.brand || item.link || "";
+      const err = String(item.registration_error || "").slice(0, 100);
+      appendLog(containerId, `  ${idx + 1}. ${brand}: ${err}`);
+    });
+  }
+  const otherErrors = attempted.filter((it) => !!it?.error && !it?.registration_error);
+  if (otherErrors.length > 0) {
+    appendLog(containerId, "");
+    appendLog(containerId, `--- Loi khac (${otherErrors.length}) ---`);
+    otherErrors.forEach((item, idx) => {
+      const brand = item.brand || item.link || "";
+      appendLog(containerId, `  ${idx + 1}. ${brand}: ${String(item.error || "").slice(0, 100)}`);
+    });
+  }
+  const notSubmitted = attempted.filter(
+    (it) =>
+      !!it &&
+      Number(it.filled || 0) > 0 &&
+      !it.submitted &&
+      !it.error &&
+      !it.registration_error
+  );
+  if (notSubmitted.length > 0) {
+    appendLog(containerId, "");
+    appendLog(containerId, `--- Da dien, chua submit (${notSubmitted.length}) ---`);
+    notSubmitted.forEach((item, idx) => {
+      const brand = item.brand || item.link || "";
+      const note = refersionNoteLabel(item.note);
+      appendLog(containerId, `  ${idx + 1}. ${brand}${note ? `: ${note}` : ""}`);
+    });
+  }
+  const skipped = attempted.filter((it) => String(it?.note || "") === "khong_dien_duoc_form");
+  if (skipped.length > 0) {
+    appendLog(containerId, "");
+    appendLog(containerId, `--- Bo qua (${skipped.length}) ---`);
+    skipped.forEach((item, idx) => {
+      appendLog(containerId, `  ${idx + 1}. ${item.brand || item.link || ""}`);
+    });
+  }
 }
 
 function readLocalRefersionHistory() {
@@ -1764,7 +1956,6 @@ async function openApplyRefersionHistory(name) {
       const attempted = Array.isArray(entry.attempted_items) ? entry.attempted_items : [];
       const submitted = Array.isArray(entry.submitted_items) ? entry.submitted_items : [];
       const submittedFromAttempted = attempted.filter((it) => !!it && !!it.submitted);
-      const notSubmittedFromAttempted = attempted.filter((it) => !!it && !it.submitted);
 
       const vnErrorFromNote = (noteRaw) => {
         const note = String(noteRaw || "").trim();
@@ -1824,32 +2015,7 @@ async function openApplyRefersionHistory(name) {
         wrap.appendChild(ul);
       }
 
-      // 2) Chưa submit
-      wrap.appendChild(section(`Chưa submit (${notSubmittedFromAttempted.length})`));
-      if (!attempted.length) {
-        const note = document.createElement("div");
-        note.textContent = "Chưa có dữ liệu brand chưa submit (phiên cũ).";
-        note.style.color = "#9aa7bd";
-        wrap.appendChild(note);
-      } else if (!notSubmittedFromAttempted.length) {
-        const ok = document.createElement("div");
-        ok.textContent = "Tất cả brand trong phiên này đã submit.";
-        ok.style.color = "#9aa7bd";
-        wrap.appendChild(ok);
-      } else {
-        const ul = document.createElement("ul");
-        ul.style.margin = "0";
-        ul.style.paddingLeft = "18px";
-        notSubmittedFromAttempted.forEach((it) => {
-          const li = document.createElement("li");
-          const email = String(it.email || entry.email || "").trim() || "(không rõ email)";
-          const domain = String(it.domain || "").trim() || domainFromLink(it.link) || String(it.brand || "").trim() || "(không rõ domain)";
-          const errVi = vnErrorFromNote(it.note);
-          li.textContent = `${domain} | ${email} | ${errVi}`;
-          ul.appendChild(li);
-        });
-        wrap.appendChild(ul);
-      }
+      // Tiếp tục xử lý các phần khác...
       box.appendChild(wrap);
     });
   }
@@ -1946,6 +2112,7 @@ async function openApplyRefersionHistory(name) {
   } else {
     items.forEach((entry) => {
       const title = String(entry.started_at_display || entry.started_at || "").trim() || "(không rõ thời gian)";
+      const regEmail = getRefersionRegistrationEmail(entry);
       const wrap = document.createElement("div");
       wrap.style.marginBottom = "20px";
       wrap.style.borderBottom = "1px solid #334155";
@@ -1955,16 +2122,26 @@ async function openApplyRefersionHistory(name) {
       head.textContent = title;
       head.style.fontSize = "16px";
       head.style.fontWeight = "700";
-      head.style.marginBottom = "8px";
+      head.style.marginBottom = "4px";
       head.style.color = "#60a5fa";
       wrap.appendChild(head);
+
+      if (regEmail) {
+        const emailEl = document.createElement("div");
+        emailEl.textContent = `Email đăng ký: ${regEmail}`;
+        emailEl.style.fontSize = "14px";
+        emailEl.style.fontWeight = "600";
+        emailEl.style.color = "#fbbf24";
+        emailEl.style.marginBottom = "8px";
+        wrap.appendChild(emailEl);
+      }
 
       // Tổng kết
       const summary = document.createElement("div");
       summary.style.marginBottom = "8px";
       summary.style.color = "#94a3b8";
       summary.style.fontSize = "13px";
-      summary.textContent = `Tổng: ${entry.total || 0} | Điền: ${entry.filled || 0} | Submit thành công: ${entry.submitted || 0}`;
+      summary.textContent = formatRefersionSummary(entry);
       wrap.appendChild(summary);
 
       const domainFromLink = (link) => {
@@ -1997,7 +2174,7 @@ async function openApplyRefersionHistory(name) {
         okGrid.style.gap = "6px";
         submitted.forEach((it) => {
           const badge = document.createElement("span");
-          const domain = String(it.domain || "").trim() || domainFromLink(it.link);
+          const domain = String(it.brand || it.domain || "").trim() || domainFromLink(it.link);
           const msg = it.success_message ? ` — ${it.success_message}` : "";
           badge.textContent = domain + msg;
           badge.style.background = "rgba(6,78,59,0.2)";
@@ -2070,42 +2247,6 @@ async function openApplyRefersionHistory(name) {
         wrap.appendChild(errDiv);
       }
 
-      // === CHƯA SUBMIT (điền form nhưng chưa submit) ===
-      const notSubmitted = attempted.filter((it) => !!it && !it.registration_error && !it.submitted && !it.error);
-      if (notSubmitted.length) {
-        const nsDiv = document.createElement("div");
-        nsDiv.style.marginBottom = "10px";
-
-        const nsHead = document.createElement("div");
-        nsHead.textContent = `△ Chưa submit (${notSubmitted.length})`;
-        nsHead.style.fontWeight = "700";
-        nsHead.style.color = "#fbbf24";
-        nsHead.style.marginBottom = "6px";
-        nsDiv.appendChild(nsHead);
-
-        const nsGrid = document.createElement("div");
-        nsGrid.style.display = "flex";
-        nsGrid.style.flexWrap = "wrap";
-        nsGrid.style.gap = "6px";
-        notSubmitted.forEach((it) => {
-          const badge = document.createElement("span");
-          badge.textContent = domainFromLink(it.link);
-          badge.style.background = "rgba(161,98,7,0.15)";
-          badge.style.border = "1px solid #92400e";
-          badge.style.color = "#fcd34d";
-          badge.style.borderRadius = "4px";
-          badge.style.padding = "3px 8px";
-          badge.style.fontSize = "12px";
-          badge.style.maxWidth = "220px";
-          badge.style.overflow = "hidden";
-          badge.style.textOverflow = "ellipsis";
-          badge.style.whiteSpace = "nowrap";
-          nsGrid.appendChild(badge);
-        });
-        nsDiv.appendChild(nsGrid);
-        wrap.appendChild(nsDiv);
-      }
-
       // === LỖI KHÁC ===
       const withOtherErrors = attempted.filter((it) => !!it && !!it.error && !it.registration_error);
       if (withOtherErrors.length) {
@@ -2146,6 +2287,55 @@ async function openApplyRefersionHistory(name) {
           oeDiv.appendChild(itemDiv);
         });
         wrap.appendChild(oeDiv);
+      }
+
+      const notSubmitted = attempted.filter(
+        (it) =>
+          !!it &&
+          Number(it.filled || 0) > 0 &&
+          !it.submitted &&
+          !it.error &&
+          !it.registration_error
+      );
+      if (notSubmitted.length) {
+        const nsDiv = document.createElement("div");
+        nsDiv.style.marginBottom = "10px";
+        const nsHead = document.createElement("div");
+        nsHead.textContent = `⚠ Đã điền, chưa submit (${notSubmitted.length})`;
+        nsHead.style.fontWeight = "700";
+        nsHead.style.color = "#fbbf24";
+        nsHead.style.marginBottom = "6px";
+        nsDiv.appendChild(nsHead);
+        notSubmitted.forEach((it) => {
+          const row = document.createElement("div");
+          row.textContent = `${domainFromLink(it.link)} — ${refersionNoteLabel(it.note) || "Chưa submit"}`;
+          row.style.color = "#fcd34d";
+          row.style.fontSize = "12px";
+          row.style.marginBottom = "4px";
+          nsDiv.appendChild(row);
+        });
+        wrap.appendChild(nsDiv);
+      }
+
+      const skipped = attempted.filter((it) => String(it?.note || "") === "khong_dien_duoc_form");
+      if (skipped.length) {
+        const skDiv = document.createElement("div");
+        skDiv.style.marginBottom = "10px";
+        const skHead = document.createElement("div");
+        skHead.textContent = `○ Bỏ qua — không điền được form (${skipped.length})`;
+        skHead.style.fontWeight = "700";
+        skHead.style.color = "#94a3b8";
+        skHead.style.marginBottom = "6px";
+        skDiv.appendChild(skHead);
+        skipped.forEach((it) => {
+          const row = document.createElement("div");
+          row.textContent = domainFromLink(it.link);
+          row.style.color = "#94a3b8";
+          row.style.fontSize = "12px";
+          row.style.marginBottom = "4px";
+          skDiv.appendChild(row);
+        });
+        wrap.appendChild(skDiv);
       }
 
       if (entry.error) {
@@ -2655,7 +2845,6 @@ function collectAutoRefersionProfile() {
   const applyModeEl = $("ar_apply_mode");
   const rowStartEl = $("ar_row_start");
   const rowEndEl = $("ar_row_end");
-  const accountCountEl = $("ar_account_count");
   const firstNameEl = $("ar_first_name");
   const lastNameEl = $("ar_last_name");
   const emailEl = $("ar_email");
@@ -2683,8 +2872,12 @@ function collectAutoRefersionProfile() {
   const whyPromoteEl = $("ar_why_promote");
   const paypalEl = $("ar_paypal");
   const genericAnswerEl = $("ar_generic_answer");
+  const accountModeEl = $("ar_account_mode");
+  const multiEmailsEl = $("ar_multi_emails");
+  const accountCountEl = $("ar_account_count");
   const btnCancel = $("ar_cancel_btn");
   const btnSave = $("ar_save_btn");
+  const btnReset = $("ar_reset_btn");
   const btnConfirm = $("ar_confirm_btn");
 
   if (!modal) {
@@ -2692,7 +2885,7 @@ function collectAutoRefersionProfile() {
     return Promise.resolve(null);
   }
 
-  accountCountEl.value = read("ar_account_count") || "1-2";
+  // Điền giá trị mặc định
   applyModeEl.value = read("ar_apply_mode") || "only_dat";
   rowStartEl.value = read("ar_row_start") || "1";
   rowEndEl.value = read("ar_row_end") || "";
@@ -2733,6 +2926,7 @@ function collectAutoRefersionProfile() {
       modal.classList.add("hidden");
       btnCancel.removeEventListener("click", onCancel);
       btnSave.removeEventListener("click", onSave);
+      btnReset.removeEventListener("click", onReset);
       btnConfirm.removeEventListener("click", onConfirm);
     };
     const finish = (val) => {
@@ -2744,7 +2938,6 @@ function collectAutoRefersionProfile() {
     const onCancel = () => finish(null);
 
     const persistFormToLocalStorage = () => {
-      keep("ar_account_count", accountCountEl.value);
       keep("ar_apply_mode", applyModeEl.value);
       keep("ar_row_start", rowStartEl.value);
       keep("ar_row_end", rowEndEl.value);
@@ -2798,11 +2991,44 @@ function collectAutoRefersionProfile() {
         alert("Password và Confirm Password không khớp.");
         return;
       }
+      // Parse thông tin đa tài khoản từ textarea
+      const accountMode = accountModeEl ? String(accountModeEl.value || "single").trim() : "single";
+      let multi_accounts = null;
+      let browser_count = 1;
+      if (accountMode === "multi" && multiEmailsEl) {
+        const raw = String(multiEmailsEl.value || "").trim();
+        if (raw) {
+          multi_accounts = {};
+          raw.split("\n").forEach((line) => {
+            const lineTrim = line.trim();
+            if (!lineTrim) return;
+            const parts = lineTrim.split("=");
+            if (parts.length < 2) return;
+            const numStr = parts[0].trim();
+            const num = parseInt(numStr, 10);
+            if (isNaN(num)) return;
+            const fields = parts.slice(1).join("=").split("|").map((f) => f.trim());
+            multi_accounts[num] = {
+              email: fields[0] || "",
+              first_name: fields[1] || "",
+              last_name: fields[2] || "",
+              website: fields[3] || "",
+              instagram: fields[4] || "",
+              paypal: fields[5] || "",
+            };
+          });
+          browser_count = Object.keys(multi_accounts).length;
+        }
+      }
+
       const profile = {
         apply_mode: String(applyModeEl.value || "only_dat").trim(),
         row_start: String(rowStartEl.value || "1").trim() || "1",
         row_end: String(rowEndEl.value || "").trim(),
-        account_count: String(accountCountEl.value || "1-2").trim(),
+        account_count: accountCountEl ? String(accountCountEl.value || "1-2").trim() : "1-2",
+        account_mode: accountMode,
+        multi_accounts,
+        browser_count,
         first_name: String(firstNameEl.value || "").trim(),
         last_name: String(lastNameEl.value || "").trim(),
         email,
@@ -2833,8 +3059,15 @@ function collectAutoRefersionProfile() {
       };
       finish(profile);
     };
+    const onReset = async () => {
+      try {
+        await fetch("/api/auto-refersion/reset", { method: "POST" });
+        alert("Đã reset trạng thái Auto Refersion. Có thể chạy lại được.");
+      } catch (e) { alert("Lỗi reset: " + e.message); }
+    };
     btnCancel.addEventListener("click", onCancel);
     btnSave.addEventListener("click", onSave);
+    btnReset.addEventListener("click", onReset);
     btnConfirm.addEventListener("click", onConfirm);
   });
 }
@@ -2851,39 +3084,32 @@ async function runAutoRefersion(profile, fileName) {
     return;
   }
 
+  stopAutoRefersionProgressPolling();
+  await resetAutoRefersionBackend();
+
+  const runToken = `${Date.now()}`;
+  state.autoApplyRefersion.runToken = runToken;
+  state.autoApplyRefersion.notifiedToken = "";
+  state.autoApplyRefersion.lastResultSig = "";
+  state.autoApplyRefersion.observedRunning = false;
+  state.autoApplyRefersion.registrationEmail = String(profile.email || "").trim();
+  state.autoApplyRefersion.lastFile = String(fileName || "");
+
   // Tự động mở Edge với debug port nếu chưa mở
-  appendLog("ar_logs_box", "Đang kiểm tra/mở Edge...");
   try {
     const browserRes = await fetch("/api/open-browser", { method: "POST" });
     const browserData = await browserRes.json().catch(() => ({}));
-    if (browserData.ok) {
-      appendLog("ar_logs_box", browserData.message || "Edge đã sẵn sàng.");
-    } else {
-      appendLog("ar_logs_box", "Cảnh báo: " + (browserData.error || "Không mở được Edge. Mở thủ công: msedge.exe --remote-debugging-port=9222"));
+    if (!browserData.ok) {
+      alert("Cảnh báo: " + (browserData.error || "Không mở được Edge. Mở thủ công: msedge.exe --remote-debugging-port=9222"));
     }
-  } catch (e) {
-    appendLog("ar_logs_box", "Lỗi: Không gọi được API mở browser.");
+  } catch (_) {
+    alert("Lỗi: Không gọi được API mở browser.");
   }
-  // Đợi Edge khởi động
   await new Promise(r => setTimeout(r, 2000));
 
   const cdpUrl = "http://127.0.0.1:9222";
-  const btnText = "Auto Refersion";
-  const startLog = `Bắt đầu Auto Refersion (file: ${fileName})...`;
-  const batchId = `rf_${Date.now()}`;
 
-  // Tạo modal progress
-  const modal = createProgressModal({
-    id: "ar_progress",
-    title: `Auto Refersion - ${fileName}`,
-    onStop: () => fetch("/api/auto-refersion/stop", { method: "POST" }),
-    logsContainerId: "ar_logs_box",
-    logsEndpoint: "/api/auto-refersion/status",
-    pollIntervalMs: 1500,
-  });
-  modal.show();
-  appendLog("ar_logs_box", startLog);
-
+  let totalLinks = 0;
   try {
     const res = await fetch("/api/auto-refersion/start", {
       method: "POST",
@@ -2902,21 +3128,46 @@ async function runAutoRefersion(profile, fileName) {
     const data = await res.json().catch(() => ({}));
     if (!res.ok || !data.ok) {
       const errMsg = data.error || `HTTP ${res.status}`;
-      appendLog("ar_logs_box", `Lỗi (${res.status}): ${errMsg}`);
-      if (data.error && data.error.includes("Không tìm thấy file")) {
-        appendLog("ar_logs_box", "Gợi ý: Import file trước khi chạy Auto Refersion");
-      }
+      alert(`Lỗi (${res.status}): ${errMsg}`);
+      state.autoApplyRefersion.runToken = "";
       return;
     }
-    appendLog("ar_logs_box", "Đã bắt đầu xử lý...");
+    totalLinks = data.total_links || 0;
+    state.autoApplyRefersion.observedRunning = true;
   } catch (exc) {
-    appendLog("ar_logs_box", `Lỗi kết nối: ${exc.message || exc}`);
+    alert(`Lỗi kết nối: ${exc.message || exc}`);
+    state.autoApplyRefersion.runToken = "";
+    return;
   }
+
+  const modal = createProgressModal({
+    id: "ar_progress",
+    title: `Auto Refersion - ${fileName}`,
+    onStop: () => fetch("/api/auto-refersion/stop", { method: "POST" }),
+    logsContainerId: "ar_logs_box",
+    logsEndpoint: "/api/auto-refersion/status",
+    pollIntervalMs: 1500,
+  });
+  state.autoApplyRefersion.reopenModal = () => modal.show(true);
+  state.autoApplyRefersion.progressModal = modal;
+  modal.show();
+  appendLog("ar_logs_box", `Bắt đầu Auto Refersion (file: ${fileName})...`);
+  const regEmail = String(profile.email || "").trim();
+  if (regEmail) appendLog("ar_logs_box", `Email đăng ký: ${regEmail}`);
+  appendLog("ar_logs_box", `Đã bắt đầu xử lý ${totalLinks} link...`);
+
+  if (!state.pollTimer) {
+    state.pollTimer = setInterval(pollStatus, POLL_MS);
+  }
+  await loadResults();
 }
 
 function createProgressModal({ id, title, onStop, logsContainerId, logsEndpoint, pollIntervalMs = 1500 }) {
   let pollTimer = null;
   let hidden = true;
+  let seenRunning = false;
+  let lastLogIdx = 0;
+  let completionHandled = false;
 
   // Tạo / reuse overlay (không xoá khi ẩn — giữ lại để mở lại được)
   let overlay = document.getElementById(id);
@@ -2949,49 +3200,81 @@ function createProgressModal({ id, title, onStop, logsContainerId, logsEndpoint,
     if (e.target === overlay) hide();
   });
 
-  function show() {
+  function show(resume = false) {
     overlay.classList.remove("hidden");
     hidden = false;
-    startPolling();
+    startPolling(resume);
   }
   function hide() {
     overlay.classList.add("hidden");
     hidden = true;
     stopPolling();
   }
-  function startPolling() {
+  function startPolling(resume = false) {
     stopPolling();
+    if (!resume) {
+      seenRunning = false;
+      lastLogIdx = 0;
+      completionHandled = false;
+      const logsBox = document.getElementById(logsContainerId);
+      if (logsBox) logsBox.textContent = "";
+    } else {
+      seenRunning = !!state.autoApplyRefersion.observedRunning;
+      lastLogIdx = 0;
+      completionHandled = false;
+      const logsBox = document.getElementById(logsContainerId);
+      if (logsBox) logsBox.textContent = "";
+    }
     pollTimer = setInterval(async () => {
       if (hidden) { stopPolling(); return; }
       try {
-        const res = await fetch(logsEndpoint);
+        const res = await fetch(logsEndpoint, { cache: "no-store" });
         const data = await res.json().catch(() => ({}));
         const logs = Array.isArray(data.logs) ? data.logs : [];
         const result = data.result;
-        const logsBox = document.getElementById(logsContainerId);
-        if (logsBox && logs.length) {
-          const existing = logsBox.textContent || "";
-          const lastLog = logs[logs.length - 1] || "";
-          if (!existing.includes(lastLog)) {
-            logs.forEach(l => appendLog(logsContainerId, l));
+        const running = !!data.running;
+        if (running) seenRunning = true;
+        const box = document.getElementById(logsContainerId);
+        if (box && logs.length > lastLogIdx) {
+          for (let i = lastLogIdx; i < logs.length; i++) {
+            appendLogRaw(logsContainerId, logs[i]);
           }
+          lastLogIdx = logs.length;
         }
-        if (result && !data.running) {
-          appendLog(logsContainerId, `=== HOÀN TẤT ===`);
-          appendLog(logsContainerId, `Tổng: ${result.total || 0}, Đã điền: ${result.filled || 0}, Đã submit: ${result.submitted || 0}`);
+        // Chỉ kết thúc khi phiên hiện tại đã từng chạy (tránh kết quả cũ lần trước)
+        if (seenRunning && result && !running && !completionHandled) {
+          completionHandled = true;
           stopPolling();
+          appendLog(logsContainerId, "");
+          appendLog(logsContainerId, result.cancelled ? "=== DA HUY ===" : "=== HOAN TAT ===");
+          appendRefersionResultDetails(logsContainerId, result);
         }
       } catch (_) {}
     }, pollIntervalMs);
+    overlay.dataset.pollTimerId = String(pollTimer);
   }
   function stopPolling() {
     if (pollTimer) {
       clearInterval(pollTimer);
       pollTimer = null;
     }
+    if (overlay.dataset.pollTimerId) {
+      clearInterval(Number(overlay.dataset.pollTimerId));
+      overlay.dataset.pollTimerId = "";
+    }
   }
 
   return { show, hide, startPolling, stopPolling };
+}
+
+function appendLogRaw(containerId, msg) {
+  const box = document.getElementById(containerId);
+  if (!box) return;
+  const line = document.createElement("div");
+  const text = String(msg || "");
+  line.textContent = /^\[\d{1,2}:\d{2}:\d{2}\]/.test(text) ? text : `[${new Date().toLocaleTimeString()}] ${text}`;
+  box.appendChild(line);
+  box.scrollTop = box.scrollHeight;
 }
 
 function appendLog(containerId, msg) {

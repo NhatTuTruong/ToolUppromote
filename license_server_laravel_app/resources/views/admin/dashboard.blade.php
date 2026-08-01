@@ -117,8 +117,9 @@
                         <p class="form-section-title">Tính năng app</p>
                         <div class="check-group">
                             <label class="check-chip"><input type="checkbox" name="allow_auto_apply_collabs" value="1" checked> Bật Auto Apply Collabs</label>
+                            <label class="check-chip"><input type="checkbox" name="allow_auto_apply_refersion" value="1"> Bật Auto Apply Refersion</label>
                         </div>
-                        <p class="muted" style="margin-top:8px;">Tắt mục này sẽ ẩn tab/chức năng Auto Collabs trên app client.</p>
+                        <p class="muted" style="margin-top:8px;">Tắt mục này sẽ ẩn tab/chức năng tương ứng trên app client.</p>
                     </div>
 
                     <div class="form-actions">
@@ -306,6 +307,7 @@
                                                             <label class="check-chip"><input type="checkbox" name="allowed_sources[]" value="refersion" @checked(in_array('refersion', $allowed, true))> Refersion</label>
                                                             <label class="check-chip"><input type="checkbox" name="allowed_sources[]" value="collabs" @checked(in_array('collabs', $allowed, true))> Collabs</label>
                                                             <label class="check-chip"><input type="checkbox" name="allow_auto_apply_collabs" value="1" @checked((bool) $k->allow_auto_apply_collabs)> Auto Apply Collabs</label>
+                                                            <label class="check-chip"><input type="checkbox" name="allow_auto_apply_refersion" value="1" @checked((bool) $k->allow_auto_apply_refersion)> Auto Apply Refersion</label>
                                                         </div>
                                                     </div>
                                                 </form>

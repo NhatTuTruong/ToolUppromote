@@ -269,6 +269,7 @@ def _activate_via_license_server(norm_key: str) -> tuple[bool, str]:
     daily_limit = int(data.get("daily_limit") or licensed_exports_per_day())
     expires_at = str(data.get("expires_at") or "")
     allow_auto_apply_collabs = bool(data.get("allow_auto_apply_collabs", True))
+    allow_auto_apply_refersion = bool(data.get("allow_auto_apply_refersion", False))
     usage_day = str(data.get("usage_day") or calendar_day_vietnam())
     used_today = max(0, int(data.get("used_today") or 0))
     _set_refersion_token_local(str(data.get("refersion_token") or ""))
@@ -280,6 +281,7 @@ def _activate_via_license_server(norm_key: str) -> tuple[bool, str]:
         "daily_limit": max(1, daily_limit),
         "allowed_sources": normalize_allowed_sources(data.get("allowed_sources")),
         "allow_auto_apply_collabs": allow_auto_apply_collabs,
+        "allow_auto_apply_refersion": allow_auto_apply_refersion,
         "expires_at": expires_at,
         "activated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
@@ -367,6 +369,7 @@ def _sync_this_install_from_server() -> tuple[bool, str]:
         "daily_limit": max(1, daily_limit),
         "allowed_sources": normalize_allowed_sources(remote_data.get("allowed_sources") or inst.get("allowed_sources")),
         "allow_auto_apply_collabs": bool(remote_data.get("allow_auto_apply_collabs", inst.get("allow_auto_apply_collabs", True))),
+        "allow_auto_apply_refersion": bool(remote_data.get("allow_auto_apply_refersion", inst.get("allow_auto_apply_refersion", False))),
         "expires_at": str(remote_data.get("expires_at") or inst.get("expires_at") or ""),
         "machine_fingerprint": mfp,
     }
@@ -742,6 +745,7 @@ def license_status_payload() -> dict:
     inst = st.get("this_install") or {}
     allowed_sources = normalize_allowed_sources(inst.get("allowed_sources"))
     auto_apply_collabs_flag = bool(inst.get("allow_auto_apply_collabs", True)) if licensed else True
+    auto_apply_refersion_flag = bool(inst.get("allow_auto_apply_refersion", False)) if licensed else False
     srv = bool(license_api_base_url())
     activation_mode = "remote" if licensed else "none"
     rem_up = free_exports_remaining_today("uppromote")
@@ -795,6 +799,7 @@ def license_status_payload() -> dict:
         "activation_id": inst.get("activation_id") if licensed else None,
         "allowed_sources": allowed_sources if licensed else list(ALL_SOURCES),
         "auto_apply_collabs_enabled": auto_apply_collabs_flag,
+        "auto_apply_refersion_enabled": auto_apply_refersion_flag,
         "refersion_token": (os.getenv("REFERSION_TOKEN") or "").strip(),
         "message": msg,
     }

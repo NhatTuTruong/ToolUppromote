@@ -14,6 +14,16 @@ import webview  # type: ignore
 
 from webapp import _safe_result_file_path, app
 
+# Tăng process priority để không bị pause khi mất focus trên Windows
+try:
+    import ctypes
+    PROCESS_SET_INFORMATION = 0x0200
+    PROCESS_HIGH_PRIORITY = 0x80  # HIGH_PRIORITY_CLASS
+    handle = ctypes.windll.kernel32.GetCurrentProcess()
+    ctypes.windll.kernel32.SetPriorityClass(handle, PROCESS_HIGH_PRIORITY)
+except Exception:
+    pass  # Bỏ qua nếu không có quyền
+
 
 HOST = "127.0.0.1"
 PORT = 5050

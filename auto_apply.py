@@ -102,6 +102,10 @@ def run_auto_apply(
     def _log(msg: str) -> None:
         if log:
             log(msg)
+        # Flush stdout để log hiện ngay trong terminal subprocess
+        import sys
+        sys.stdout.flush()
+        sys.stderr.flush()
 
     def _check_stop(where: str = "") -> None:
         if should_stop and should_stop():
@@ -563,6 +567,11 @@ def run_auto_apply(
                 ph = str(profile.get("phone") or "").strip()
                 if ph:
                     return ph
+            # Reason: dùng mẫu trả lời dài chung
+            if "reason" in low_label:
+                gl = str(profile.get("generic_long") or "").strip()
+                if gl:
+                    return gl
             # 1) Social / affiliate link: ưu tiên Instagram rồi TikTok
             if ("social" in low_label) or ("share your affiliate link" in low_label):
                 insta = str(profile.get("instagram") or "").strip()
@@ -2176,6 +2185,10 @@ def run_auto_refersion_signup(
     def _log(msg: str) -> None:
         if log:
             log(msg)
+        # Flush stdout để log hiện ngay trong terminal subprocess
+        import sys
+        sys.stdout.flush()
+        sys.stderr.flush()
 
     def _check_stop(where: str = "") -> None:
         if should_stop and should_stop():
@@ -2438,6 +2451,8 @@ def run_auto_refersion_signup(
                 ],
             ),
             ("website", ["blog website", "blog/ website", "website blog"]),
+            # Ưu tiên "paypal email" trước "email" để tránh nhầm với field Email
+            ("paypal", ["paypal email", "paypal e-mail", "paypal account"]),
         ]
         for key, phrases in phrase_mappings:
             for phrase in phrases:
@@ -2447,6 +2462,8 @@ def run_auto_refersion_signup(
         # Phase 2: từ khóa đơn — không dùng "company" đơn lẻ (dễ trùng why_promote label)
         keyword_mappings: list[tuple[str, list[str]]] = [
             ("why_promote", ["why promote", "tai sao", "vi sao", "about you"]),
+            # Ưu tiên paypal trước email nếu id/name chứa paypal
+            ("paypal", ["paypal"]),
             ("email", ["email", "e-mail", "thu dien tu"]),
             ("password", ["password", "pass", "mat khau"]),
             ("first_name", ["firstname"]),
@@ -2462,7 +2479,6 @@ def run_auto_refersion_signup(
             ("website", ["website", "web site", "url", "site"]),
             ("facebook", ["facebook", " fb"]),
             ("social_links", ["social", "mang xa hoi"]),
-            ("paypal", ["paypal"]),
             ("promo_code", ["promo", "coupon", "referral"]),
         ]
         for key, keywords in keyword_mappings:
@@ -2752,27 +2768,31 @@ def run_auto_refersion_signup(
         except Exception as e:
             _log(f"  - loi tos: {e}")
 
-        # BUOC 4: CHECKBOXES
+        # BUOC 4: TICK TAT CA CHECKBOX
+        checkbox_count = 0
         for ctx in _contexts(page):
             for cb in ctx.query_selector_all("input[type='checkbox']"):
                 try:
-                    if not cb.is_visible() or cb.is_disabled() or cb.is_checked():
+                    if not cb.is_visible() or cb.is_disabled():
                         continue
-                    lbl = (cb.query_selector("xpath=..").inner_text() or "").lower() if cb.query_selector("xpath=..") else ""
-                    for kw in ["social influencer", "influencer", "breeder", "fan", "other"]:
-                        if kw in lbl:
-                            cb.check(timeout=1000)
-                            filled += 1
-                            _log(f"  - Checked {kw}")
-                            break
-                    else:
-                        if lbl.strip() and "agree" not in lbl and "terms" not in lbl:
-                            cb.check(timeout=1000)
-                            filled += 1
+                    if cb.is_checked():
+                        continue
+                    cb.check(timeout=1000)
+                    checkbox_count += 1
+                    # Lay label de log
+                    lbl = ""
+                    try:
+                        parent = cb.query_selector("xpath=..")
+                        if parent:
+                            lbl = (parent.inner_text() or "").strip()[:50]
+                    except:
+                        pass
+                    _log(f"  - Checked checkbox: {lbl or '(khong co label)'}")
                 except:
                     continue
+        if checkbox_count > 0:
+            _log(f"  - Da tick {checkbox_count} checkbox")
         page.wait_for_timeout(500)
-        _log(f"  - Done: {filled} fields")
 
         # BUOC 4b: FALLBACK - điền generic_answer vào các ô còn trống chưa nhận diện được
         generic_answer = profile.get("generic_answer") or ""
@@ -2800,38 +2820,101 @@ def run_auto_refersion_signup(
 
     def _click_submit(page) -> bool:
         """Tìm và bấm nút submit/signup."""
-        # Đợi form stabilize
-        page.wait_for_timeout(2000)
+        page.wait_for_timeout(1500)
+        try:
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            page.wait_for_timeout(400)
+        except Exception:
+            pass
 
-        # Thu click button dau tien co tren form
+        submit_selectors = [
+            "button[type='submit']",
+            "input[type='submit']",
+            "button.btn-primary[type='submit']",
+            "button:has-text('Submit')",
+            "button:has-text('Sign Up')",
+            "button:has-text('Sign up')",
+            "button:has-text('Apply')",
+            "button:has-text('Apply Now')",
+            "button:has-text('Register')",
+            "button:has-text('Create Account')",
+            "button:has-text('Create')",
+            "button:has-text('Join')",
+            "button:has-text('Complete')",
+            "a:has-text('Sign Up')",
+            "a:has-text('Submit')",
+        ]
+        for ctx in _contexts(page):
+            for sel in submit_selectors:
+                try:
+                    loc = ctx.locator(sel)
+                    count = loc.count()
+                    for idx in range(count):
+                        btn = loc.nth(idx)
+                        if not btn.is_visible() or btn.is_disabled():
+                            continue
+                        try:
+                            btn.scroll_into_view_if_needed(timeout=2000)
+                        except Exception:
+                            pass
+                        btn.click(timeout=3000)
+                        page.wait_for_timeout(800)
+                        return True
+                except Exception:
+                    continue
+        # Fallback: submit form qua Enter
+        try:
+            page.keyboard.press("Enter")
+            page.wait_for_timeout(800)
+            return True
+        except Exception:
+            pass
+        return False
+
+    def _wait_for_submit_outcome(page, timeout_ms: int = 12000) -> tuple[str, str]:
+        """Poll ket qua submit: success | error | timeout."""
+        deadline = time.monotonic() + (timeout_ms / 1000.0)
+        while time.monotonic() < deadline:
+            has_err, err_text = _has_registration_errors(page)
+            if has_err:
+                return "error", err_text
+            has_ok, ok_text = _has_success_message(page)
+            if has_ok:
+                return "success", ok_text
+            page.wait_for_timeout(500)
+        return "timeout", ""
+
+    def _ensure_form_ready_before_submit(page) -> int:
+        """Neu o bat buoc con trong thi dien lai 1 lan truoc submit."""
+        missing = []
         for ctx in _contexts(page):
             try:
-                # Các selector cho nút submit
-                submit_selectors = [
-                    "button[type='submit']",
-                    "input[type='submit']",
-                    "button:has-text('Sign Up')",
-                    "button:has-text('Sign up')",
-                    "button:has-text('Submit')",
-                    "button:has-text('Apply')",
-                    "button:has-text('Register')",
-                    "a:has-text('Sign Up')",
-                    "a:has-text('Submit')",
-                    "button:has-text('Create')",
-                    "button:has-text('Join')",
-                ]
-                for sel in submit_selectors:
-                    try:
-                        loc = ctx.locator(sel).first
-                        if loc.count() and loc.is_visible() and not loc.is_disabled():
-                            loc.click(timeout=2000)
-                            page.wait_for_timeout(1000)  # Cho submit xu ly
-                            return True
-                    except Exception:
-                        continue
+                for sel, key in (
+                    ("input[type='email']", "email"),
+                    ("input[name*='email' i]", "email"),
+                    ("input[id*='email' i]", "email"),
+                    ("input[type='password']", "password"),
+                    ("input[name*='first' i]", "first_name"),
+                    ("input[id*='first' i]", "first_name"),
+                ):
+                    loc = ctx.locator(sel)
+                    for idx in range(min(loc.count(), 3)):
+                        el = loc.nth(idx)
+                        if not el.is_visible() or el.is_disabled():
+                            continue
+                        try:
+                            current = (el.input_value() or "").strip()
+                        except Exception:
+                            current = ""
+                        if not current:
+                            missing.append(key)
+                            break
             except Exception:
                 continue
-        return False
+        if not missing:
+            return 0
+        _log(f"  - Thieu o bat buoc ({', '.join(sorted(set(missing)))}), dien lai form...")
+        return _fill_refersion_form(page)
 
     def _has_registration_errors(page) -> tuple[bool, str]:
         """True neu co #registration-errors (ke ca element co text nhung chua visible).
@@ -2880,6 +2963,10 @@ def run_auto_refersion_signup(
                 body_text = (ctx.inner_text("body") or "").lower()
                 if "thank you for your registration" in body_text:
                     return True, "Registration successful"
+                if "reviewing your account" in body_text and "success" in body_text:
+                    return True, "Registration successful"
+                if "success!" in body_text and "thank you" in body_text:
+                    return True, "Registration successful"
                 # Cách 3: text chứa "thank you" chung + success indicator
                 if "thank you" in body_text and ("success" in body_text or "registered" in body_text):
                     return True, "Registration successful"
@@ -2914,6 +3001,8 @@ def run_auto_refersion_signup(
         ]
         return any(ind in page_text for ind in success_indicators)
 
+    reg_email = str(profile.get("email") or "").strip()
+
     # Bắt đầu xử lý
     total = len(links)
     ok_count = 0
@@ -2935,6 +3024,7 @@ def run_auto_refersion_signup(
     browser = None
     context = None
     page = None
+    pw = None
 
     try:
         pw = sync_playwright().start()
@@ -2958,16 +3048,8 @@ def run_auto_refersion_signup(
         for i, link in enumerate(links, 1):
             _check_stop(f"link {i}")
             _log(f"[{i}/{total}] Mở: {link}")
-
-            # Tao page moi cho moi link de tranh bi reload giua cac link
-            try:
-                page = context.new_page()
-            except Exception as e:
-                _log(f"  - Loi tao page moi: {e}")
-                # Thu lai voi page cu
-                if not context.pages:
-                    context = browser.new_context()
-                page = context.new_page()
+            brand = str(link or "").strip()
+            submit_success = False
 
             try:
                 page.goto(link, timeout=brand_timeout_sec * 1000, wait_until="domcontentloaded")
@@ -2983,6 +3065,17 @@ def run_auto_refersion_signup(
                 except Exception as e:
                     _log(f"  - Debug screenshot lỗi: {e}")
 
+                # Lay domain/brand tu link
+                try:
+                    from urllib.parse import urlparse as parse_url
+                    u = parse_url(str(link or "").strip())
+                    host = (u.netloc or "").strip().lower()
+                    if host.startswith("www."):
+                        host = host[4:]
+                    brand = host or str(link or "").strip()
+                except Exception:
+                    brand = str(link or "").strip()
+
                 # Điền form
                 filled = _fill_refersion_form(page)
                 _log(f"  - Đã điền {filled} ô")
@@ -2990,6 +3083,7 @@ def run_auto_refersion_signup(
                 if filled > 0:
                     ok_count += 1
                     attempted_items.append({
+                        "brand": brand,
                         "link": link,
                         "filled": filled,
                     })
@@ -2999,87 +3093,220 @@ def run_auto_refersion_signup(
 
                     # Thử submit nếu auto_submit=True
                     if auto_submit:
-                        max_attempts = 2  # lan 1 + reload F5 thu lai 1 lan
+                        max_attempts = 2  # lan 2 chi khi co loi dang ky ro rang
                         submit_success = False
+                        need_reload = False
 
-                        for attempt in range(1, max_attempts + 1):
-                            # Xóa error của attempt trước (nếu có) — để retry thành công thì không còn bị đánh dấu lỗi
-                            if attempted_items:
-                                attempted_items[-1].pop("registration_error", None)
+                        try:
+                            for attempt in range(1, max_attempts + 1):
+                                _check_stop("retry_submit")
+                                if attempted_items:
+                                    attempted_items[-1].pop("registration_error", None)
 
-                            if attempt > 1:
-                                _reload_signup_page(page, link)
-                                filled = _fill_refersion_form(page)
-                                _log(f"  - Da dien lai {filled} o sau reload")
-                                page.wait_for_timeout(1500)
+                                has_ok, ok_text = _has_success_message(page)
+                                if has_ok:
+                                    submit_success = True
+                                    _log(f"  - Da thay success san: {ok_text}")
+                                    break
 
-                            _log(f"  - Submit lan {attempt}/{max_attempts}...")
-                            if not _click_submit(page):
-                                _log("  - Chua bam duoc submit")
-                                break
+                                if attempt > 1 and need_reload:
+                                    _reload_signup_page(page, link)
+                                    refilled = _fill_refersion_form(page)
+                                    _log(f"  - Da dien lai {refilled} o sau reload")
+                                    page.wait_for_timeout(1500)
+                                elif attempt == 1:
+                                    refilled = _ensure_form_ready_before_submit(page)
+                                    if refilled > 0:
+                                        _log(f"  - Bo sung {refilled} o truoc submit")
+                                        page.wait_for_timeout(1000)
 
-                            _log("  - Da click submit, doi phan hoi...")
-                            page.wait_for_timeout(3000)
+                                _log(f"  - Submit lan {attempt}/{max_attempts}...")
+                                clicked = _click_submit(page)
+                                if not clicked:
+                                    has_ok, ok_text = _has_success_message(page)
+                                    if has_ok:
+                                        submit_success = True
+                                        _log(f"  - Submit THANH CONG (da co banner): {ok_text}")
+                                        break
+                                    outcome, msg = _wait_for_submit_outcome(page, 6000)
+                                    if outcome == "success":
+                                        submit_success = True
+                                        _log(f"  - Submit THANH CONG (khong can click): {msg}")
+                                        break
+                                    _log("  - Chua bam duoc submit")
+                                    break
 
-                            has_err, err_text = _has_registration_errors(page)
-                            if has_err:
-                                _log(
-                                    f"  - PHAT HIEN error: "
-                                    f"{err_text[:200] or '(co element loi)'}"
-                                )
-                                # Chỉ ghi error khi đã hết retry và vẫn lỗi
-                                if attempt >= max_attempts:
-                                    attempted_items[-1]["registration_error"] = err_text[:500]
-                                if attempt < max_attempts:
+                                _log("  - Da click submit, doi phan hoi...")
+                                outcome, msg = _wait_for_submit_outcome(page, 12000)
+                                if outcome == "success":
+                                    submit_success = True
+                                    _log(f"  - Submit THANH CONG: {msg}")
+                                    break
+                                if outcome == "error":
+                                    err_text = msg
+                                    _log(
+                                        f"  - PHAT HIEN error: "
+                                        f"{err_text[:200] or '(co element loi)'}"
+                                    )
+                                    err_lower = (err_text or "").lower()
+                                    if "email" in err_lower and "taken" in err_lower:
+                                        _log("  - Email da ton tai, khong retry -> bo qua link nay.")
+                                        attempted_items[-1]["registration_error"] = err_text[:500]
+                                        attempted_items[-1]["email_taken"] = True
+                                        break
+                                    if attempt >= max_attempts:
+                                        attempted_items[-1]["registration_error"] = err_text[:500]
+                                        break
+                                    need_reload = True
                                     _log("  - Se RELOAD (F5) va thu dang ky lai 1 lan nua...")
                                     continue
-                                _log("  - Van loi sau retry, bo qua link nay -> chuyen link tiep theo.")
-                                break
-
-                            # Kiểm tra thành công trước
-                            has_ok, ok_text = _has_success_message(page)
-                            if has_ok:
+                                # timeout: khong loi, khong thay success — KHONG reload de tranh mat submit vua gui
+                                _log("  - Chua thay success ro rang, doi them...")
+                                outcome2, msg2 = _wait_for_submit_outcome(page, 8000)
+                                if outcome2 == "success":
+                                    submit_success = True
+                                    _log(f"  - Submit THANH CONG (tre): {msg2}")
+                                    break
+                                if outcome2 == "error":
+                                    err_text = msg2
+                                    if attempt >= max_attempts:
+                                        attempted_items[-1]["registration_error"] = err_text[:500]
+                                        break
+                                    need_reload = True
+                                    _log("  - Co loi sau khi doi them, se thu reload 1 lan...")
+                                    continue
+                                # Khong loi, khong success — coi nhu da gui (Refersion doi luc khong hien banner ngay)
                                 submit_success = True
-                                _log(f"  - Submit THANH CONG: {ok_text}")
+                                _log("  - Khong thay loi sau submit, coi nhu thanh cong.")
                                 break
-                            # Không có error cũng không có success → retry
-                            _log("  - Khong thay error, coi nhu da gui form.")
-                            if attempt < max_attempts:
-                                _log("  - Se RELOAD (F5) va thu dang ky lai 1 lan nua...")
-                                continue
-                            # Attempt cuối mà không có success → vẫn coi là thành công
-                            submit_success = True
-                            break
+                        except Exception as exc:
+                            _log(f"  - Loi submit: {exc}")
+                            outcome, msg = _wait_for_submit_outcome(page, 5000)
+                            if outcome == "success":
+                                submit_success = True
+                                _log(f"  - Submit THANH CONG (sau loi): {msg}")
 
-                        if submit_success:
-                            submit_count += 1
-                            submitted_items.append({
-                                "email": str(profile.get("email") or "").strip(),
-                                "link": link,
-                                "success": True,
-                                "success_message": ok_text if has_ok else "",
-                            })
+                    # Xu ly ket qua submit
+                    if submit_success:
+                        submit_count += 1
+                        submitted_items.append({
+                            "brand": brand,
+                            "link": link,
+                            "email": str(profile.get("email") or "").strip(),
+                        })
+                        attempted_items[-1]["submitted"] = True
+                        _log(f"  [OK] Da submit thanh cong: {brand}")
+                    else:
+                        attempted_items[-1]["submitted"] = False
+                        if auto_submit:
+                            attempted_items[-1]["note"] = "submit_khong_thanh_cong"
+                        else:
+                            attempted_items[-1]["note"] = "khong_auto_submit"
+                        _log(f"  [FAIL] Khong submit duoc: {link}")
+                else:
+                    attempted_items.append({
+                        "brand": brand,
+                        "link": link,
+                        "filled": 0,
+                        "submitted": False,
+                        "note": "khong_dien_duoc_form",
+                    })
+                    _log(f"  [SKIP] Khong dien duoc o nao: {brand}")
 
-            except PlaywrightTimeoutError:
-                _log(f"  - Timeout khi mở trang")
-                attempted_items.append({"link": link, "error": "timeout"})
-            except Exception as exc:
-                _log(f"  - Lỗi: {exc}")
-                attempted_items.append({"link": link, "error": str(exc)})
-            finally:
-                # Dong page sau khi xu ly xong link
-                try:
-                    page.close()
-                except Exception:
-                    pass
+                # Kiem tra stop sau khi xu ly xong link nay
+                _check_stop(f"after_link_{i}")
 
-        _log(f"[Auto Refersion] Hoàn tất: {ok_count}/{total} đã điền, {submit_count} đã submit")
+            except RuntimeError as exc:
+                if "Đã hủy" in str(exc):
+                    raise
+                _log(f"  - Loi xu ly page: {exc}")
+                attempted_items.append({
+                    "brand": brand,
+                    "link": link,
+                    "error": str(exc),
+                })
+            except Exception as e:
+                _log(f"  - Loi xu ly page: {e}")
+                attempted_items.append({
+                    "brand": brand or str(link or "").strip()[:50],
+                    "link": link,
+                    "error": str(e),
+                })
 
-    except Exception as exc:
+        # TONG KET CHI TIET
+        failed_count = sum(
+            1
+            for item in attempted_items
+            if item.get("error") or item.get("registration_error")
+        )
+        skipped_count = sum(
+            1 for item in attempted_items if item.get("note") == "khong_dien_duoc_form"
+        )
+        submit_failed_count = sum(
+            1
+            for item in attempted_items
+            if item.get("filled", 0) > 0 and not item.get("submitted") and not item.get("error")
+        )
+        _log("")
+        _log("=== KET QUA TUYET DOI ===")
+        _log(f"Tong so link: {total}")
+        _log(f"Da dien form: {ok_count}/{total}")
+        _log(f"Da submit thanh cong: {submit_count}/{total}")
+        _log(f"Khong dien duoc form: {skipped_count}/{total}")
+        _log(f"Da dien nhung khong submit: {submit_failed_count}/{total}")
+        _log(f"Loi he thong/dang ky: {failed_count}/{total}")
+
+        # Liet ke chi tiet tung link
+        if attempted_items:
+            _log("")
+            _log("--- Chi tiet ---")
+            for idx, item in enumerate(attempted_items, 1):
+                brand = item.get("brand") or ""
+                if item.get("error"):
+                    _log(f"  {idx}. [LOI] {brand}: {item.get('error')}")
+                elif item.get("registration_error"):
+                    _log(f"  {idx}. [LOI] {brand}: {str(item.get('registration_error'))[:80]}")
+                elif item.get("submitted"):
+                    _log(f"  {idx}. [OK] {brand}")
+                elif item.get("note") == "khong_dien_duoc_form":
+                    _log(f"  {idx}. [SKIP] {brand}: khong dien duoc form")
+                else:
+                    _log(f"  {idx}. [FAIL] {brand}: chua submit")
+
+        _log("=== HOAN TAT ===")
+
+    except RuntimeError as exc:
+        if "Đã hủy" in str(exc):
+            _log("=== DA HUY — tra ve ket qua da xu ly ===")
+            failed_count = sum(
+                1
+                for item in attempted_items
+                if item.get("error") or item.get("registration_error")
+            )
+            skipped_count = sum(
+                1 for item in attempted_items if item.get("note") == "khong_dien_duoc_form"
+            )
+            submit_failed_count = sum(
+                1
+                for item in attempted_items
+                if item.get("filled", 0) > 0 and not item.get("submitted") and not item.get("error")
+            )
+            return {
+                "total": total,
+                "filled": ok_count,
+                "submitted": submit_count,
+                "failed": failed_count,
+                "skipped": skipped_count,
+                "submit_failed": submit_failed_count,
+                "email": reg_email,
+                "submitted_items": submitted_items,
+                "attempted_items": attempted_items,
+                "cancelled": True,
+            }
         _log(f"[Auto Refersion] Lỗi: {exc}")
         raise
     finally:
-        # Close context and browser (pages already closed in loop)
+        # CDP: giu browser mo, chi ngat driver Playwright sau khi xu ly xong
         if not using_cdp:
             try:
                 if context:
@@ -3092,7 +3319,8 @@ def run_auto_refersion_signup(
             except Exception:
                 pass
         try:
-            pw.stop()
+            if pw:
+                pw.stop()
         except Exception:
             pass
 
@@ -3100,6 +3328,21 @@ def run_auto_refersion_signup(
         "total": total,
         "filled": ok_count,
         "submitted": submit_count,
+        "failed": sum(
+            1
+            for item in attempted_items
+            if item.get("error") or item.get("registration_error")
+        ),
+        "skipped": sum(
+            1 for item in attempted_items if item.get("note") == "khong_dien_duoc_form"
+        ),
+        "submit_failed": sum(
+            1
+            for item in attempted_items
+            if item.get("filled", 0) > 0 and not item.get("submitted") and not item.get("error")
+        ),
+        "email": reg_email,
         "submitted_items": submitted_items,
         "attempted_items": attempted_items,
+        "cancelled": False,
     }

@@ -10,6 +10,7 @@ import sys
 import time
 import json
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO
 import threading
 from datetime import datetime
@@ -74,14 +75,15 @@ def auto_apply_collabs_enabled() -> bool:
 
 
 def auto_apply_refersion_enabled() -> bool:
-    # Feature flag: bật/tắt Auto Apply Refersion trên server + theo license key.
+    # Feature flag: bat/tat Auto Apply Refersion tren server + theo license key.
+    # Mac dinh False neu chua kich hoat (ko co license), True khi co license co cho phep.
     if not _env_flag("ENABLE_AUTO_APPLY_REFERSION", True):
         return False
     try:
         lic = license_guard.license_status_payload()
-        return bool(lic.get("auto_apply_refersion_enabled", True))
+        return bool(lic.get("auto_apply_refersion_enabled", False))
     except Exception:
-        return True
+        return False
 
 
 class RunControl:
@@ -1099,21 +1101,23 @@ def fetch_offers_collabs(filters: dict) -> list:
                 except Exception as exc:
                     STATE.add_log(f"Lỗi products collabs ({store_id}): {exc}")
         storefront_url = str(mapped.get("url") or "").strip()
-        final_url = storefront_url
+        main_domain = ""
         if storefront_url:
-            final_url = core.resolve_redirected_url(
+            main_domain = core.resolve_redirected_url(
                 storefront_url, timeout_sec=redirect_timeout_sec
             )
-            if final_url and final_url != storefront_url:
-                mapped["url"] = final_url
-                STATE.add_log(f"Collabs redirect: {storefront_url} -> {final_url}")
-        hk = core.host_key(storefront_url or final_url)
+            if main_domain:
+                mapped["url"] = main_domain
+                STATE.add_log(f"Collabs main domain: {storefront_url} -> {main_domain}")
+            else:
+                main_domain = storefront_url
+        hk = core.host_key(main_domain)
         signup_url = ""
-        if storefront_url or final_url:
+        if main_domain:
             signup_url = signup_by_host.get(hk, "")
             if not signup_url:
                 signup_url = core.discover_collabs_signup_url_with_redirect(
-                    storefront_url or final_url,
+                    main_domain,
                     timeout_sec=signup_timeout_sec,
                     should_stop=STATE.control.should_stop,
                 )
@@ -1638,7 +1642,18 @@ def api_status():
 def api_logs():
     since = int(request.args.get("since", "0"))
     logs, total = STATE.get_logs(since)
-    return _no_cache_json({"logs": logs, "total": total})
+    # Merge job logs from auto-apply multiprocessing jobs (job logs already have [jid] prefix from st.add_log)
+    job_logs = []
+    try:
+        st = AUTO_APPLY_STATE
+        with st.lock:
+            for jid, job in st.jobs.items():
+                for lg in job.logs:
+                    job_logs.append(lg)  # Already prefixed with [jid] from st.add_log
+    except Exception:
+        pass
+    job_total = len(job_logs)
+    return _no_cache_json({"logs": logs + job_logs, "total": total + job_total})
 
 
 @app.post("/api/logs/ack")
@@ -2426,6 +2441,11 @@ def _parallel_auto_apply_supervisor(
     n = len(parallel_slots)
     split_mode = _normalize_parallel_link_split(parallel_link_split)
     batch_id = (st.batch_id or "").strip() or uuid.uuid4().hex[:10]
+    with st.lock:
+        st.running = True
+        st.status = "Running"
+        st.result = None
+        st.error = ""
     ctx = multiprocessing.get_context("spawn")
     log_q: multiprocessing.Queue = ctx.Queue()
     res_q: multiprocessing.Queue = ctx.Queue()
@@ -3152,56 +3172,113 @@ def api_auto_refersion_start():
         st["result"] = None
         st["error"] = ""
 
+    # Luôn 1 trình duyệt
+    browser_count = 1
+
     def _log(msg: str) -> None:
         with st["lock"]:
             st["logs"].append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+
+    _log(f"[Config] 1 trình duyệt, {len(links)} link")
+    reg_email = str(profile.get("email") or "").strip()
+    if reg_email:
+        _log(f"[Config] Email đăng ký: {reg_email}")
 
     def _should_stop() -> bool:
         with st["lock"]:
             return not st["running"]
 
-    def _worker():
+    def _worker(browser_idx: int, browser_links: list[str], cdp_url: str):
+        """Worker chạy cho 1 trình duyệt."""
         started_local = datetime.now()
         try:
-            _log(f"Bắt đầu Auto Refersion với {len(links)} link...")
+            _log(f"[Browser] Bắt đầu với {len(browser_links)} link...")
+
             result = auto_apply_core.run_auto_refersion_signup(
-                links=links,
+                links=browser_links,
                 profile=profile,
                 auto_submit=auto_submit,
                 cdp_url=cdp_url if use_cdp else None,
-                log=_log,
+                log=lambda m: _log(f"[Browser] {m}"),
                 should_stop=_should_stop,
             )
-            with st["lock"]:
-                st["result"] = result
-                st["running"] = False
-            _log(f"Hoàn tất: {result.get('filled', 0)}/{len(links)} đã điền, {result.get('submitted', 0)} đã submit")
-            _append_refersion_history({
-                "file": safe_name,
-                "started_at": started_local.isoformat(),
-                "started_at_display": started_local.strftime("%d/%m/%Y %H:%M:%S"),
-                "submitted_items": result.get("submitted_items") or [],
-                "attempted_items": result.get("attempted_items") or [],
-                "total": result.get("total") or 0,
-                "filled": result.get("filled") or 0,
-                "submitted": result.get("submitted") or 0,
-            })
+            return browser_idx, result, None
         except Exception as exc:
-            with st["lock"]:
-                st["running"] = False
-                st["error"] = str(exc)
-            _log(f"Lỗi: {exc}")
-            _append_refersion_history({
-                "file": safe_name,
-                "started_at": started_local.isoformat(),
-                "started_at_display": started_local.strftime("%d/%m/%Y %H:%M:%S"),
-                "error": str(exc),
-                "attempted_items": [],
-                "submitted_items": [],
-            })
+            _log(f"[Browser] Lỗi: {exc}")
+            return browser_idx, None, str(exc)
 
-    threading.Thread(target=_worker, daemon=True).start()
-    return jsonify({"ok": True, "total_links": len(links), "file": safe_name})
+    def _run_all():
+        started_local = datetime.now()
+        all_results = []
+        all_errors = []
+
+        result_data = _worker(0, links, cdp_url if use_cdp else None)
+        if result_data[1]:
+            all_results.append(result_data[1])
+        if result_data[2]:
+            all_errors.append(result_data[2])
+
+        # Tổng hợp kết quả
+        total_filled = sum(r.get("filled", 0) for r in all_results)
+        total_submitted = sum(r.get("submitted", 0) for r in all_results)
+        total = sum(r.get("total", 0) for r in all_results)
+        all_submitted_items = []
+        all_attempted_items = []
+        for r in all_results:
+            all_submitted_items.extend(r.get("submitted_items") or [])
+            all_attempted_items.extend(r.get("attempted_items") or [])
+
+        combined_result = {
+            "filled": total_filled,
+            "submitted": total_submitted,
+            "total": total,
+            "failed": sum(r.get("failed", 0) for r in all_results),
+            "skipped": sum(r.get("skipped", 0) for r in all_results),
+            "submit_failed": sum(r.get("submit_failed", 0) for r in all_results),
+            "cancelled": any(r.get("cancelled") for r in all_results),
+            "email": reg_email,
+            "submitted_items": all_submitted_items,
+            "attempted_items": all_attempted_items,
+        }
+
+        with st["lock"]:
+            st["result"] = combined_result
+            st["running"] = False
+
+        status_note = " (đã hủy)" if combined_result.get("cancelled") else ""
+        _log(
+            f"Hoàn tất{status_note}: {total_filled}/{total} đã điền form, "
+            f"{total_submitted} đã submit, "
+            f"{combined_result.get('failed', 0)} lỗi, "
+            f"{combined_result.get('skipped', 0)} bỏ qua"
+        )
+        _append_refersion_history({
+            "file": safe_name,
+            "started_at": started_local.isoformat(),
+            "started_at_display": started_local.strftime("%d/%m/%Y %H:%M:%S"),
+            "email": reg_email,
+            "submitted_items": all_submitted_items,
+            "attempted_items": all_attempted_items,
+            "total": total,
+            "filled": total_filled,
+            "submitted": total_submitted,
+            "failed": combined_result.get("failed", 0),
+            "skipped": combined_result.get("skipped", 0),
+            "submit_failed": combined_result.get("submit_failed", 0),
+            "cancelled": combined_result.get("cancelled", False),
+        })
+
+        if all_errors:
+            _log(f"Có {len(all_errors)} lỗi: {all_errors[0] if all_errors else ''}")
+
+    try:
+        threading.Thread(target=_run_all, daemon=True).start()
+    except Exception as exc:
+        _log(f"Lỗi khởi tạo thread: {exc}")
+        with st["lock"]:
+            st["running"] = False
+        return jsonify({"ok": False, "error": f"Lỗi: {exc}"}), 500
+    return jsonify({"ok": True, "total_links": len(links), "file": safe_name, "browsers": browser_count})
 
 
 @app.post("/api/auto-refersion/stop")
@@ -3210,6 +3287,18 @@ def api_auto_refersion_stop():
     with st["lock"]:
         st["running"] = False
         st["logs"].append(f"[{datetime.now().strftime('%H:%M:%S')}] Đã hủy")
+    return jsonify({"ok": True})
+
+
+@app.post("/api/auto-refersion/reset")
+def api_auto_refersion_reset():
+    st = REFERSION_APPLY_STATE
+    with st["lock"]:
+        st["running"] = False
+        st["running_file"] = ""
+        st["logs"] = []
+        st["result"] = None
+        st["error"] = ""
     return jsonify({"ok": True})
 
 

@@ -203,6 +203,7 @@ class LicenseManagementController extends Controller
             'allowed_sources' => ['required', 'array', 'min:1'],
             'allowed_sources.*' => ['string', 'in:uppromote,goaffpro,refersion,collabs'],
             'allow_auto_apply_collabs' => ['nullable', 'boolean'],
+            'allow_auto_apply_refersion' => ['nullable', 'boolean'],
             'expires_at' => ['nullable', 'date'],
             'notes' => ['nullable', 'string', 'max:2000'],
         ]);
@@ -215,6 +216,7 @@ class LicenseManagementController extends Controller
         $model->max_machines = $data['max_machines'] ?? $model->max_machines ?? (int) config('license.max_machines_per_key', 2);
         $model->allowed_sources = array_values(array_unique($data['allowed_sources'] ?? LicenseKey::DEFAULT_ALLOWED_SOURCES));
         $model->allow_auto_apply_collabs = $request->boolean('allow_auto_apply_collabs', true);
+        $model->allow_auto_apply_refersion = $request->boolean('allow_auto_apply_refersion', false);
         $model->expires_at = $data['expires_at'] ?? null;
         $model->notes = $data['notes'] ?? null;
         $model->save();
@@ -273,6 +275,7 @@ class LicenseManagementController extends Controller
             'allowed_sources' => ['required', 'array', 'min:1'],
             'allowed_sources.*' => ['string', 'in:uppromote,goaffpro,refersion,collabs'],
             'allow_auto_apply_collabs' => ['nullable', 'boolean'],
+            'allow_auto_apply_refersion' => ['nullable', 'boolean'],
             'expires_at' => ['nullable', 'date'],
             'notes' => ['nullable', 'string', 'max:2000'],
         ]);
@@ -283,6 +286,7 @@ class LicenseManagementController extends Controller
         $key->max_machines = $data['max_machines'] ?? null;
         $key->allowed_sources = array_values(array_unique($data['allowed_sources'] ?? []));
         $key->allow_auto_apply_collabs = $request->boolean('allow_auto_apply_collabs');
+        $key->allow_auto_apply_refersion = $request->boolean('allow_auto_apply_refersion');
         $key->expires_at = $data['expires_at'] ?? null;
         $key->notes = $data['notes'] ?? null;
         $key->save();
@@ -312,6 +316,7 @@ class LicenseManagementController extends Controller
                 'Số máy max',
                 'Net được phép',
                 'Auto Apply Collabs',
+                'Auto Apply Refersion',
                 'Hạn dùng',
                 'Ghi chú',
                 'Ngày tạo',
@@ -338,7 +343,8 @@ class LicenseManagementController extends Controller
                             $key->daily_limit ?? '',
                             $key->max_machines ?? '',
                             implode(', ', $key->normalizedAllowedSources()),
-                            $key->allow_auto_apply_collabs ? 'Bật' : 'Tắt',
+                            $key->allow_auto_apply_collabs ? 'Bat' : 'Tat',
+                            $key->allow_auto_apply_refersion ? 'Bat' : 'Tat',
                             $expiresAt,
                             $key->notes ?? '',
                             $key->created_at?->timezone('Asia/Ho_Chi_Minh')->format('Y-m-d H:i:s') ?? '',

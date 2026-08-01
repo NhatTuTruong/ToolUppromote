@@ -1,5 +1,6 @@
 import csv
 import ast
+import asyncio
 import json
 import os
 import random
@@ -15,6 +16,12 @@ from urllib.parse import parse_qsl, quote_plus, unquote, urlencode, urljoin, url
 import requests
 
 from runtime_paths import app_dir
+
+# Khi chạy .exe (frozen), sử dụng browsers từ thư mục bundle
+if getattr(sys, "frozen", False):
+    bundled_browsers = os.path.join(os.path.dirname(sys.executable), "ms-playwright")
+    if os.path.isdir(bundled_browsers):
+        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = os.path.abspath(bundled_browsers)
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
@@ -1269,26 +1276,33 @@ def collabs_shopify_store_gid(node: dict) -> str:
     return f"gid://dovetale-api/ShopifyStore/{raw_id}"
 
 
-def resolve_redirected_url(url: str, timeout_sec: int = 20) -> str:
+def resolve_redirected_url(storefront_url: str, timeout_sec: int = 20) -> str:
     """
-    Theo dõi redirect để lấy URL đích cuối (brand gốc).
-    Trả về URL ban đầu nếu request lỗi/timeout.
+    Lấy domain chính của store từ /meta.json endpoint.
+    Shopify stores thường redirect storefront URL sang domain khác.
+    /meta.json không bị redirect chain, trả về JSON chứa domain thật.
+
+    Trả về URL domain chính (https://domain-thuc) hoặc chuỗi rỗng nếu fail.
     """
-    raw = str(url or "").strip()
+    raw = str(storefront_url or "").strip()
     if not raw:
         return ""
-    if not (raw.startswith("http://") or raw.startswith("https://")):
-        return raw
+    parsed = urlparse(raw if "://" in raw else f"https://{raw}")
+    if not parsed.netloc:
+        return ""
+    if not parsed.scheme:
+        parsed = parsed._replace(scheme="https")
+    meta_url = f"{parsed.scheme}://{parsed.netloc}/meta.json"
     try:
-        res = requests.get(raw, allow_redirects=True, timeout=timeout_sec, stream=True)
-        final_url = str(res.url or "").strip()
-        try:
-            res.close()
-        except Exception:
-            pass
-        return final_url or raw
+        res = requests.get(meta_url, timeout=timeout_sec, verify=False)
+        if res.status_code == 200:
+            data = res.json()
+            domain = data.get("domain") or data.get("url", "").replace("https://", "").replace("http://", "").rstrip("/")
+            if domain:
+                return f"https://{domain}"
+        return ""
     except Exception:
-        return raw
+        return ""
 
 
 def _collabs_html_has_outside_cta_phrases(low_html: str) -> bool:
@@ -1408,7 +1422,6 @@ def _collabs_page_has_signup_cta(html: str) -> bool:
     page phải có element: <div class="collabs-page__cta ..."> (hoặc single-quote).
     """
     h = html or ""
-    # Bắt buộc là div.collabs-page__cta để tránh false-positive từ script/css hoặc element khác.
     return bool(
         re.search(
             r"""<div[^>]*\bclass\s*=\s*["'][^"']*\bcollabs-page__cta\b[^"']*["'][^>]*>""",
@@ -1418,58 +1431,325 @@ def _collabs_page_has_signup_cta(html: str) -> bool:
     )
 
 
+# Keywords dùng để nhận diện trang có tín hiệu affiliate (title + body text)
+_AFFILIATE_TEXT_KW = (
+    "affiliate", "ambassador", "partner", "referral", "influencer",
+    "creator program", "collab program", "affiliate program", "partner program",
+    "referral program", "affiliate registration", "join our affiliate",
+    "become an affiliate", "sign up as partner", "apply to be an ambassador",
+    "become an ambassador", "apply as influencer", "creator signup",
+    "influencer signup", "affiliate signup", "partner signup",
+    "affiliate-enroll", "ambassador-enroll", "partner-enroll",
+    "affiliate-enquiry", "ambassador-enquiry", "partner-enquiry",
+)
+
+# Keywords cho form/button signup trong affiliate context
+_AFFILIATE_FORM_KW = (
+    "form", "input", "textarea", "select",
+)
+
+# Button text thường có trên trang affiliate signup
+_AFFILIATE_BTN_KW = (
+    "submit", "apply", "register", "sign up", "join", "enroll",
+    "become an affiliate", "apply now", "get started",
+    "join program", "sign up now", "register now",
+)
+
+
+def _page_has_affiliate_signals(html: str) -> bool:
+    """
+    Kiểm tra xem trang có tín hiệu affiliate hay không.
+    Điều kiện: phải có (A) form đăng ký + (B) text chứa keyword affiliate.
+    Chỉ dùng HTML đã có — không fetch thêm.
+    """
+    h = html or ""
+    low_h = h.lower()
+
+    # (A) Check form: tìm form + button/input
+    form_tags = re.findall(r"<form[^>]*>", h, flags=re.I)
+    input_in_form = bool(re.search(r"<form[^>]*>.*?<input", h, flags=re.I | re.S))
+    btn_in_form = bool(re.search(r"<form[^>]*>.*?(?:submit|button)[^<]*(?:</button>|type=[\"']submit[\"'])", h, flags=re.I | re.S))
+    textarea_in_form = bool(re.search(r"<form[^>]*>.*?<textarea", h, flags=re.I | re.S))
+    has_form = bool(form_tags) and (input_in_form or btn_in_form or textarea_in_form)
+
+    if not has_form:
+        return False
+
+    # (B) Check text: title hoặc body chứa keyword
+    # Lấy title
+    title_match = re.search(r"<title[^>]*>([^<]+)</title>", h, flags=re.I)
+    title = (title_match.group(1) or "").lower() if title_match else ""
+
+    # Lấy visible text (strip tags)
+    body_text = re.sub(r"<[^>]+>", " ", h)
+    body_text = re.sub(r"\s+", " ", body_text).lower()
+
+    # Check keyword trong title + body
+    text_has_kw = any(kw in title for kw in _AFFILIATE_TEXT_KW) or any(
+        kw in body_text for kw in _AFFILIATE_TEXT_KW
+    )
+    if not text_has_kw:
+        return False
+
+    # (C) Check button text có liên quan signup
+    # Tìm text trong button/input submit
+    btn_texts = re.findall(r'<button[^>]*>([^<]+)</button>', h, flags=re.I)
+    btn_texts += re.findall(r'<input[^>]*type=["\']?(?:submit|button)["\']?[^>]*value=["\']([^"\']+)["\']', h, flags=re.I)
+    btn_texts += re.findall(r'<a[^>]*class=["\'][^"\']*(?:btn|button|submit)[^"\']*["\'][^>]*>([^<]+)</a>', h, flags=re.I)
+    all_btn_text = " ".join(btn_texts).lower()
+    has_signup_btn = any(kw in all_btn_text for kw in _AFFILIATE_BTN_KW)
+
+    return has_signup_btn
+
+
 def discover_collabs_signup_url_with_redirect(
     storefront_url: str,
     timeout_sec: int = 20,
     should_stop: Callable[[], bool] | None = None,
 ) -> str:
     """
-    Tìm link đăng ký: thử URL storefront gốc trước, sau đó URL sau redirect.
-    Tránh mất slug đúng (vd. toybox.shop/pages/collaboration) khi redirect sang domain khác.
+    Tìm link đăng ký: thử domain chính (từ /meta.json) trước,
+    fallback storefront, rồi /pages/collab.
     """
     original = str(storefront_url or "").strip()
     if not original:
         return ""
-    resolved = resolve_redirected_url(original, timeout_sec=timeout_sec)
-    candidates: list[str] = []
-    for u in (original, resolved):
-        u = str(u or "").strip()
-        if u and u not in candidates:
-            candidates.append(u)
-    def _signup_rank(url: str) -> int:
-        low = (url or "").lower().rstrip("/")
-        if "/pages/collaboration" in low or low.endswith("/collaboration"):
-            return 0
-        if "collaboration" in low:
-            return 1
-        if low.endswith("/pages/collab") or low.endswith("/pages/collabs"):
-            return 100
-        return 50
 
-    best = ""
-    best_rank = 999
-    for u in candidates:
-        if should_stop and should_stop():
-            break
-        found = discover_collabs_signup_url(u, timeout_sec=timeout_sec, should_stop=should_stop)
-        if not found:
-            continue
-        rank = _signup_rank(found)
-        if rank < best_rank:
-            best = found
-            best_rank = rank
-        if rank == 0:
-            break
-    return best
+    main_domain = resolve_redirected_url(original, timeout_sec=timeout_sec)
+    if not main_domain:
+        main_domain = original
+
+    # Thử domain chính trước (thường là homepage thật)
+    result = discover_collabs_signup_url(main_domain, timeout_sec=timeout_sec, should_stop=should_stop)
+    if result and result != f"{main_domain.rstrip('/')}/pages/collab":
+        return result
+
+    # Fallback: thử storefront gốc
+    if main_domain != original:
+        result2 = discover_collabs_signup_url(original, timeout_sec=timeout_sec, should_stop=should_stop)
+        if result2 and result2 != f"{original.rstrip('/')}/pages/collab":
+            return result2
+
+    # Fallback cuối: /pages/collab
+    return f"{main_domain.rstrip('/')}/pages/collab"
+
+
+COLLAB_PATTERNS_RE = [
+    re.compile(r"/pages/(?:affiliate|affiliates?|affiliate-program|ambassador|ambassadors?|collab|collabs?|collaboration|collaborations?|influencer|influencers?|partner|partners?|partner-program|refprogram|referral|referral-program)[^'\"\\s]*", re.I),
+    re.compile(r"/(affiliate|affiliates?|ambassador|ambassadors?|collab|collabs?|collaboration|influencer|partner|partners?)[^'\"\\s]*", re.I),
+]
+
+COMMON_COLLAB_PATHS = [
+    "/pages/ambassador",
+    "/pages/ambassadors",
+    "/pages/affiliate",
+    "/pages/affiliates",
+    "/pages/affiliate-program",
+    "/pages/collab",
+    "/pages/collabs",
+    "/pages/collaboration",
+    "/pages/influencer",
+    "/pages/influencers",
+    "/pages/partner",
+    "/pages/partners",
+    "/pages/partner-program",
+    "/pages/referral",
+    "/pages/referral-program",
+    "/pages/collaborators",
+    "/pages/partnerships",
+    "/pages/collaborations",
+    "/pages/ambassador-program",
+    "/pages/ambassador-programs",
+    "/pages/curious-community",
+]
+
+
+def _rank_signup_url(url: str) -> int:
+    low = url.lower()
+    if "/pages/collaboration" in low or low.rstrip("/").endswith("/collaboration"):
+        return 0
+    if "collaboration" in low:
+        return 1
+    if "/pages/collab" in low or "/pages/collabs" in low:
+        return 2
+    if "/pages/affiliate" in low or "/pages/ambassador" in low or "/pages/influencer" in low or "/pages/partner" in low:
+        return 3
+    return 50
+
+
+async def _playwright_discover(site_url: str, timeout_sec: int, should_stop: Callable[[], bool] | None) -> tuple[str, bool]:
+    """
+    Core Playwright logic — tìm link collabs bằng trình duyệt thật.
+    Returns (url, has_cta) — url="" nếu không tìm được gì.
+    """
+    raw = str(site_url or "").strip()
+    if not raw:
+        return "", False
+    parsed = urlparse(raw if "://" in raw else f"https://{raw}")
+    if not parsed.netloc:
+        return "", False
+    domain = f"{parsed.scheme or 'https'}://{parsed.netloc}"
+
+    def _halt() -> bool:
+        return should_stop is not None and bool(should_stop())
+
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError:
+        return "", False
+
+    playwright = None
+    browser = None
+    try:
+        playwright = await async_playwright().start()
+        browser = await playwright.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+            ],
+        )
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            viewport={"width": 1920, "height": 1080},
+            extra_http_headers={
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            },
+        )
+        page = await context.new_page()
+        await context.route("**/*", lambda route: route.abort() if route.request.resource_type == "image" else route.continue_())
+
+        # 1. Load homepage, scan links
+        await page.goto(domain, timeout=timeout_sec * 1000, wait_until="domcontentloaded")
+        await asyncio.sleep(0.5)
+
+        if _halt():
+            return "", False
+
+        candidates: list[str] = []
+        try:
+            hrefs: list[str] = await page.evaluate("""
+                () => Array.from(document.querySelectorAll('a[href]')).map(a => a.href)
+            """)
+            for href in hrefs:
+                if not href:
+                    continue
+                try:
+                    cp = urlparse(href)
+                    if cp.netloc != parsed.netloc:
+                        continue
+                    for pat in COLLAB_PATTERNS_RE:
+                        if pat.search(cp.path or ""):
+                            full = href if href.startswith("http") else f"{domain.rstrip('/')}{href}"
+                            if full not in candidates:
+                                candidates.append(full)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # 2. Thử các path phổ biến
+        for path in COMMON_COLLAB_PATHS:
+            if _halt():
+                return "", False
+            url_to_try = domain.rstrip("/") + path
+            try:
+                resp = await page.goto(url_to_try, timeout=15000, wait_until="domcontentloaded")
+                if resp and resp.status in (200, 301, 302):
+                    candidates.append(url_to_try)
+            except Exception:
+                pass
+
+        if not candidates:
+            return "", False
+
+        candidates.sort(key=_rank_signup_url)
+
+        # 3. Verify bằng HTTP để check CTA (nhanh hơn browser)
+        best_candidate_no_cta = ""
+        best_candidate_rank = 999
+        for cand in candidates[:20]:
+            if _halt():
+                return "", False
+            try:
+                res = requests.get(cand, allow_redirects=True, timeout=8)
+                if not res.ok:
+                    continue
+                text = res.text or ""
+                # Ưu tiên: trang có CTA → confirm affiliate
+                if _collabs_page_has_signup_cta(text):
+                    return cand, True
+                # Thứ yếu: trang có tín hiệu affiliate (form + keyword) → best guess
+                rank = _rank_signup_url(cand)
+                if rank < best_candidate_rank and _page_has_affiliate_signals(text):
+                    best_candidate_rank = rank
+                    best_candidate_no_cta = cand
+            except Exception:
+                pass
+
+        # 4. Verify bằng browser nếu HTTP fail hoặc chưa có CTA
+        for cand in candidates[:10]:
+            if _halt():
+                break
+            try:
+                resp = await page.goto(cand, timeout=15000, wait_until="domcontentloaded")
+                if resp and resp.status == 200:
+                    html: str = await page.content()
+                    if _collabs_page_has_signup_cta(html):
+                        return cand, True
+                    # Lưu best guess từ browser
+                    rank = _rank_signup_url(cand)
+                    if rank < best_candidate_rank and _page_has_affiliate_signals(html):
+                        best_candidate_rank = rank
+                        best_candidate_no_cta = cand
+            except Exception:
+                pass
+
+        # Không tìm được trang có CTA → trả về candidate tốt nhất có tín hiệu affiliate
+        return best_candidate_no_cta, False
+
+    except Exception:
+        pass
+    finally:
+        if browser:
+            await browser.close()
+        if playwright:
+            await playwright.stop()
+
+    return "", False
+
+
+def _sync_discover_collabs(site_url: str, timeout_sec: int, should_stop: Callable[[], bool] | None) -> tuple[str, bool]:
+    """Wrapper sync gọi async Playwright. Returns (url, has_cta)."""
+    parsed = urlparse(site_url if "://" in site_url else f"https://{site_url}")
+    if not parsed.netloc:
+        return "", False
+
+    try:
+        loop = asyncio.get_running_loop()
+        pass
+    except RuntimeError:
+        pass
+
+    try:
+        return asyncio.run(_playwright_discover(site_url, timeout_sec, should_stop))
+    except Exception:
+        return "", False
 
 
 def discover_collabs_signup_url(
     site_url: str, timeout_sec: int = 20, should_stop: Callable[[], bool] | None = None
 ) -> str:
     """
-    Tìm link đăng ký collabs từ domain chính.
-    Ưu tiên /pages/collab; fallback quét homepage để tìm href chứa collab/affiliate.
-    Nếu should_stop trả True (vd. người dùng bấm hủy), trả chuỗi rỗng sớm.
+    Tìm link đăng ký collabs từ domain chính bằng Playwright (trình duyệt thật).
+    Không bị 429 vì trình duyệt thật được Cloudflare cho qua.
+
+    Fallback hierarchy:
+    1. Trang có CTA (confirm) → trả ngay
+    2. Trang có tín hiệu affiliate (best guess, không CTA) → trả candidate đó
+    3. Hoàn toàn không có candidate → /pages/collab
     """
     raw = str(site_url or "").strip()
     if not raw:
@@ -1478,337 +1758,18 @@ def discover_collabs_signup_url(
     if not parsed.netloc:
         return ""
     base = f"{parsed.scheme or 'https'}://{parsed.netloc}"
-    default_signup = f"{base}/pages/collab"
 
-    # Tổng thời gian tìm kiếm cho 1 domain (giây). Quá thời gian -> trả default và nhảy domain khác.
-    # Yêu cầu mới: tối đa 30 giây (có thể override bằng env).
-    max_domain_search_sec = int(os.getenv("COLLABS_SIGNUP_MAX_DOMAIN_SECONDS", "15") or "15")
-    if max_domain_search_sec < 5:
-        max_domain_search_sec = 5
-    deadline = time.monotonic() + float(max_domain_search_sec)
+    # Thử Playwright trước
+    found_url, has_cta = _sync_discover_collabs(raw, timeout_sec, should_stop)
 
-    def _halt() -> bool:
-        return should_stop is not None and bool(should_stop())
+    if found_url:
+        if has_cta:
+            return found_url
+        # Có candidate nhưng không confirm CTA → dùng làm best guess
+        return found_url
 
-    def _remaining_sec() -> float:
-        return max(0.0, deadline - time.monotonic())
-
-    def _try_get(candidate_url: str) -> tuple[str, str]:
-        if _halt() or _remaining_sec() <= 0:
-            return "", ""
-        try:
-            # Mỗi request dùng timeout theo phần thời gian còn lại (không vượt quá timeout_sec).
-            req_timeout = min(float(timeout_sec), max(0.5, _remaining_sec()))
-            res = requests.get(candidate_url, allow_redirects=True, timeout=req_timeout)
-            final_url = str(res.url or candidate_url).strip()
-            if not res.ok:
-                return "", ""
-            ctype = str(res.headers.get("content-type") or "").lower()
-            # Tránh tải nhầm file/binary; ưu tiên HTML.
-            if ctype and ("text/html" not in ctype) and ("application/xhtml" not in ctype):
-                return "", ""
-            text = res.text or ""
-            return final_url, text
-        except Exception:
-            return "", ""
-
-    def _bases_to_try() -> list[str]:
-        # Dù input là http/https, thử cả hai để giảm bỏ sót.
-        return [f"https://{parsed.netloc}", f"http://{parsed.netloc}"]
-
-    # 0) Quét nhanh homepage trước khi brute-force preferred paths
-    # để bắt các slug tùy biến như /pages/westoncommunity.
-    home_url, home_html = _try_get(base)
-    if home_url:
-        quick_keywords = ("community", "-com", "collab", "affiliate", "ambassador", "partner", "apply", "creator", "influencer", "ambassadors", "ambassador", "community", "affiliates", "affiliate", "affiliate-program", "affiliate-programs", "collab", "collabs", "collaborators", "partnerships", "partners", "partner", "partner-program", "partner-programs", "collaborations", "collaboration", "ambassador-program", "ambassador-programs", "curious-community")
-        quick_links = []
-        for href in re.findall(r"""href=["']([^"'#]+)["']""", home_html or "", flags=re.I):
-            h = str(href or "").strip()
-            if not h:
-                continue
-            low_h = h.lower()
-            if low_h.startswith(("mailto:", "tel:", "javascript:", "data:")):
-                continue
-            cand = urljoin(home_url, h)
-            cp = urlparse(cand)
-            if cp.netloc != parsed.netloc:
-                continue
-            normalized = f"{cp.scheme or 'https'}://{cp.netloc}{cp.path or '/'}"
-            low = normalized.lower()
-            if any(k in low for k in quick_keywords):
-                quick_links.append(normalized)
-        # Ưu tiên community trước, sau đó collab/affiliate.
-        def _homepage_link_rank(u: str) -> tuple:
-            low = u.lower()
-            if "/pages/collaboration" in low or low.rstrip("/").endswith("/collaboration"):
-                return (0,)
-            if "collaboration" in low:
-                return (1,)
-            if "community" in low:
-                return (2,)
-            if "collab" in low:
-                return (3,)
-            return (4,)
-
-        quick_links = sorted(set(quick_links), key=_homepage_link_rank)
-        for cand in quick_links[:60]:
-            if _halt() or _remaining_sec() <= 0:
-                break
-            final_url, html = _try_get(cand)
-            if final_url and _collabs_page_has_signup_cta(html):
-                return final_url
-
-    preferred_paths = [
-        "/pages/collaboration",
-        "/pages/collaborations",
-        "/pages/collab",
-        "/pages/collabs",
-        "/pages/collabs-signup",
-        "/pages/partnerships",
-        "/pages/ambassador",
-        "/pages/affiliate",
-        "/pages/affiliates",
-        "/pages/collaborators",
-        "/pages/affiliate-program",
-        "/pages/affiliate-programs",
-        "/pages/ambassadors",
-        "/pages/ambassador-program",
-        "/pages/ambassador-programs",
-        "/pages/partners",
-        "/pages/partner-program",
-        "/pages/partner-programs",
-        "/pages/curious-community",
-        "/pages/shopify-collabs",
-        "/ambassadors",
-        "/ambassador",
-        "/community",
-        "/affiliates",
-        "/affiliate",
-        "/affiliate-program",
-        "/affiliate-programs",
-        "/collab",
-        "/collabs",
-        "/collaborators",
-        "/partnerships",
-        "/partners",
-        "/partner",
-        "/partner-program",
-        "/partner-programs",
-        "/collaborations",
-        "/collaboration",
-        "/ambassador-program",
-        "/ambassador-programs",
-        "/curious-community",
-        "-com",
-    ]
-    # 1) Thử các path phổ biến trên cả https/http base. Tìm thấy là trả ngay.
-    for b in _bases_to_try():
-        for p in preferred_paths:
-            if _halt():
-                return ""
-            if _remaining_sec() <= 0:
-                return default_signup
-            final_url, text = _try_get(f"{b}{p}")
-            if final_url and _collabs_page_has_signup_cta(text):
-                return final_url
-
-    # 2) Nếu homepage chưa có từ bước quét nhanh thì lấy lại.
-    if not home_url:
-        home_url, home_html = _try_get(base)
-    if _halt():
-        return ""
-    if not home_url:
-        return default_signup
-
-    # 2.05) Quick-hit từ homepage: thử ngay các link nội bộ có tín hiệu cộng đồng/collab
-    # để tránh rơi fallback /pages/collab khi site dùng slug tùy biến như /pages/westoncommunity.
-    def _extract_same_domain_links_quick(page_html: str, page_url: str) -> list[str]:
-        out = []
-        for href in re.findall(r"""href=["']([^"'#]+)["']""", page_html or "", flags=re.I):
-            h = str(href).strip()
-            if not h:
-                continue
-            low_h = h.lower()
-            if low_h.startswith(("mailto:", "tel:", "javascript:", "data:")):
-                continue
-            cand = urljoin(page_url, h)
-            cp = urlparse(cand)
-            if cp.netloc != parsed.netloc:
-                continue
-            path = cp.path or "/"
-            low_path = path.lower()
-            if any(
-                low_path.endswith(ext)
-                for ext in (".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg", ".js", ".css", ".pdf", ".xml")
-            ):
-                continue
-            out.append(f"{cp.scheme or 'https'}://{cp.netloc}{path}")
-        return out
-
-    quick_candidates = _extract_same_domain_links_quick(home_html, home_url)
-    # Ưu tiên community/collab trước để tăng độ chính xác cho Shopify Collabs page.
-    def _quick_cand_rank(u: str) -> tuple:
-        low = u.lower()
-        if "/pages/collaboration" in low or low.rstrip("/").endswith("/collaboration"):
-            return (0,)
-        if "collaboration" in low:
-            return (1,)
-        if "community" in low:
-            return (2,)
-        if "collab" in low:
-            return (3,)
-        if "affiliate" in low:
-            return (4,)
-        return (5,)
-
-    quick_candidates.sort(key=_quick_cand_rank)
-    for cand in quick_candidates:
-        if _halt() or _remaining_sec() <= 0:
-            break
-        low = cand.lower()
-        if not any(k in low for k in ("community", "collab", "affiliate", "ambassador", "partner", "apply")):
-            continue
-        final_url, html = _try_get(cand)
-        if final_url and _collabs_page_has_signup_cta(html):
-            return final_url
-
-    # 2.1) Thử lấy thêm candidate từ sitemap để bắt các slug tùy biến
-    # kiểu /pages/westoncommunity (không nằm trong preferred_paths).
-    def _try_sitemap_candidates() -> str:
-        if _halt() or _remaining_sec() <= 0:
-            return ""
-        sitemap_urls = [f"{base}/sitemap.xml", f"{base}/sitemap_index.xml"]
-        keywords = ("collab", "affiliate", "ambassador", "community", "partner", "creator", "influencer", "apply", "-com", "collaborations", "collaboration", "collaborator", "collaborators", "partnerships", "partnership", "partners", "partner", "partner-program", "partner-programs", "ambassadors", "ambassador", "ambassador-program", "ambassador-programs", "curious-community")
-        seen_sitemaps = set()
-
-        def _iter_locs_from_sitemap(sm_url: str, depth: int = 0) -> list[str]:
-            if _halt() or _remaining_sec() <= 0:
-                return []
-            s = str(sm_url or "").strip()
-            if not s or s in seen_sitemaps:
-                return []
-            seen_sitemaps.add(s)
-            try:
-                req_timeout = min(float(timeout_sec), max(0.5, _remaining_sec()))
-                res = requests.get(s, allow_redirects=True, timeout=req_timeout)
-                if not res.ok:
-                    return []
-                text = res.text or ""
-            except Exception:
-                return []
-            locs = [str(x or "").strip() for x in re.findall(r"<loc>(.*?)</loc>", text, flags=re.I | re.S)]
-            out: list[str] = []
-            for loc in locs:
-                if not loc:
-                    continue
-                cp = urlparse(loc)
-                if cp.netloc != parsed.netloc:
-                    continue
-                low = loc.lower()
-                # sitemap index -> đi sâu thêm 1 cấp vào sitemap con
-                if low.endswith(".xml"):
-                    if depth < 1:
-                        out.extend(_iter_locs_from_sitemap(loc, depth=depth + 1))
-                    continue
-                out.append(loc)
-            return out
-
-        for sm in sitemap_urls:
-            if _halt() or _remaining_sec() <= 0:
-                return ""
-            for loc in _iter_locs_from_sitemap(sm):
-                if _halt() or _remaining_sec() <= 0:
-                    return ""
-                cand = str(loc or "").strip()
-                if not cand:
-                    continue
-                cp = urlparse(cand)
-                if cp.netloc != parsed.netloc:
-                    continue
-                low = cand.lower()
-                if not any(k in low for k in keywords):
-                    continue
-                final_url, html = _try_get(cand)
-                if final_url and _collabs_page_has_signup_cta(html):
-                    return final_url
-        return ""
-
-    sm_url = _try_sitemap_candidates()
-    if sm_url:
-        return sm_url
-
-    # Quét toàn site (có giới hạn) để tìm page apply.
-    # Mặc định nâng lên để giảm bỏ sót; có thể chỉnh bằng env.
-    # Đặt <=0 để "không giới hạn" nhưng vẫn bị chặn bởi hard cap an toàn.
-    max_scan_pages = int(os.getenv("COLLABS_SIGNUP_SCAN_MAX_PAGES", "500") or "500")
-    hard_cap = int(os.getenv("COLLABS_SIGNUP_SCAN_HARD_CAP", "5000") or "5000")
-    if hard_cap < 50:
-        hard_cap = 50
-
-    def _extract_same_domain_links(page_html: str, page_url: str) -> list[str]:
-        out = []
-        for href in re.findall(r"""href=["']([^"'#]+)["']""", page_html or "", flags=re.I):
-            h = str(href).strip()
-            if not h:
-                continue
-            # Bỏ các scheme không phải http(s)
-            low_h = h.lower()
-            if low_h.startswith(("mailto:", "tel:", "javascript:", "data:")):
-                continue
-            cand = urljoin(page_url, h)
-            cp = urlparse(cand)
-            if cp.netloc != parsed.netloc:
-                continue
-            path = cp.path or "/"
-            # Bỏ link static/media để không tốn lượt quét.
-            low_path = path.lower()
-            if any(low_path.endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg", ".js", ".css", ".pdf", ".xml")):
-                continue
-            # Chuẩn hóa bỏ query/fragment để tránh trùng lặp vô hạn.
-            out.append(f"{cp.scheme or 'https'}://{cp.netloc}{path}")
-        return out
-
-    queue = [home_url]
-    seen = set()
-    idx = 0
-    def _can_scan_more() -> bool:
-        if len(seen) >= hard_cap:
-            return False
-        if max_scan_pages <= 0:
-            return True
-        return len(seen) < max_scan_pages
-
-    while idx < len(queue) and _can_scan_more():
-        if _halt():
-            return ""
-        if _remaining_sec() <= 0:
-            return default_signup
-        cur = queue[idx]
-        idx += 1
-        if cur in seen:
-            continue
-        seen.add(cur)
-        final_url, text = _try_get(cur)
-        if not final_url:
-            continue
-        # Chỉ coi là trang đăng ký nếu có CTA thật.
-        if _collabs_page_has_signup_cta(text):
-            return final_url
-
-        for nxt in _extract_same_domain_links(text, final_url):
-            if nxt in seen:
-                continue
-            low = nxt.lower()
-            # Ưu tiên đường dẫn có tín hiệu collab/apply/affiliate/community/-com/partnership.
-            if any(k in low for k in ("collab", "affiliate", "ambassador", "apply", "community", "-com", "partnership")):
-                queue.insert(idx, nxt)
-            else:
-                queue.append(nxt)
-
-    # Không tìm thấy CTA trong ngân sách thời gian / số trang -> fallback default.
-    if _halt():
-        return ""
-    return default_signup
+    # Fallback cuối cùng: /pages/collab
+    return f"{base}/pages/collab"
 
 
 def _extract_url_from_ddg_href(href: str) -> str:
@@ -4800,6 +4761,51 @@ def check_apify_connection() -> str:
     raise RuntimeError(
         f"Apify: tất cả {total} token đã hết quota hoặc lỗi quyền (connection check): {last_err}"
     )
+
+
+def _apify_check_token_quota(tok: str) -> tuple[bool, str]:
+    """
+    Kiểm tra xem token Apify còn quota hay không.
+    Returns (ok, message). ok=False nghĩa là token hết quota / lỗi quyền.
+    """
+    url = f"https://api.apify.com/v2/users/me?token={tok}"
+    try:
+        res = requests.get(url, timeout=20)
+    except requests.RequestException as exc:
+        return False, f"Lỗi kết nối: {exc}"
+    if not res.ok:
+        body = res.text or ""
+        if _apify_http_suggests_token_failover(res.status_code, body):
+            return False, f"HTTP {res.status_code}: {body[:300]}"
+        return False, f"HTTP {res.status_code}: {body[:300]}"
+    try:
+        body = res.json()
+    except Exception:
+        return False, "Phản hồi không hợp lệ"
+    data = body.get("data") or {}
+    plan = (data.get("plan") or {}).get("title", "") or ""
+    # Kiểm tra thêm: nếu có thông tin về usage limits
+    return True, f"OK (plan: {plan})"
+
+
+def check_apify_all_tokens_quota() -> tuple[list[str], list[tuple[str, str]]]:
+    """
+    Kiểm tra quota của TẤT CẢ token Apify trước khi bắt đầu lọc.
+    Trả về (working_tokens, failed_tokens_with_reason).
+    Nếu failed_tokens chỉ toàn quota-limit thì không raise — chỉ cảnh báo.
+    """
+    candidates = apify_effective_token_candidates()
+    if not candidates:
+        raise _apify_tokens_missing_error("token quota check")
+    working = []
+    failed: list[tuple[str, str]] = []
+    for tok in candidates:
+        ok, msg = _apify_check_token_quota(tok)
+        if ok:
+            working.append(tok)
+        else:
+            failed.append((tok, msg))
+    return working, failed
 
 
 def apify_list_items(dataset_id: str, token: str | None = None) -> list:

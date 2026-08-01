@@ -318,3 +318,5 @@ Mở firewall cho port `8765` và dùng URL `http://IP:8765` hoặc tên miền 
 **Reset quota “record hôm nay” khi đã kích hoạt (không chờ tới 23h05):** đếm nằm trong file **`.aff_licensed_usage.json`** (cùng thư mục với `.env` / file `.exe`). Đóng app, **xóa** file này, mở lại app — bộ đếm trong ngày về **0** (lần chạy pipeline tiếp theo sẽ tạo file mới có chữ ký hợp lệ). Không xóa `.aff_license.json` nếu vẫn muốn giữ trạng thái đã kích hoạt key.
 
 Khi đổi logic quota, cập nhật `license_guard.py` và thông báo trên UI / tài liệu người dùng cho khớp.
+
+Get-Process -Name python -ErrorAction SilentlyContinue | Stop-Process -Force

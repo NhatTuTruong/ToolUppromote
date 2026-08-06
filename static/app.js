@@ -111,6 +111,7 @@ const settingKeys = [
   "APIFY_TOKENS",
   "UPPROMOTE_API_URL",
   "UPPROMOTE_BEARER_TOKEN",
+  "UPPROMOTE_REFRESH_TOKEN",
   "UPPROMOTE_PER_PAGE",
   "GOAFFPRO_API_URL",
   "GOAFFPRO_BEARER_TOKEN",
@@ -135,6 +136,7 @@ function clampOffersPerPageField(id) {
 const SECRET_SETTING_KEYS = new Set([
   "APIFY_TOKENS",
   "UPPROMOTE_BEARER_TOKEN",
+  "UPPROMOTE_REFRESH_TOKEN",
   "GOAFFPRO_BEARER_TOKEN",
   "REFERSION_TOKEN",
   "COLLABS_COOKIE",
@@ -555,6 +557,38 @@ async function loadSettings() {
     if ($(k)) $(k).value = data[k] || "";
   });
   closeAllSecretFieldRows();
+  loadTokenStatus();
+}
+
+async function loadTokenStatus() {
+  const el = $("tokenStatus");
+  if (!el) return;
+  try {
+    const res = await fetch("/api/token-status");
+    const data = await res.json();
+    if (!data.has_token) {
+      el.textContent = "⚠ Chưa có Bearer token";
+      el.style.color = "#e74c3c";
+      return;
+    }
+    if (data.remaining_seconds === undefined) {
+      el.textContent = "Token: OK (không đọc được thời hạn)";
+      el.style.color = "#888";
+      return;
+    }
+    const mins = data.remaining_minutes;
+    const color =
+      mins > 5 ? "#27ae60" : mins > 1 ? "#f39c12" : "#e74c3c";
+    const timeText =
+      mins >= 60
+        ? `${(mins / 60).toFixed(1)} giờ`
+        : `${mins.toFixed(1)} phút`;
+    const refreshNote = data.refresh_ok ? " | ↻ Refresh: ON" : " | ↻ Refresh: OFF";
+    el.textContent = `⏱ Token Uppromote còn ${timeText}${refreshNote}`;
+    el.style.color = color;
+  } catch (_) {
+    el.textContent = "";
+  }
 }
 
 async function saveSettings() {
@@ -577,6 +611,7 @@ async function saveSettings() {
   }
   closeAllSecretFieldRows();
   alert("Đã lưu cài đặt.");
+  loadTokenStatus();
 }
 
 /** Ghi log vào DOM rồi chờ khung vẽ (double rAF) trước khi gửi ack — khớp thứ tự với worker. */
@@ -3321,6 +3356,7 @@ function bindEvents() {
   $("runBtnGoaffpro").addEventListener("click", () => runFilter("goaffpro"));
   $("runBtnRefersion").addEventListener("click", () => runFilter("refersion"));
   $("runBtnCollabs").addEventListener("click", () => runFilter("collabs"));
+
   const resetOutsideBtn = $("resetOutsideStateBtn");
   if (resetOutsideBtn) resetOutsideBtn.addEventListener("click", resetCollabsOutsideState);
   ["pauseBtn", "pauseBtnGp", "pauseBtnRf", "pauseBtnCb"].forEach((id) => {

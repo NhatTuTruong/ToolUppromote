@@ -71,13 +71,23 @@
             <input id="UPPROMOTE_API_URL" class="secret-field-input settings-url-input" type="url" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="https://mkp-api.uppromote.com/api/v1/..." />
           </label>
           <label class="form-field-label">
-            <span class="form-field-caption">Bearer token (UPPROMOTE_BEARER_TOKEN)</span>
+            <span class="form-field-caption">Bearer token (UPPROMOTE_BEARER_TOKEN) — sẽ tự refresh nếu có Refresh Token bên dưới</span>
             <div class="secret-field-row" data-secret-for="UPPROMOTE_BEARER_TOKEN">
               <button type="button" class="secret-eye-btn" aria-expanded="false" aria-label="Hiện để chỉnh sửa" title="Hiện / ẩn để sửa">
                 <svg class="eye-icon eye-icon--shut" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
                 <svg class="eye-icon eye-icon--open" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
               </button>
               <input id="UPPROMOTE_BEARER_TOKEN" class="secret-field-input token-apify" type="password" spellcheck="false" autocomplete="off" />
+            </div>
+          </label>
+          <label class="form-field-label" style="grid-column:1/-1;">
+            <span class="form-field-caption">Refresh Token (UPPROMOTE_REFRESH_TOKEN) — kéo dài phiên, lấy từ F12 → Application → Cookies → marketplace_refresh_token</span>
+            <div class="secret-field-row" data-secret-for="UPPROMOTE_REFRESH_TOKEN">
+              <button type="button" class="secret-eye-btn" aria-expanded="false" aria-label="Hiện để chỉnh sửa" title="Hiện / ẩn để sửa">
+                <svg class="eye-icon eye-icon--shut" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                <svg class="eye-icon eye-icon--open" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              </button>
+              <textarea id="UPPROMOTE_REFRESH_TOKEN" class="secret-field-input" rows="2" spellcheck="false" autocomplete="off" placeholder="def50200..."></textarea>
             </div>
           </label>
           <label>Số offer mỗi trang (10–50, bước 10)<input id="UPPROMOTE_PER_PAGE" type="number" min="10" max="50" step="10" value="50" /></label>
@@ -161,6 +171,7 @@
         </div>
         <div class="actions">
           <button class="btn primary" id="saveSettingsBtn">Lưu cài đặt</button>
+          <span id="tokenStatus" style="margin-left:16px;font-size:13px;color:#888;align-self:center;"></span>
         </div>
       </div>
 

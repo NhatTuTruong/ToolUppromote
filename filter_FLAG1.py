@@ -210,13 +210,6 @@ def load_env_file(path: Path):
     for k, v in parse_env_file(path).items():
         if k and k not in os.environ:
             os.environ[k] = v
-    try:
-        from local_secret import migrate_uppromote_password_in_env
-
-        if migrate_uppromote_password_in_env(path):
-            print("[Env] Đã mã hóa UPPROMOTE_PASSWORD (dpapi) trong .env", flush=True)
-    except Exception:
-        pass
 
 
 load_env_file(BASE_DIR / ".env")
@@ -894,9 +887,8 @@ def fetch_uppromote_offer_detail(shop_id, _retry_after_login: bool = False) -> d
 
     # 401 → thử auto-login rồi retry một lần
     if res.status_code == 401 and not _retry_after_login:
-        _uppromote_ui_log("Token hết hạn (401) — đang tự động đăng nhập lại (Edge ẩn)...")
+        print("[Uppromote] Token hết hạn (401) → Tự động đăng nhập lại...")
         if _auto_login_uppromote_browser():
-            _uppromote_ui_log("Đăng nhập lại thành công — token đã cập nhật, tiếp tục tải offer.")
             return fetch_uppromote_offer_detail(shop_id, _retry_after_login=True)
         raise RuntimeError("Uppromote auto-login thất bại, không lấy được token mới.")
 
@@ -3876,9 +3868,8 @@ def fetch_uppromote_page(base_url: str, page: int, _retry_after_login: bool = Fa
 
     # 401 → thử auto-login rồi retry một lần
     if res.status_code == 401 and not _retry_after_login:
-        _uppromote_ui_log("Token hết hạn (401) — đang tự động đăng nhập lại (Edge ẩn)...")
+        print("[Uppromote] Token hết hạn (401) → Tự động đăng nhập lại...")
         if _auto_login_uppromote_browser():
-            _uppromote_ui_log("Đăng nhập lại thành công — token đã cập nhật, tiếp tục tải offer.")
             return fetch_uppromote_page(base_url, page, _retry_after_login=True)
         raise RuntimeError("Uppromote auto-login thất bại, không lấy được token mới.")
 
@@ -5041,383 +5032,163 @@ def main():
 # AUTO LOGIN UPPROMOTE BROWSER (Playwright)
 # ─────────────────────────────────────────────
 
-UPPROMOTE_CDP_PORT = 9501
-UPPROMOTE_CDP_HOST = "127.0.0.1"
-UPPROMOTE_OFFERS_URL = "https://marketplace.uppromote.com/offers/find-offers"
-UPPROMOTE_LOGIN_URL = "https://marketplace.uppromote.com/auth/login"
-UPPROMOTE_API_TEST_URL = (
-    "https://mkp-api.uppromote.com/api/v1/marketplace-offer/find-offer/datatable/data"
-)
+def _auto_login_uppromote_browser() -> bool:
+    """Tự động đăng nhập Uppromote bằng Playwright (Edge/Chromium).
 
-_uppromote_ui_log_fn: Callable[[str], None] | None = None
+    Luồng:
+      1. Mở trình duyệt Edge (không headless – để user thấy)
+      2. Navigate đến trang login
+      3. Điền email + password từ .env
+      4. Click đăng nhập
+      5. Đợi redirect thành công
+      6. Đọc cookies (Bearer token & session)
+      7. Cập nhật .env
 
-
-def set_uppromote_ui_log_fn(fn: Callable[[str], None] | None) -> None:
-    global _uppromote_ui_log_fn
-    _uppromote_ui_log_fn = fn
-
-
-def _uppromote_ui_log(msg: str) -> None:
-    line = msg if str(msg).startswith("Uppromote:") else f"Uppromote: {msg}"
-    print(line, flush=True)
-    fn = _uppromote_ui_log_fn
-    if fn:
-        try:
-            fn(line)
-        except Exception:
-            pass
-
-
-def _jwt_exp_unix(token: str) -> int | None:
-    import base64
-    import json as _json
-
-    try:
-        parts = (token or "").split(".")
-        if len(parts) < 2:
-            return None
-        payload_b64 = parts[1].replace("-", "+").replace("_", "/")
-        payload_b64 += "=" * (-len(payload_b64) % 4)
-        payload = _json.loads(base64.b64decode(payload_b64))
-        exp = payload.get("exp")
-        return int(exp) if exp else None
-    except Exception:
-        return None
-
-
-def _jwt_is_fresh(token: str, buffer_sec: int = 120) -> bool:
-    exp = _jwt_exp_unix(token)
-    if not exp:
-        return False
-    return exp > time.time() + buffer_sec
-
-
-def _verify_uppromote_bearer(token: str) -> bool:
-    if not token:
-        return False
-    try:
-        res = requests.get(
-            UPPROMOTE_API_TEST_URL,
-            params={
-                "page": 1,
-                "per_page": 1,
-                "keyword": "",
-                "sort_by": "most_relevant",
-                "tab[0]": "all-offers",
-                "pathPage": "/offers/find-offers",
-            },
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Accept": "application/json",
-                "User-Agent": os.getenv(
-                    "UPPROMOTE_USER_AGENT",
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                ),
-            },
-            timeout=30,
-        )
-        return res.status_code == 200
-    except Exception:
-        return False
-
-
-def _uppromote_user_data_dir() -> str:
-    return str(BASE_DIR / "edge_profiles" / "uppromote")
-
-
-def _uppromote_edge_launch_extra_args() -> list[str]:
-    """Flag khởi động Edge chỉ cho Uppromote (9501). Collabs không dùng hàm này."""
-    mode = os.getenv("UPPROMOTE_EDGE_HIDDEN", "1").strip().lower()
-    if mode in ("0", "false", "no", "off", "show", "visible"):
-        return []
-    if mode in ("offscreen", "2"):
-        return ["--window-position=-32000,-32000", "--window-size=1280,720"]
-    return ["--headless=new", "--disable-gpu"]
-
-
-def _uppromote_cdp_connect_url(cdp_url: str | None = None) -> str:
-    """Chuẩn hóa CDP URL — luôn dùng 127.0.0.1 (tránh localhost → ::1 ECONNREFUSED)."""
-    from edge_cdp import cdp_url_host_port
-
-    raw = (cdp_url or os.getenv("UPPROMOTE_CDP_URL") or f"http://{UPPROMOTE_CDP_HOST}:{UPPROMOTE_CDP_PORT}").strip()
-    host, port = cdp_url_host_port(raw)
-    if host in ("localhost", "::1"):
-        host = UPPROMOTE_CDP_HOST
-    if not port:
-        port = UPPROMOTE_CDP_PORT
-    return f"http://{host}:{port}"
-
-
-def _extract_uppromote_tokens_from_cookies(cookies: list) -> tuple[str | None, str | None]:
-    access = next((c["value"] for c in cookies if c.get("name") == "marketplace_access_token"), None)
-    refresh = next((c["value"] for c in cookies if c.get("name") == "marketplace_refresh_token"), None)
-    return access, refresh
-
-
-def _write_uppromote_tokens_to_env(access: str | None, refresh: str | None) -> bool:
-    if not access:
-        return False
-    env_path = Path(BASE_DIR) / ".env"
-    env_lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
-    updated = False
-
-    def _update_env(key: str, value: str) -> list:
-        nonlocal updated, env_lines
-        lines: list[str] = []
-        found = False
-        for line in env_lines:
-            if line.strip().startswith(f"{key}="):
-                lines.append(f'{key}="{value}"')
-                found = True
-                updated = True
-            else:
-                lines.append(line)
-        if not found:
-            lines.append(f'{key}="{value}"')
-            updated = True
-        env_lines = lines
-        return lines
-
-    _update_env("UPPROMOTE_BEARER_TOKEN", access)
-    if refresh:
-        _update_env("UPPROMOTE_REFRESH_TOKEN", refresh)
-
-    if updated:
-        env_path.write_text("\n".join(env_lines) + "\n", encoding="utf-8")
-        os.environ["UPPROMOTE_BEARER_TOKEN"] = access
-        if refresh:
-            os.environ["UPPROMOTE_REFRESH_TOKEN"] = refresh
-    return updated
-
-
-def _ensure_uppromote_edge_cdp(cdp_url: str, log: Callable[[str], None]) -> bool:
-    from edge_cdp import cdp_url_host_port, ensure_edge_cdp_running
-
-    host, port = cdp_url_host_port(cdp_url)
-    if host in ("localhost", "::1"):
-        host = UPPROMOTE_CDP_HOST
-    udir = _uppromote_user_data_dir()
-    Path(udir).mkdir(parents=True, exist_ok=True)
-    extra = _uppromote_edge_launch_extra_args()
-    if extra:
-        log("Mở Edge Uppromote ở chế độ ẩn (headless/offscreen).")
-    return ensure_edge_cdp_running(
-        port=port,
-        user_data_dir=udir,
-        log=log,
-        wait_sec=25.0,
-        host=host,
-        extra_args=extra,
-    )
-
-
-def _attach_uppromote_bearer_capture(page) -> tuple[list[str], Callable[[], None]]:
-    """Bắt Bearer token từ request tới mkp-api / marketplace."""
-    captured: list[str] = []
-
-    def on_request(request) -> None:
-        try:
-            url = request.url or ""
-            if "uppromote.com" not in url:
-                return
-            auth = (request.headers.get("authorization") or request.headers.get("Authorization") or "").strip()
-            if not auth.lower().startswith("bearer "):
-                return
-            tok = auth[7:].strip()
-            if tok.startswith("eyJ") and tok not in captured:
-                captured.append(tok)
-        except Exception:
-            pass
-
-    page.on("request", on_request)
-
-    def detach() -> None:
-        try:
-            page.remove_listener("request", on_request)
-        except Exception:
-            pass
-
-    return captured, detach
-
-
-def _pick_best_uppromote_access(candidates: list[str], log: Callable[[str], None]) -> str | None:
-    seen: set[str] = set()
-    ordered: list[str] = []
-    for tok in candidates:
-        if tok and tok not in seen:
-            seen.add(tok)
-            ordered.append(tok)
-
-    for tok in ordered:
-        if _verify_uppromote_bearer(tok):
-            log("Chọn token hoạt động (verify API OK).")
-            return tok
-
-    fresh = [t for t in ordered if _jwt_is_fresh(t)]
-    if fresh:
-        exp = _jwt_exp_unix(fresh[-1])
-        log(f"Chọn token JWT còn hạn (exp={exp}).")
-        return fresh[-1]
-
-    if ordered:
-        log("Dùng token cuối (chưa verify được API).")
-        return ordered[-1]
-    return None
-
-
-def _load_offers_and_capture_token(page, log: Callable[[str], None]) -> str | None:
-    captured, detach = _attach_uppromote_bearer_capture(page)
-    try:
-        log(f"Navigate → {UPPROMOTE_OFFERS_URL}")
-        page.goto(UPPROMOTE_OFFERS_URL, wait_until="domcontentloaded", timeout=30_000)
-        try:
-            page.wait_for_response(
-                lambda r: "mkp-api.uppromote.com" in (r.url or "") and r.status == 200,
-                timeout=25_000,
-            )
-            log("Trang offers đã gọi API mkp-api thành công.")
-        except Exception:
-            log("Chờ response mkp-api timeout — thử token đã bắt / cookies.")
-        time.sleep(2)
-        log(f"URL hiện tại: {page.url}")
-        return _pick_best_uppromote_access(captured, log)
-    finally:
-        detach()
-
-
-def _collect_uppromote_tokens(page, context, log: Callable[[str], None]) -> tuple[str | None, str | None]:
-    access = _load_offers_and_capture_token(page, log)
-    cookie_access, refresh = _extract_uppromote_tokens_from_cookies(context.cookies())
-
-    candidates: list[str] = []
-    if access:
-        candidates.append(access)
-    if cookie_access:
-        candidates.append(cookie_access)
-
-    best = _pick_best_uppromote_access(candidates, log)
-    if best and not refresh:
-        _, refresh = _extract_uppromote_tokens_from_cookies(context.cookies())
-    return best, refresh
-
-
-def _uppromote_perform_login(page, email: str, password: str, log: Callable[[str], None]) -> bool:
-    log("Chưa login, tiến hành đăng nhập...")
-    if "/auth/login" not in page.url and "/login" not in page.url:
-        log("Mở trang login...")
-        page.goto(UPPROMOTE_LOGIN_URL, wait_until="domcontentloaded", timeout=30_000)
-    time.sleep(4)
-
-    email_sel = 'input[type="email"], input[name="email"], input[id="email"], input[placeholder*="email" i]'
-    pw_sel = 'input[type="password"], input[name="password"]'
-    btn_sel = 'button[type="submit"], button:has-text("Sign in"), button:has-text("Login"), button:has-text("Đăng nhập")'
-
-    log("Điền email...")
-    page.locator(email_sel).first.wait_for(state="visible", timeout=20_000)
-    page.locator(email_sel).first.fill(email)
-    time.sleep(0.5)
-
-    log("Điền password...")
-    page.locator(pw_sel).first.wait_for(state="visible", timeout=15_000)
-    page.locator(pw_sel).first.fill(password)
-    time.sleep(0.5)
-
-    log("Click đăng nhập...")
-    page.locator(btn_sel).first.click(timeout=15_000)
-
-    log("Đợi redirect sau login...")
-    try:
-        page.wait_for_url(
-            lambda url: "/offers" in url or "/find-offers" in url or "/dashboard" in url,
-            timeout=60_000,
-        )
-        log(f"Login thành công! URL: {page.url}")
-        return True
-    except Exception:
-        log(f"Chưa redirect (60s), URL hiện tại: {page.url}")
-        return False
-
-
-def _auto_login_uppromote_browser(cdp_url: str | None = None) -> bool:
-    """Mở Edge CDP (port 9501), vào find-offers, login nếu cần, lấy token → .env."""
-    _uppromote_ui_log("Bắt đầu lấy token mới qua Edge (ẩn)...")
+    Returns True nếu login thành công, False nếu thất bại.
+    """
+    import sys
+    print("[AutoLogin] Bat dau qua trinh auto-login...", flush=True)
+    sys.stdout.flush()
 
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
-        _uppromote_ui_log("Chưa cài playwright — không thể auto-login.")
+        print("[Playwright] Chua cai playwright.", flush=True)
         return False
 
     email = os.getenv("UPPROMOTE_EMAIL", "").strip()
-    from local_secret import resolve_uppromote_password_with_error
+    password = os.getenv("UPPROMOTE_PASSWORD", "").strip()
 
-    password, pwd_err = resolve_uppromote_password_with_error()
-    if not email:
-        _uppromote_ui_log("Thiếu UPPROMOTE_EMAIL trong .env (cạnh file .exe).")
-        return False
-    if not password:
-        _uppromote_ui_log(pwd_err or "Thiếu UPPROMOTE_PASSWORD trong .env (cạnh file .exe).")
+    if not email or not password:
+        print("[AutoLogin] Thieu email hoac password trong .env", flush=True)
         return False
 
-    def log(msg: str) -> None:
-        _uppromote_ui_log(msg)
+    print(f"[AutoLogin] Email: {email[:3]}***", flush=True)
+    print("[AutoLogin] Khoi tao Playwright...", flush=True)
 
-    connect_url = _uppromote_cdp_connect_url(cdp_url)
-    log(f"Email: {email[:3]}*** | CDP: {connect_url}")
+    env_path = Path(BASE_DIR) / ".env"
 
-    if not _ensure_uppromote_edge_cdp(connect_url, log):
-        log("Không mở được Edge CDP trên port 9501.")
-        return False
+    def log(msg: str):
+        print(f"[AutoLogin] {msg}", flush=True)
 
     with sync_playwright() as p:
+        log("Playwright initialized, mở trình duyệt...")
         try:
-            browser = p.chromium.connect_over_cdp(connect_url, timeout=30_000)
-        except Exception as exc:
-            log(f"Không kết nối được CDP: {exc}")
-            return False
+            browser = p.chromium.launch(
+                channel="msedge",
+                headless=True,
+                args=["--disable-blink-features=AutomationControlled"],
+            )
+        except Exception:
+            log("Edge khong co, thu Chromium...")
+            browser = p.chromium.launch(
+                headless=True,
+                args=["--disable-blink-features=AutomationControlled"],
+            )
 
-        context = browser.contexts[0] if browser.contexts else browser.new_context()
+        context = browser.contexts[0]
         page = context.pages[0] if context.pages else context.new_page()
 
         try:
-            access, refresh = _collect_uppromote_tokens(page, context, log)
-            needs_login = (
-                not access
-                or not _verify_uppromote_bearer(access or "")
-                or "/auth/login" in page.url
-                or "/login" in page.url
+            # Navigate đến trang login
+            log(f"Navigate đến trang login...")
+            page.goto(
+                "https://marketplace.uppromote.com/auth/login",
+                wait_until="domcontentloaded",
+                timeout=30_000,
             )
 
-            if needs_login:
-                log("Chưa có session hợp lệ — đang đăng nhập bằng email trong .env...")
-                if not _uppromote_perform_login(page, email, password, log):
-                    log("Đăng nhập có thể chưa xong (Cloudflare/captcha?) — thử lấy token...")
-                access, refresh = _collect_uppromote_tokens(page, context, log)
-            else:
-                log("Session còn hợp lệ — chỉ refresh token.")
+            # Điền email
+            log("Điền email...")
+            page.fill('input[type="email"], input[name="email"], input[placeholder*="email" i], input[id*="email"]', email, timeout=15_000)
 
-            if access:
-                log(f"Token access: {access[:40]}...")
+            # Điền password
+            log("Điền password...")
+            page.fill('input[type="password"], input[name="password"]', password, timeout=15_000)
+
+            # Click đăng nhập
+            log("Click đăng nhập...")
+            page.click('button[type="submit"], button:has-text("Đăng nhập"), button:has-text("Sign in"), button:has-text("Login")', timeout=15_000)
+
+            # Đợi redirect: chờ URL chứa /offers hoặc dashboard
+            log("Đợi redirect sau login...")
+            redirect_ok = False
+            try:
+                page.wait_for_url(
+                    lambda url: "/offers" in url or "/dashboard" in url or "/find-offers" in url,
+                    timeout=30_000,
+                )
+                redirect_ok = True
+            except Exception:
+                log(f"Timeout redirect (30s), thử chờ networkidle...")
+                try:
+                    page.wait_for_load_state("networkidle", timeout=20_000)
+                    redirect_ok = True
+                except Exception as e2:
+                    log(f"Networkidle timeout: {e2}")
+
+            if not redirect_ok:
+                log(f"Chưa redirect thành công, thử lấy cookies tại URL: {page.url}")
+
+            log(f"Login thành công! URL: {page.url}")
+
+            # Đợi thêm 3s để cookies kịp set
+            time.sleep(3)
+
+            # Lấy cookies
+            cookies = context.cookies()
+            bearer = next((c["value"] for c in cookies if c["name"] == "uppromote_bearer_token" or c["name"] == "bearer_token"), None)
+            session = next((c["value"] for c in cookies if c["name"] == "uppromote_session" or c["name"] == "session"), None)
+            refresh = next((c["value"] for c in cookies if c["name"] == "uppromote_refresh_token" or c["name"] == "refresh_token"), None)
+
+            if bearer:
+                log(f"Lấy được bearer_token: {bearer[:40]}...")
+
+            if session:
+                log(f"Lấy được session: {session[:40]}...")
+
             if refresh:
-                log(f"Token refresh: {refresh[:40]}...")
+                log(f"Lấy được refresh_token: {refresh[:40]}...")
 
-            if not access:
-                log("Không lấy được marketplace_access_token.")
-                return False
+            # Cập nhật .env
+            env_lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
+            updated = False
 
-            if not _verify_uppromote_bearer(access):
-                log("Token lấy được nhưng API vẫn 401 — cần đăng nhập thủ công trên Edge (port 9501).")
-                return False
+            def _update_env(key: str, value: str) -> list:
+                nonlocal updated
+                lines = []
+                found = False
+                for line in env_lines:
+                    if line.strip().startswith(f"{key}="):
+                        lines.append(f'{key}="{value}"')
+                        found = True
+                        updated = True
+                    else:
+                        lines.append(line)
+                if not found:
+                    lines.append(f'{key}="{value}"')
+                    updated = True
+                return lines
 
-            if _write_uppromote_tokens_to_env(access, refresh):
-                log("Đã lưu token mới vào .env.")
-                return True
+            if bearer:
+                env_lines = _update_env("UPPROMOTE_BEARER_TOKEN", bearer)
+            if session:
+                env_lines = _update_env("UPPROMOTE_SESSION", session)
+            if refresh:
+                env_lines = _update_env("UPPROMOTE_REFRESH_TOKEN", refresh)
 
-            log("Không ghi được token vào .env")
-            return False
+            if updated:
+                env_path.write_text("\n".join(env_lines), encoding="utf-8")
+                log(f"Đã cập nhật .env")
+            else:
+                log("Không tìm thấy cookie để cập nhật .env")
+
+            browser.close()
+            return True
 
         except Exception as exc:
-            log(f"Lỗi: {exc}")
+            log(f"Lỗi trong quá trình login: {exc}")
+            browser.close()
             return False
 
 

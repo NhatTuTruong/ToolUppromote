@@ -320,3 +320,5 @@ Mở firewall cho port `8765` và dùng URL `http://IP:8765` hoặc tên miền 
 Khi đổi logic quota, cập nhật `license_guard.py` và thông báo trên UI / tài liệu người dùng cho khớp.
 
 Get-Process -Name python -ErrorAction SilentlyContinue | Stop-Process -Force
+
+Đổi mật khẩu Up: python scripts/encrypt_uppromote_password.py "MatKhauMoi@"

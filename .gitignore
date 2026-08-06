@@ -45,6 +45,9 @@ Thumbs.db
 *.swp
 *.swo
 
+# Edge profiles
+edge_profiles/
+
 
 
 # Node (nếu có dùng frontend)

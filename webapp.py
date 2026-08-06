@@ -19,6 +19,7 @@ from typing import Callable, Optional
 
 from edge_cdp import (
     EDGE_CDP_ACCOUNT_MAX,
+    _is_tcp_port_open,
     cdp_url_host_port,
     default_user_data_dir_for_port,
     ensure_edge_cdp_running,
@@ -1144,6 +1145,14 @@ def run_pipeline(settings: dict, min_traffic: int, filters: dict, source: str = 
     apply_settings_for_run(settings)
     core.enforce_fixed_fetch_defaults()
     os.environ["MIN_VISITS"] = str(min_traffic)
+    core.set_uppromote_ui_log_fn(STATE.add_log)
+    try:
+        _run_pipeline_body(settings, min_traffic, filters, source)
+    finally:
+        core.set_uppromote_ui_log_fn(None)
+
+
+def _run_pipeline_body(settings: dict, min_traffic: int, filters: dict, source: str = "uppromote"):
     STATE.add_log("Đang kiểm tra kết nối Apify...")
     apify_user = core.check_apify_connection()
     STATE.add_log(f"Kết nối Apify OK ({apify_user}). Bắt đầu tiến trình lọc.")
@@ -1398,6 +1407,31 @@ def index():
 @app.get("/api/settings")
 def api_settings():
     return jsonify(load_env_defaults())
+
+
+@app.get("/api/token-status")
+def api_token_status():
+    """Trả về thời gian sống còn lại của Uppromote access token."""
+    core.load_env_file(ENV_PATH)
+    import filter as f
+    token = f.normalize_bearer(os.getenv("UPPROMOTE_BEARER_TOKEN", ""))
+    refresh_ok = bool(os.getenv("UPPROMOTE_REFRESH_TOKEN", "").strip())
+    if not token:
+        return jsonify({"has_token": False, "refresh_ok": refresh_ok})
+    exp = f._jwt_exp_unix(token)
+    import time as _time
+    now = _time.time()
+    if exp:
+        remaining = max(0, int(exp - now))
+        return jsonify({
+            "has_token": True,
+            "exp": exp,
+            "remaining_seconds": remaining,
+            "remaining_minutes": round(remaining / 60, 1),
+            "remaining_hours": round(remaining / 3600, 2),
+            "refresh_ok": refresh_ok,
+        })
+    return jsonify({"has_token": True, "refresh_ok": refresh_ok, "exp": None})
 
 
 @app.post("/api/settings")

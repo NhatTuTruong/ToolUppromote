@@ -50,4 +50,11 @@ echo   2. Run: AffiliateOfferFilter.exe
 echo.
 echo On a NEW machine, copy the entire dist\ folder including ms-playwright\
 echo.
+echo IMPORTANT - Uppromote password on a NEW machine:
+echo   UPPROMOTE_PASSWORD=dpapi:... only works on the PC that encrypted it.
+echo   On the new PC, edit dist\.env and set plain password, e.g.:
+echo     UPPROMOTE_PASSWORD=YourPasswordHere
+echo   Or add UPPROMOTE_SKIP_DPAPI=1 to keep plain text when copying .env.
+echo   Tool will auto-encrypt dpapi on first run on that new PC.
+echo.
 pause

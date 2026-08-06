@@ -171,10 +171,12 @@ def ensure_edge_cdp_running(
     log: Optional[Callable[[str], None]] = None,
     wait_sec: float = 12.0,
     host: str = "127.0.0.1",
+    extra_args: list[str] | None = None,
 ) -> bool:
     """
     - Nếu CDP port đã mở: coi như Edge đã chạy -> OK.
     - Nếu chưa: tự mở Edge với --remote-debugging-port + --user-data-dir rồi chờ port lên.
+    - extra_args: thêm flag Chromium (vd. headless) — chỉ caller truyền, mặc định không đổi hành vi Collabs.
     """
 
     def _log(msg: str) -> None:
@@ -212,6 +214,8 @@ def ensure_edge_cdp_running(
         f"--remote-debugging-port={int(port)}",
         f"--user-data-dir={user_data_dir}",
     ]
+    if extra_args:
+        args.extend(str(a) for a in extra_args if str(a).strip())
 
     try:
         creationflags = 0

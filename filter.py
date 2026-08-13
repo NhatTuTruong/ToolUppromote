@@ -1597,6 +1597,8 @@ def discover_collabs_signup_url_with_redirect(
     storefront_url: str,
     timeout_sec: int = 20,
     should_stop: Callable[[], bool] | None = None,
+    browser_session: CollabsSignupBrowserSession | None = None,
+    skip_redirect: bool = False,
 ) -> str:
     """
     Tìm link đăng ký: thử domain chính (từ /meta.json) trước,
@@ -1606,18 +1608,31 @@ def discover_collabs_signup_url_with_redirect(
     if not original:
         return ""
 
-    main_domain = resolve_redirected_url(original, timeout_sec=timeout_sec)
-    if not main_domain:
+    if skip_redirect:
         main_domain = original
+    else:
+        main_domain = resolve_redirected_url(original, timeout_sec=timeout_sec)
+        if not main_domain:
+            main_domain = original
 
     # Thử domain chính trước (thường là homepage thật)
-    result = discover_collabs_signup_url(main_domain, timeout_sec=timeout_sec, should_stop=should_stop)
+    result = discover_collabs_signup_url(
+        main_domain,
+        timeout_sec=timeout_sec,
+        should_stop=should_stop,
+        browser_session=browser_session,
+    )
     if result and result != f"{main_domain.rstrip('/')}/pages/collab":
         return result
 
     # Fallback: thử storefront gốc
-    if main_domain != original:
-        result2 = discover_collabs_signup_url(original, timeout_sec=timeout_sec, should_stop=should_stop)
+    if not skip_redirect and main_domain != original:
+        result2 = discover_collabs_signup_url(
+            original,
+            timeout_sec=timeout_sec,
+            should_stop=should_stop,
+            browser_session=browser_session,
+        )
         if result2 and result2 != f"{original.rstrip('/')}/pages/collab":
             return result2
 
@@ -1668,11 +1683,69 @@ def _rank_signup_url(url: str) -> int:
     return 50
 
 
-async def _playwright_discover(site_url: str, timeout_sec: int, should_stop: Callable[[], bool] | None) -> tuple[str, bool]:
-    """
-    Core Playwright logic — tìm link collabs bằng trình duyệt thật.
-    Returns (url, has_cta) — url="" nếu không tìm được gì.
-    """
+def _collabs_signup_env_int(name: str, default: int, minimum: int = 0, maximum: int | None = None) -> int:
+    try:
+        value = int(os.getenv(name, str(default)) or str(default))
+    except Exception:
+        value = default
+    if value < minimum:
+        value = minimum
+    if maximum is not None and value > maximum:
+        value = maximum
+    return value
+
+
+def _collabs_signup_env_bool(name: str, default: bool = True) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _collabs_signup_block_route(route) -> None:
+    if route.request.resource_type in {"image", "stylesheet", "font", "media"}:
+        route.abort()
+    else:
+        route.continue_()
+
+
+def _collabs_signup_verify_candidates(
+    candidates: list[str],
+    *,
+    http_max: int,
+    should_stop: Callable[[], bool] | None,
+) -> tuple[str, bool, str, int]:
+    best_candidate_no_cta = ""
+    best_candidate_rank = 999
+
+    def _halt() -> bool:
+        return should_stop is not None and bool(should_stop())
+
+    for cand in candidates[: max(1, http_max)]:
+        if _halt():
+            break
+        try:
+            res = requests.get(cand, allow_redirects=True, timeout=8)
+            if not res.ok:
+                continue
+            text = res.text or ""
+            if _collabs_page_has_signup_cta(text):
+                return cand, True, best_candidate_no_cta, best_candidate_rank
+            rank = _rank_signup_url(cand)
+            if rank < best_candidate_rank and _page_has_affiliate_signals(text):
+                best_candidate_rank = rank
+                best_candidate_no_cta = cand
+        except Exception:
+            pass
+    return "", False, best_candidate_no_cta, best_candidate_rank
+
+
+def _playwright_discover_on_page(
+    page,
+    site_url: str,
+    timeout_sec: int,
+    should_stop: Callable[[], bool] | None,
+) -> tuple[str, bool]:
     raw = str(site_url or "").strip()
     if not raw:
         return "", False
@@ -1680,20 +1753,143 @@ async def _playwright_discover(site_url: str, timeout_sec: int, should_stop: Cal
     if not parsed.netloc:
         return "", False
     domain = f"{parsed.scheme or 'https'}://{parsed.netloc}"
+    nav_timeout_ms = max(3000, int(timeout_sec) * 1000)
+    path_probe_timeout_ms = _collabs_signup_env_int(
+        "COLLABS_SIGNUP_PATH_PROBE_TIMEOUT_MS", 8000, minimum=2000, maximum=30000
+    )
+    page_wait_sec = _collabs_signup_env_int("COLLABS_SIGNUP_PAGE_WAIT_MS", 200, minimum=0, maximum=2000) / 1000.0
+    max_path_probes = _collabs_signup_env_int("COLLABS_SIGNUP_MAX_PATH_PROBES", 8, minimum=0, maximum=len(COMMON_COLLAB_PATHS))
+    http_verify_max = _collabs_signup_env_int("COLLABS_SIGNUP_VERIFY_HTTP_MAX", 12, minimum=1, maximum=30)
+    browser_verify_max = _collabs_signup_env_int("COLLABS_SIGNUP_VERIFY_BROWSER_MAX", 5, minimum=0, maximum=15)
 
     def _halt() -> bool:
         return should_stop is not None and bool(should_stop())
 
+    candidates: list[str] = []
+
+    def _add_candidate(href: str) -> None:
+        if not href:
+            return
+        try:
+            cp = urlparse(href)
+            if cp.netloc and cp.netloc != parsed.netloc:
+                return
+            path = cp.path or ""
+            for pat in COLLAB_PATTERNS_RE:
+                if pat.search(path):
+                    full = href if href.startswith("http") else urljoin(domain.rstrip("/") + "/", href.lstrip("/"))
+                    if full not in candidates:
+                        candidates.append(full)
+                    break
+        except Exception:
+            pass
+
     try:
-        from playwright.async_api import async_playwright
-    except ImportError:
+        page.goto(domain, timeout=nav_timeout_ms, wait_until="domcontentloaded")
+    except Exception:
+        return "", False
+    if page_wait_sec > 0:
+        time.sleep(page_wait_sec)
+    if _halt():
         return "", False
 
-    playwright = None
-    browser = None
     try:
-        playwright = await async_playwright().start()
-        browser = await playwright.chromium.launch(
+        hrefs: list[str] = page.evaluate(
+            "() => Array.from(document.querySelectorAll('a[href]')).map(a => a.href)"
+        )
+        for href in hrefs or []:
+            _add_candidate(href)
+    except Exception:
+        pass
+
+    found_url, has_cta, best_no_cta, best_rank = _collabs_signup_verify_candidates(
+        sorted(candidates, key=_rank_signup_url),
+        http_max=http_verify_max,
+        should_stop=should_stop,
+    )
+    if has_cta and found_url:
+        return found_url, True
+
+    if not candidates and max_path_probes > 0:
+        for path in COMMON_COLLAB_PATHS[:max_path_probes]:
+            if _halt():
+                return best_no_cta, False
+            url_to_try = domain.rstrip("/") + path
+            try:
+                resp = page.goto(url_to_try, timeout=path_probe_timeout_ms, wait_until="commit")
+                if resp and resp.status in (200, 301, 302) and url_to_try not in candidates:
+                    candidates.append(url_to_try)
+            except Exception:
+                pass
+    elif candidates and max_path_probes > 0:
+        existing = {c.rstrip("/").lower() for c in candidates}
+        extra_paths = 0
+        for path in COMMON_COLLAB_PATHS:
+            if extra_paths >= min(3, max_path_probes):
+                break
+            url_to_try = domain.rstrip("/") + path
+            if url_to_try.rstrip("/").lower() in existing:
+                continue
+            if _halt():
+                return best_no_cta, False
+            try:
+                resp = page.goto(url_to_try, timeout=path_probe_timeout_ms, wait_until="commit")
+                if resp and resp.status in (200, 301, 302):
+                    candidates.append(url_to_try)
+                    extra_paths += 1
+            except Exception:
+                pass
+
+    if not candidates:
+        return best_no_cta, False
+
+    candidates.sort(key=_rank_signup_url)
+    found_url, has_cta, best_no_cta, best_rank = _collabs_signup_verify_candidates(
+        candidates,
+        http_max=http_verify_max,
+        should_stop=should_stop,
+    )
+    if has_cta and found_url:
+        return found_url, True
+
+    if browser_verify_max > 0:
+        for cand in candidates[:browser_verify_max]:
+            if _halt():
+                break
+            try:
+                resp = page.goto(cand, timeout=path_probe_timeout_ms, wait_until="domcontentloaded")
+                if resp and resp.status == 200:
+                    html = page.content()
+                    if _collabs_page_has_signup_cta(html):
+                        return cand, True
+                    rank = _rank_signup_url(cand)
+                    if rank < best_rank and _page_has_affiliate_signals(html):
+                        best_rank = rank
+                        best_no_cta = cand
+            except Exception:
+                pass
+
+    return best_no_cta, False
+
+
+class CollabsSignupBrowserSession:
+    """Giữ một Chromium Playwright mở để tái sử dụng khi quét nhiều brand Collabs."""
+
+    def __init__(self) -> None:
+        self._playwright = None
+        self._browser = None
+        self._context = None
+        self._route_bound = False
+
+    def start(self) -> None:
+        if self._browser is not None:
+            return
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            raise RuntimeError("Thiếu Playwright — cài playwright và chạy playwright install chromium") from exc
+        self._playwright = sync_playwright().start()
+        self._browser = self._playwright.chromium.launch(
             headless=True,
             args=[
                 "--disable-blink-features=AutomationControlled",
@@ -1701,137 +1897,87 @@ async def _playwright_discover(site_url: str, timeout_sec: int, should_stop: Cal
                 "--disable-setuid-sandbox",
             ],
         )
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        self._context = self._browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+            ),
             viewport={"width": 1920, "height": 1080},
             extra_http_headers={
                 "Accept-Language": "en-US,en;q=0.9",
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
             },
         )
-        page = await context.new_page()
-        await context.route("**/*", lambda route: route.abort() if route.request.resource_type == "image" else route.continue_())
+        if not self._route_bound:
+            self._context.route("**/*", _collabs_signup_block_route)
+            self._route_bound = True
 
-        # 1. Load homepage, scan links
-        await page.goto(domain, timeout=timeout_sec * 1000, wait_until="domcontentloaded")
-        await asyncio.sleep(0.5)
-
-        if _halt():
-            return "", False
-
-        candidates: list[str] = []
+    def discover(
+        self,
+        site_url: str,
+        timeout_sec: int = 20,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> tuple[str, bool]:
+        self.start()
+        page = self._context.new_page()
         try:
-            hrefs: list[str] = await page.evaluate("""
-                () => Array.from(document.querySelectorAll('a[href]')).map(a => a.href)
-            """)
-            for href in hrefs:
-                if not href:
-                    continue
-                try:
-                    cp = urlparse(href)
-                    if cp.netloc != parsed.netloc:
-                        continue
-                    for pat in COLLAB_PATTERNS_RE:
-                        if pat.search(cp.path or ""):
-                            full = href if href.startswith("http") else f"{domain.rstrip('/')}{href}"
-                            if full not in candidates:
-                                candidates.append(full)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-        # 2. Thử các path phổ biến
-        for path in COMMON_COLLAB_PATHS:
-            if _halt():
-                return "", False
-            url_to_try = domain.rstrip("/") + path
+            return _playwright_discover_on_page(page, site_url, timeout_sec, should_stop)
+        finally:
             try:
-                resp = await page.goto(url_to_try, timeout=15000, wait_until="domcontentloaded")
-                if resp and resp.status in (200, 301, 302):
-                    candidates.append(url_to_try)
+                page.close()
             except Exception:
                 pass
 
-        if not candidates:
-            return "", False
-
-        candidates.sort(key=_rank_signup_url)
-
-        # 3. Verify bằng HTTP để check CTA (nhanh hơn browser)
-        best_candidate_no_cta = ""
-        best_candidate_rank = 999
-        for cand in candidates[:20]:
-            if _halt():
-                return "", False
+    def close(self) -> None:
+        if self._context is not None:
             try:
-                res = requests.get(cand, allow_redirects=True, timeout=8)
-                if not res.ok:
-                    continue
-                text = res.text or ""
-                # Ưu tiên: trang có CTA → confirm affiliate
-                if _collabs_page_has_signup_cta(text):
-                    return cand, True
-                # Thứ yếu: trang có tín hiệu affiliate (form + keyword) → best guess
-                rank = _rank_signup_url(cand)
-                if rank < best_candidate_rank and _page_has_affiliate_signals(text):
-                    best_candidate_rank = rank
-                    best_candidate_no_cta = cand
+                self._context.close()
             except Exception:
                 pass
-
-        # 4. Verify bằng browser nếu HTTP fail hoặc chưa có CTA
-        for cand in candidates[:10]:
-            if _halt():
-                break
+            self._context = None
+            self._route_bound = False
+        if self._browser is not None:
             try:
-                resp = await page.goto(cand, timeout=15000, wait_until="domcontentloaded")
-                if resp and resp.status == 200:
-                    html: str = await page.content()
-                    if _collabs_page_has_signup_cta(html):
-                        return cand, True
-                    # Lưu best guess từ browser
-                    rank = _rank_signup_url(cand)
-                    if rank < best_candidate_rank and _page_has_affiliate_signals(html):
-                        best_candidate_rank = rank
-                        best_candidate_no_cta = cand
+                self._browser.close()
             except Exception:
                 pass
+            self._browser = None
+        if self._playwright is not None:
+            try:
+                self._playwright.stop()
+            except Exception:
+                pass
+            self._playwright = None
 
-        # Không tìm được trang có CTA → trả về candidate tốt nhất có tín hiệu affiliate
-        return best_candidate_no_cta, False
+    def __enter__(self) -> "CollabsSignupBrowserSession":
+        self.start()
+        return self
 
-    except Exception:
-        pass
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
+
+def _sync_discover_collabs(
+    site_url: str,
+    timeout_sec: int,
+    should_stop: Callable[[], bool] | None,
+    browser_session: CollabsSignupBrowserSession | None = None,
+) -> tuple[str, bool]:
+    if browser_session is not None and _collabs_signup_env_bool("COLLABS_SIGNUP_REUSE_BROWSER", True):
+        return browser_session.discover(site_url, timeout_sec=timeout_sec, should_stop=should_stop)
+
+    session = CollabsSignupBrowserSession()
+    try:
+        return session.discover(site_url, timeout_sec=timeout_sec, should_stop=should_stop)
     finally:
-        if browser:
-            await browser.close()
-        if playwright:
-            await playwright.stop()
-
-    return "", False
-
-
-def _sync_discover_collabs(site_url: str, timeout_sec: int, should_stop: Callable[[], bool] | None) -> tuple[str, bool]:
-    """Wrapper sync gọi async Playwright. Returns (url, has_cta)."""
-    parsed = urlparse(site_url if "://" in site_url else f"https://{site_url}")
-    if not parsed.netloc:
-        return "", False
-
-    try:
-        loop = asyncio.get_running_loop()
-        pass
-    except RuntimeError:
-        pass
-
-    try:
-        return asyncio.run(_playwright_discover(site_url, timeout_sec, should_stop))
-    except Exception:
-        return "", False
+        session.close()
 
 
 def discover_collabs_signup_url(
-    site_url: str, timeout_sec: int = 20, should_stop: Callable[[], bool] | None = None
+    site_url: str,
+    timeout_sec: int = 20,
+    should_stop: Callable[[], bool] | None = None,
+    browser_session: CollabsSignupBrowserSession | None = None,
 ) -> str:
     """
     Tìm link đăng ký collabs từ domain chính bằng Playwright (trình duyệt thật).
@@ -1851,7 +1997,9 @@ def discover_collabs_signup_url(
     base = f"{parsed.scheme or 'https'}://{parsed.netloc}"
 
     # Thử Playwright trước
-    found_url, has_cta = _sync_discover_collabs(raw, timeout_sec, should_stop)
+    found_url, has_cta = _sync_discover_collabs(
+        raw, timeout_sec, should_stop, browser_session=browser_session
+    )
 
     if found_url:
         if has_cta:

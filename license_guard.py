@@ -91,15 +91,13 @@ def _paths_ok() -> bool:
     )
 
 
-def _set_refersion_token_local(token: str) -> None:
-    """
-    Đồng bộ REFERSION_TOKEN vào môi trường chạy hiện tại + file .env cục bộ.
-    Bỏ qua khi token rỗng.
-    """
-    value = str(token or "").strip()
-    if not value:
+def _set_env_secret_local(key: str, value: str) -> None:
+    """Ghi một secret vào os.environ + .env (bỏ qua khi rỗng)."""
+    env_key = str(key or "").strip()
+    val = str(value or "").strip()
+    if not env_key or not val:
         return
-    os.environ["REFERSION_TOKEN"] = value
+    os.environ[env_key] = val
     if _ENV_PATH is None:
         return
     try:
@@ -107,12 +105,13 @@ def _set_refersion_token_local(token: str) -> None:
     except OSError:
         lines = []
 
-    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-    new_line = f'REFERSION_TOKEN="{escaped}"'
+    escaped = val.replace("\\", "\\\\").replace('"', '\\"')
+    prefix = f"{env_key}="
+    new_line = f'{env_key}="{escaped}"'
     updated = False
     out: list[str] = []
     for line in lines:
-        if line.startswith("REFERSION_TOKEN="):
+        if line.startswith(prefix):
             out.append(new_line)
             updated = True
             continue
@@ -123,6 +122,20 @@ def _set_refersion_token_local(token: str) -> None:
         _ENV_PATH.write_text("\n".join(out).rstrip() + "\n", encoding="utf-8")
     except OSError:
         return
+
+
+def _set_refersion_token_local(token: str) -> None:
+    """
+    Đồng bộ REFERSION_TOKEN vào môi trường chạy hiện tại + file .env cục bộ.
+    Bỏ qua khi token rỗng.
+    """
+    _set_env_secret_local("REFERSION_TOKEN", token)
+
+
+def _set_collabs_session_local(cookie: str, csrf_token: str) -> None:
+    """Đồng bộ COLLABS_COOKIE + COLLABS_CSRF_TOKEN vào .env cục bộ."""
+    _set_env_secret_local("COLLABS_COOKIE", cookie)
+    _set_env_secret_local("COLLABS_CSRF_TOKEN", csrf_token)
 
 
 def license_api_base_url() -> str:
@@ -273,6 +286,10 @@ def _activate_via_license_server(norm_key: str) -> tuple[bool, str]:
     usage_day = str(data.get("usage_day") or calendar_day_vietnam())
     used_today = max(0, int(data.get("used_today") or 0))
     _set_refersion_token_local(str(data.get("refersion_token") or ""))
+    _set_collabs_session_local(
+        str(data.get("collabs_cookie") or ""),
+        str(data.get("collabs_csrf_token") or ""),
+    )
     st = load_license_state()
     st["this_install"] = {
         "activation_id": activation_id,
@@ -364,6 +381,10 @@ def _sync_this_install_from_server() -> tuple[bool, str]:
     usage_day = str(remote_data.get("usage_day") or calendar_day_vietnam())
     used_today = max(0, int(remote_data.get("used_today") or 0))
     _set_refersion_token_local(str(remote_data.get("refersion_token") or ""))
+    _set_collabs_session_local(
+        str(remote_data.get("collabs_cookie") or ""),
+        str(remote_data.get("collabs_csrf_token") or ""),
+    )
     st["this_install"] = {
         **inst,
         "daily_limit": max(1, daily_limit),
@@ -801,6 +822,8 @@ def license_status_payload() -> dict:
         "auto_apply_collabs_enabled": auto_apply_collabs_flag,
         "auto_apply_refersion_enabled": auto_apply_refersion_flag,
         "refersion_token": (os.getenv("REFERSION_TOKEN") or "").strip(),
+        "collabs_cookie": (os.getenv("COLLABS_COOKIE") or "").strip(),
+        "collabs_csrf_token": (os.getenv("COLLABS_CSRF_TOKEN") or "").strip(),
         "message": msg,
     }
 

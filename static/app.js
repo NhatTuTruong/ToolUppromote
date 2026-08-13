@@ -614,7 +614,26 @@ async function saveSettings() {
   loadTokenStatus();
 }
 
-/** Ghi log vào DOM rồi chờ khung vẽ (double rAF) trước khi gửi ack — khớp thứ tự với worker. */
+async function resetEnvFromBackup() {
+  const ok = window.confirm(
+    "Khôi phục .env từ file env_backup?\n\nToàn bộ nội dung .env hiện tại sẽ bị thay thế. Thao tác này không thể hoàn tác."
+  );
+  if (!ok) return;
+  const res = await fetch("/api/settings/reset-env", { method: "POST" });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    alert(data.error || "Không reset được môi trường.");
+    return;
+  }
+  const settings = data.settings || {};
+  settingKeys.forEach((k) => {
+    if ($(k)) $(k).value = settings[k] || "";
+  });
+  closeAllSecretFieldRows();
+  loadTokenStatus();
+  alert("Đã khôi phục .env từ env_backup.");
+}
+
 async function appendLogs(lines) {
   const boxes = [logBox(), logBoxGp(), logBoxRf(), logBoxCb()].filter(Boolean);
   if (!lines || !lines.length) return;
@@ -2100,6 +2119,19 @@ function applyRefersionTokenFromLicense(lic) {
   input.value = token;
 }
 
+function applyCollabsSessionFromLicense(lic) {
+  const cookie = String(lic?.collabs_cookie || "").trim();
+  const csrf = String(lic?.collabs_csrf_token || "").trim();
+  const cookieInput = $("COLLABS_COOKIE");
+  const csrfInput = $("COLLABS_CSRF_TOKEN");
+  if (cookie && cookieInput && String(cookieInput.value || "") !== cookie) {
+    cookieInput.value = cookie;
+  }
+  if (csrf && csrfInput && String(csrfInput.value || "") !== csrf) {
+    csrfInput.value = csrf;
+  }
+}
+
 async function openApplyRefersionHistory(name) {
   if (!isAutoApplyRefersionEnabled()) {
     alert("Auto Refersion đang tắt trên server.");
@@ -2425,6 +2457,7 @@ async function loadLicense() {
     }
     renderLicenseStatus(lic);
     applyRefersionTokenFromLicense(lic);
+    applyCollabsSessionFromLicense(lic);
     applyLicenseSourceVisibility(lic);
     finishLicenseLoadingState();
     return lic;
@@ -2454,6 +2487,28 @@ async function refreshRefersionTokenFromServer() {
     if (input) input.value = token;
   } catch (_) {
     alert("Không lấy được token mới nhất từ server.");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function refreshCollabsSessionFromServer() {
+  const btn = $("refreshCollabsSessionBtn");
+  if (btn) btn.disabled = true;
+  try {
+    const lic = await loadLicense();
+    const cookie = String(lic?.collabs_cookie || "").trim();
+    const csrf = String(lic?.collabs_csrf_token || "").trim();
+    if (!cookie && !csrf) {
+      alert("Server chưa có Collabs cookie/CSRF token.");
+      return;
+    }
+    const cookieInput = $("COLLABS_COOKIE");
+    const csrfInput = $("COLLABS_CSRF_TOKEN");
+    if (cookieInput && cookie) cookieInput.value = cookie;
+    if (csrfInput && csrf) csrfInput.value = csrf;
+  } catch (_) {
+    alert("Không lấy được Collabs session mới nhất từ server.");
   } finally {
     if (btn) btn.disabled = false;
   }
@@ -3353,6 +3408,7 @@ function bindEvents() {
   if (endPageCb) endPageCb.addEventListener("change", persistEndPageCollabs);
   if (endPageCb) endPageCb.addEventListener("blur", persistEndPageCollabs);
   $("saveSettingsBtn").addEventListener("click", saveSettings);
+  $("resetEnvBtn")?.addEventListener("click", resetEnvFromBackup);
   $("runBtnUppromote").addEventListener("click", () => runFilter("uppromote"));
   $("runBtnGoaffpro").addEventListener("click", () => runFilter("goaffpro"));
   $("runBtnRefersion").addEventListener("click", () => runFilter("refersion"));
@@ -3432,6 +3488,8 @@ function bindEvents() {
   if (deLic) deLic.addEventListener("click", deactivateLicense);
   const refreshRfTokenBtn = $("refreshRefersionTokenBtn");
   if (refreshRfTokenBtn) refreshRfTokenBtn.addEventListener("click", refreshRefersionTokenFromServer);
+  const refreshCollabsSessionBtn = $("refreshCollabsSessionBtn");
+  if (refreshCollabsSessionBtn) refreshCollabsSessionBtn.addEventListener("click", refreshCollabsSessionFromServer);
   const ep = $("endPage");
   const egp = $("endPageGp");
   const erf = $("endPageRf");

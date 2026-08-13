@@ -20,6 +20,7 @@ class LicenseManagementController extends Controller
 {
     private const ADMIN_TABS = [
         'tab-refersion',
+        'tab-collabs',
         'tab-quick-key',
         'tab-activations',
         'tab-keys',
@@ -109,6 +110,8 @@ class LicenseManagementController extends Controller
             'refersionToken' => AppSetting::getValue('refersion_token', ''),
             'refersionIngestNonce' => $refersionIngestNonce,
             'refersionIngestUrl' => route('admin.settings.refersion_token.ingest'),
+            'collabsCookie' => AppSetting::getValue('collabs_cookie', ''),
+            'collabsCsrfToken' => AppSetting::getValue('collabs_csrf_token', ''),
         ]);
     }
 
@@ -191,6 +194,79 @@ class LicenseManagementController extends Controller
             'ok' => true,
             'token' => $token,
             'message' => 'Đã cập nhật Refersion token từ Edge CDP.',
+        ]);
+    }
+
+    public function updateCollabsSession(Request $request): RedirectResponse
+    {
+        $data = $request->validate([
+            'collabs_cookie' => ['nullable', 'string', 'max:20000'],
+            'collabs_csrf_token' => ['nullable', 'string', 'max:500'],
+        ]);
+
+        $cookie = trim((string) ($data['collabs_cookie'] ?? ''));
+        $csrf = trim((string) ($data['collabs_csrf_token'] ?? ''));
+
+        AppSetting::query()->updateOrCreate(
+            ['key' => 'collabs_cookie'],
+            ['value' => $cookie]
+        );
+        AppSetting::query()->updateOrCreate(
+            ['key' => 'collabs_csrf_token'],
+            ['value' => $csrf]
+        );
+
+        return $this->redirectToDashboard($request, 'tab-collabs')->with('success', 'Đã cập nhật Collabs cookie + CSRF token.');
+    }
+
+    public function refreshCollabsSessionFromEdge(Request $request): JsonResponse
+    {
+        $node = trim((string) env('NODE_BIN', 'node'));
+        $script = base_path('scripts/collabs_session_from_edge.mjs');
+        if (! is_file($script)) {
+            return response()->json(['ok' => false, 'error' => 'Thiếu script JS lấy Collabs session từ Edge CDP.'], 500);
+        }
+        $process = new Process([$node, $script], base_path());
+        $process->setTimeout(120);
+        try {
+            $process->run();
+        } catch (\Throwable $e) {
+            return response()->json(['ok' => false, 'error' => 'Không chạy được tiến trình Node: '.$e->getMessage()], 500);
+        }
+        $stdout = trim((string) $process->getOutput());
+        $stderr = trim((string) $process->getErrorOutput());
+        if (! $process->isSuccessful()) {
+            return response()->json([
+                'ok' => false,
+                'error' => $stderr !== '' ? $stderr : ($stdout !== '' ? $stdout : 'Lấy Collabs session từ Edge CDP thất bại.'),
+            ], 400);
+        }
+        $payload = json_decode($stdout, true);
+        if (! is_array($payload) || ! ($payload['ok'] ?? false)) {
+            return response()->json([
+                'ok' => false,
+                'error' => is_array($payload) ? (string) ($payload['error'] ?? 'Payload không hợp lệ.') : ($stdout ?: 'Payload không hợp lệ.'),
+            ], 400);
+        }
+        $cookie = trim((string) ($payload['cookie'] ?? ''));
+        $csrf = trim((string) ($payload['csrf_token'] ?? ''));
+        if ($cookie === '' || $csrf === '') {
+            return response()->json(['ok' => false, 'error' => 'Không đọc được cookie hoặc CSRF token Collabs từ Edge CDP.'], 400);
+        }
+        AppSetting::query()->updateOrCreate(
+            ['key' => 'collabs_cookie'],
+            ['value' => $cookie]
+        );
+        AppSetting::query()->updateOrCreate(
+            ['key' => 'collabs_csrf_token'],
+            ['value' => $csrf]
+        );
+
+        return response()->json([
+            'ok' => true,
+            'cookie' => $cookie,
+            'csrf_token' => $csrf,
+            'message' => 'Đã cập nhật Collabs cookie + CSRF token từ Edge CDP.',
         ]);
     }
 

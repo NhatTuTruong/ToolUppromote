@@ -17,6 +17,8 @@ Route::middleware('license.admin')->group(function (): void {
     Route::get('/admin', [LicenseManagementController::class, 'dashboard'])->name('admin.dashboard');
     Route::post('/admin/settings/refersion-token', [LicenseManagementController::class, 'updateRefersionToken'])->name('admin.settings.refersion_token');
     Route::post('/admin/settings/refersion-token/from-edge', [LicenseManagementController::class, 'refreshRefersionTokenFromEdge'])->name('admin.settings.refersion_token.from_edge');
+    Route::post('/admin/settings/collabs-session', [LicenseManagementController::class, 'updateCollabsSession'])->name('admin.settings.collabs_session');
+    Route::post('/admin/settings/collabs-session/from-edge', [LicenseManagementController::class, 'refreshCollabsSessionFromEdge'])->name('admin.settings.collabs_session.from_edge');
     Route::get('/admin/keys/export', [LicenseManagementController::class, 'exportKeys'])->name('admin.keys.export');
     Route::post('/admin/keys', [LicenseManagementController::class, 'storeKey'])->name('admin.keys.store');
     Route::post('/admin/keys/import', [LicenseManagementController::class, 'bulkImport'])->name('admin.keys.import');

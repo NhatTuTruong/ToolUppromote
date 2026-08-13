@@ -113,6 +113,8 @@ class LicenseController extends Controller
             'used_today' => $this->usedTodayForActivationId((int) $activation->id),
             'expires_at' => optional($license->expires_at)->toIso8601String(),
             'refersion_token' => $this->refersionToken(),
+            'collabs_cookie' => $this->collabsCookie(),
+            'collabs_csrf_token' => $this->collabsCsrfToken(),
         ]);
     }
 
@@ -176,6 +178,8 @@ class LicenseController extends Controller
             'expires_at' => optional($license->expires_at)->toIso8601String(),
             'key_hint' => $license->key_hint ?? substr($license->license_key, -6),
             'refersion_token' => $this->refersionToken(),
+            'collabs_cookie' => $this->collabsCookie(),
+            'collabs_csrf_token' => $this->collabsCsrfToken(),
         ]);
     }
 
@@ -262,5 +266,15 @@ class LicenseController extends Controller
     private function refersionToken(): string
     {
         return trim((string) AppSetting::getValue('refersion_token', ''));
+    }
+
+    private function collabsCookie(): string
+    {
+        return trim((string) AppSetting::getValue('collabs_cookie', ''));
+    }
+
+    private function collabsCsrfToken(): string
+    {
+        return trim((string) AppSetting::getValue('collabs_csrf_token', ''));
     }
 }

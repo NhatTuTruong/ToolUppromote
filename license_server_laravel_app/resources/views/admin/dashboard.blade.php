@@ -29,6 +29,7 @@
     @php($activeTab = $activeTab ?? 'tab-refersion')
     <div class="admin-tabs" role="tablist" aria-label="Tabs quản trị">
         <button type="button" class="tab-btn {{ $activeTab === 'tab-refersion' ? 'active' : '' }}" data-tab-target="tab-refersion" role="tab" aria-controls="tab-refersion" aria-selected="{{ $activeTab === 'tab-refersion' ? 'true' : 'false' }}">Token Refersion</button>
+        <button type="button" class="tab-btn {{ $activeTab === 'tab-collabs' ? 'active' : '' }}" data-tab-target="tab-collabs" role="tab" aria-controls="tab-collabs" aria-selected="{{ $activeTab === 'tab-collabs' ? 'true' : 'false' }}">Collabs session</button>
         <button type="button" class="tab-btn {{ $activeTab === 'tab-quick-key' ? 'active' : '' }}" data-tab-target="tab-quick-key" role="tab" aria-controls="tab-quick-key" aria-selected="{{ $activeTab === 'tab-quick-key' ? 'true' : 'false' }}">Thêm / Cập nhật key</button>
         <button type="button" class="tab-btn {{ $activeTab === 'tab-activations' ? 'active' : '' }}" data-tab-target="tab-activations" role="tab" aria-controls="tab-activations" aria-selected="{{ $activeTab === 'tab-activations' ? 'true' : 'false' }}">Activation</button>
         <button type="button" class="tab-btn {{ $activeTab === 'tab-keys' ? 'active' : '' }}" data-tab-target="tab-keys" role="tab" aria-controls="tab-keys" aria-selected="{{ $activeTab === 'tab-keys' ? 'true' : 'false' }}">Danh sách key</button>
@@ -54,6 +55,36 @@
                     </div>
                     <div class="form-actions">
                         <button type="submit" class="btn btn-primary">Lưu token</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    {{-- Tab: Collabs cookie + CSRF --}}
+    <div id="tab-collabs" class="tab-panel {{ $activeTab === 'tab-collabs' ? 'active' : '' }}">
+        <div class="card">
+            <div class="card-head">
+                <h3>Cập nhật Collabs cookie + CSRF</h3>
+                <p class="card-desc">Cookie request (COLLABS_COOKIE) và X-CSRF-Token (COLLABS_CSRF_TOKEN) dùng chung cho app client. Sau khi lưu, máy đã kích hoạt key sẽ tự đồng bộ vào phần Cài đặt.</p>
+            </div>
+            <div class="card-body">
+                <form method="post" action="{{ route('admin.settings.collabs_session') }}">
+                    @csrf
+                    <input type="hidden" name="tab" value="tab-collabs">
+                    <div class="token-field">
+                        <label class="field-label" for="collabs_cookie">Cookie request (COLLABS_COOKIE)</label>
+                        <textarea id="collabs_cookie" name="collabs_cookie" rows="4" autocomplete="off" placeholder="Dán cookie Collabs vào đây">{{ $collabsCookie ?? '' }}</textarea>
+                    </div>
+                    <div class="token-field" style="margin-top:14px;">
+                        <label class="field-label" for="collabs_csrf_token">X-CSRF-Token (COLLABS_CSRF_TOKEN)</label>
+                        <div class="flex-input-row">
+                            <input id="collabs_csrf_token" name="collabs_csrf_token" type="text" value="{{ $collabsCsrfToken ?? '' }}" autocomplete="off" placeholder="Dán CSRF token Collabs vào đây">
+                            <button id="btn-refresh-collabs-session" type="button" class="btn btn-warn" style="flex-shrink:0;" title="Lấy cookie + CSRF từ phiên Collabs đang đăng nhập trên trình duyệt">Update</button>
+                        </div>
+                    </div>
+                    <div class="form-actions">
+                        <button type="submit" class="btn btn-primary">Lưu session</button>
                     </div>
                 </form>
             </div>
@@ -402,6 +433,43 @@
             }
         });
 
+    })();
+</script>
+<script>
+    (function () {
+        var btn = document.getElementById('btn-refresh-collabs-session');
+        var cookieInput = document.getElementById('collabs_cookie');
+        var csrfInput = document.getElementById('collabs_csrf_token');
+        if (!btn || !cookieInput || !csrfInput) return;
+        var edgeApiUrl = @json(route('admin.settings.collabs_session.from_edge'));
+
+        btn.addEventListener('click', async function () {
+            btn.disabled = true;
+            try {
+                var res = await fetch(edgeApiUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-CSRF-TOKEN': @json(csrf_token())
+                    },
+                    body: JSON.stringify({})
+                });
+                var data = await res.json().catch(function () { return {}; });
+                if (!res.ok || !data.ok) {
+                    alert(data.error || 'Không lấy được Collabs session từ Edge CDP.');
+                    return;
+                }
+                cookieInput.value = String(data.cookie || '').trim();
+                csrfInput.value = String(data.csrf_token || '').trim();
+                cookieInput.dispatchEvent(new Event('input', { bubbles: true }));
+                csrfInput.dispatchEvent(new Event('input', { bubbles: true }));
+                alert(data.message || 'Đã cập nhật Collabs session từ Edge CDP.');
+            } catch (e) {
+                alert('Lỗi gọi backend lấy Collabs session: ' + (e && e.message ? e.message : e));
+            } finally {
+                btn.disabled = false;
+            }
+        });
     })();
 </script>
 <script>

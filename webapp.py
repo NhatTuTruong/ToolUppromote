@@ -40,6 +40,7 @@ from app import (
     filter_web_settings_payload,
     load_env_defaults,
     offer_passes_filters,
+    restore_env_from_backup,
     row_is_dat,
     save_env,
     validate_web_settings,
@@ -1029,123 +1030,130 @@ def fetch_offers_collabs(filters: dict) -> list:
     products_cache_ttl_sec = int(os.getenv("COLLABS_PRODUCTS_CACHE_TTL_SEC", "1800") or "1800")
     signup_by_host = {}
     product_links_by_store: dict[str, str] = {}
-    for idx, node in enumerate(raw_nodes, start=1):
-        STATE.control.wait_if_paused()
-        if STATE.control.should_stop():
-            STATE.add_log("Đã dừng.")
-            return []
-        detail_brand = {}
-        gid = core.collabs_shopify_store_gid(node)
-        if gid:
-            try:
-                detail_data = core.fetch_collabs_brand_profile(base_url, gid)
-                detail_brand = detail_data.get("brand") if isinstance(detail_data.get("brand"), dict) else {}
-            except Exception as exc:
-                STATE.add_log(f"Lỗi detail collabs ({gid}): {exc}")
-        mapped = core.map_collabs_brand(node, detail_brand)
-        store_id = str(mapped.get("collabs_shopify_store_id") or "").strip()
-        if store_id:
-            if store_id in product_links_by_store:
-                mapped["product_link"] = product_links_by_store.get(store_id, "")
-            else:
+    signup_browser_session = core.CollabsSignupBrowserSession()
+    signup_browser_session.start()
+    STATE.add_log("Collabs signup: tái sử dụng một trình duyệt Playwright cho toàn bộ batch.")
+    try:
+        for idx, node in enumerate(raw_nodes, start=1):
+            STATE.control.wait_if_paused()
+            if STATE.control.should_stop():
+                STATE.add_log("Đã dừng.")
+                return []
+            detail_brand = {}
+            gid = core.collabs_shopify_store_gid(node)
+            if gid:
                 try:
-                    now_ts = time.time()
-                    cached_links: list[dict] = []
-                    with COLLABS_PRODUCTS_CACHE_LOCK:
-                        c = COLLABS_PRODUCTS_CACHE.get(store_id) or {}
-                        built = float(c.get("built_at") or 0.0)
-                        if built and (now_ts - built) <= max(0, products_cache_ttl_sec):
-                            cached_links = list(c.get("links") or [])
-                    product_items = [x for x in cached_links if isinstance(x, dict) and str(x.get("url") or "").strip()]
-                    if not product_items:
-                        # Fast path: storefront products.json thường nhanh và trả product.url chuẩn hơn.
-                        sf_items = core.fetch_shopify_storefront_product_links(
-                            str(mapped.get("url") or "").strip(),
-                            max_count=products_target_links,
-                            max_pages=products_storefront_fallback_pages,
-                            should_stop=STATE.control.should_stop,
-                            delay_ms=products_delay_ms,
-                        )
-                        product_items = list(sf_items or [])
-                        # Chỉ gọi ProductsQuery nếu storefront chưa đủ mức tối thiểu mong muốn.
-                        if len(product_items) < max(1, products_query_min_fill):
-                            api_items = core.fetch_collabs_product_links(
-                                base_url,
-                                store_id,
-                                brand_name=str(mapped.get("brand") or ""),
-                                store_name=str((detail_brand or {}).get("name") or ""),
-                                first=products_first,
-                                max_pages=products_max_pages,
-                                target_count=products_target_links,
+                    detail_data = core.fetch_collabs_brand_profile(base_url, gid)
+                    detail_brand = detail_data.get("brand") if isinstance(detail_data.get("brand"), dict) else {}
+                except Exception as exc:
+                    STATE.add_log(f"Lỗi detail collabs ({gid}): {exc}")
+            mapped = core.map_collabs_brand(node, detail_brand)
+            store_id = str(mapped.get("collabs_shopify_store_id") or "").strip()
+            if store_id:
+                if store_id in product_links_by_store:
+                    mapped["product_link"] = product_links_by_store.get(store_id, "")
+                else:
+                    try:
+                        now_ts = time.time()
+                        cached_links: list[dict] = []
+                        with COLLABS_PRODUCTS_CACHE_LOCK:
+                            c = COLLABS_PRODUCTS_CACHE.get(store_id) or {}
+                            built = float(c.get("built_at") or 0.0)
+                            if built and (now_ts - built) <= max(0, products_cache_ttl_sec):
+                                cached_links = list(c.get("links") or [])
+                        product_items = [x for x in cached_links if isinstance(x, dict) and str(x.get("url") or "").strip()]
+                        if not product_items:
+                            # Fast path: storefront products.json thường nhanh và trả product.url chuẩn hơn.
+                            sf_items = core.fetch_shopify_storefront_product_links(
+                                str(mapped.get("url") or "").strip(),
+                                max_count=products_target_links,
+                                max_pages=products_storefront_fallback_pages,
                                 should_stop=STATE.control.should_stop,
                                 delay_ms=products_delay_ms,
                             )
-                            merged: list[dict] = []
-                            seen_merge: set[str] = set()
-                            for it in list(product_items) + list(api_items):
-                                if not isinstance(it, dict):
-                                    continue
-                                su = str(it.get("url") or "").strip()
-                                if not su or su in seen_merge:
-                                    continue
-                                seen_merge.add(su)
-                                merged.append(it)
-                            product_items = merged[:products_target_links]
-                        with COLLABS_PRODUCTS_CACHE_LOCK:
-                            COLLABS_PRODUCTS_CACHE[store_id] = {
-                                "links": list(product_items),
-                                "built_at": now_ts,
-                            }
-                    product_link_text = "\n".join(
-                        str((it or {}).get("line") or (it or {}).get("url") or "").strip()
-                        for it in product_items
-                        if isinstance(it, dict)
-                    ).strip()
-                    mapped["product_link"] = product_link_text
-                    product_links_by_store[store_id] = product_link_text
-                    if product_items:
-                        STATE.add_log(
-                            f"Collabs products: {mapped.get('brand') or store_id} -> {len(product_items)} link"
-                        )
-                except Exception as exc:
-                    STATE.add_log(f"Lỗi products collabs ({store_id}): {exc}")
-        storefront_url = str(mapped.get("url") or "").strip()
-        main_domain = ""
-        if storefront_url:
-            main_domain = core.resolve_redirected_url(
-                storefront_url, timeout_sec=redirect_timeout_sec
-            )
-            if main_domain:
-                mapped["url"] = main_domain
-                STATE.add_log(f"Collabs main domain: {storefront_url} -> {main_domain}")
-            else:
-                main_domain = storefront_url
-        hk = core.host_key(main_domain)
-        signup_url = ""
-        if main_domain:
-            signup_url = signup_by_host.get(hk, "")
-            if not signup_url:
-                signup_url = core.discover_collabs_signup_url_with_redirect(
-                    main_domain,
-                    timeout_sec=signup_timeout_sec,
-                    should_stop=STATE.control.should_stop,
+                            product_items = list(sf_items or [])
+                            # Chỉ gọi ProductsQuery nếu storefront chưa đủ mức tối thiểu mong muốn.
+                            if len(product_items) < max(1, products_query_min_fill):
+                                api_items = core.fetch_collabs_product_links(
+                                    base_url,
+                                    store_id,
+                                    brand_name=str(mapped.get("brand") or ""),
+                                    store_name=str((detail_brand or {}).get("name") or ""),
+                                    first=products_first,
+                                    max_pages=products_max_pages,
+                                    target_count=products_target_links,
+                                    should_stop=STATE.control.should_stop,
+                                    delay_ms=products_delay_ms,
+                                )
+                                merged: list[dict] = []
+                                seen_merge: set[str] = set()
+                                for it in list(product_items) + list(api_items):
+                                    if not isinstance(it, dict):
+                                        continue
+                                    su = str(it.get("url") or "").strip()
+                                    if not su or su in seen_merge:
+                                        continue
+                                    seen_merge.add(su)
+                                    merged.append(it)
+                                product_items = merged[:products_target_links]
+                            with COLLABS_PRODUCTS_CACHE_LOCK:
+                                COLLABS_PRODUCTS_CACHE[store_id] = {
+                                    "links": list(product_items),
+                                    "built_at": now_ts,
+                                }
+                        product_link_text = "\n".join(
+                            str((it or {}).get("line") or (it or {}).get("url") or "").strip()
+                            for it in product_items
+                            if isinstance(it, dict)
+                        ).strip()
+                        mapped["product_link"] = product_link_text
+                        product_links_by_store[store_id] = product_link_text
+                        if product_items:
+                            STATE.add_log(
+                                f"Collabs products: {mapped.get('brand') or store_id} -> {len(product_items)} link"
+                            )
+                    except Exception as exc:
+                        STATE.add_log(f"Lỗi products collabs ({store_id}): {exc}")
+            storefront_url = str(mapped.get("url") or "").strip()
+            main_domain = ""
+            if storefront_url:
+                main_domain = core.resolve_redirected_url(
+                    storefront_url, timeout_sec=redirect_timeout_sec
                 )
-                signup_by_host[hk] = signup_url
-        if signup_url:
-            mapped["client_url"] = signup_url
-            STATE.add_log(f"Collabs signup: {hk} -> {signup_url}")
-        offers.append(mapped)
-        if idx % 10 == 0 or idx == total_raw:
-            STATE.add_log(f"Collabs detail: {idx}/{total_raw}")
-        if total_raw > 0:
-            # Pha detail Collabs: 25% -> 55%
-            _set_progress_floor(25.0 + (idx / total_raw) * 30.0)
-        if detail_delay_ms > 0:
-            time.sleep(detail_delay_ms / 1000)
-        if redirect_delay_ms > 0:
-            time.sleep(redirect_delay_ms / 1000)
-        if signup_delay_ms > 0:
-            time.sleep(signup_delay_ms / 1000)
+                if main_domain:
+                    mapped["url"] = main_domain
+                    STATE.add_log(f"Collabs main domain: {storefront_url} -> {main_domain}")
+                else:
+                    main_domain = storefront_url
+            hk = core.host_key(main_domain)
+            signup_url = ""
+            if main_domain:
+                signup_url = signup_by_host.get(hk, "")
+                if not signup_url:
+                    signup_url = core.discover_collabs_signup_url(
+                        main_domain,
+                        timeout_sec=signup_timeout_sec,
+                        should_stop=STATE.control.should_stop,
+                        browser_session=signup_browser_session,
+                    )
+                    signup_by_host[hk] = signup_url
+            if signup_url:
+                mapped["client_url"] = signup_url
+                STATE.add_log(f"Collabs signup: {hk} -> {signup_url}")
+            offers.append(mapped)
+            if idx % 10 == 0 or idx == total_raw:
+                STATE.add_log(f"Collabs detail: {idx}/{total_raw}")
+            if total_raw > 0:
+                # Pha detail Collabs: 25% -> 55%
+                _set_progress_floor(25.0 + (idx / total_raw) * 30.0)
+            if detail_delay_ms > 0:
+                time.sleep(detail_delay_ms / 1000)
+            if redirect_delay_ms > 0:
+                time.sleep(redirect_delay_ms / 1000)
+            if signup_delay_ms > 0:
+                time.sleep(signup_delay_ms / 1000)
+    finally:
+        signup_browser_session.close()
     return offers
 
 
@@ -1453,6 +1461,21 @@ def api_save_settings():
     except ValueError as exc:
         return jsonify({"ok": False, "error": str(exc)}), 400
     return jsonify({"ok": True})
+
+
+@app.post("/api/settings/reset-env")
+def api_reset_env_from_backup():
+    try:
+        restore_env_from_backup()
+    except FileNotFoundError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 404
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    except OSError as exc:
+        return jsonify({"ok": False, "error": f"Không ghi được .env: {exc}"}), 500
+    core.load_env_file(ENV_PATH)
+    _refresh_license_env_from_file()
+    return jsonify({"ok": True, "settings": load_env_defaults()})
 
 
 @app.get("/api/license")

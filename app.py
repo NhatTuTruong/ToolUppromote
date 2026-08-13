@@ -15,6 +15,7 @@ from runtime_paths import app_dir
 
 BASE_DIR = app_dir()
 ENV_PATH = BASE_DIR / ".env"
+ENV_BACKUP_PATH = BASE_DIR / "env_backup"
 
 
 class RunControl:
@@ -226,6 +227,21 @@ def save_env(values: dict):
     if "APIFY_TOKENS" in merged and str(merged.get("APIFY_TOKENS") or "").strip():
         os.environ["APIFY_TOKENS"] = str(merged["APIFY_TOKENS"]).replace("\r\n", "\n")
         core.sync_apify_token_env()
+
+
+def restore_env_from_backup() -> None:
+    """Ghi đè .env bằng nội dung file env_backup và nạp lại biến môi trường."""
+    if not ENV_BACKUP_PATH.exists():
+        raise FileNotFoundError("Thiếu file env_backup cạnh .env.")
+    content = ENV_BACKUP_PATH.read_text(encoding="utf-8-sig")
+    if not content.strip():
+        raise ValueError("File env_backup trống.")
+    ENV_PATH.write_text(content if content.endswith("\n") else content + "\n", encoding="utf-8")
+    merged = core.parse_env_file(ENV_PATH)
+    for k, v in merged.items():
+        if k:
+            os.environ[k] = v
+    core.sync_apify_token_env()
 
 
 def apply_settings_for_run(settings: dict):

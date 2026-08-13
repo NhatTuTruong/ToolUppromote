@@ -403,9 +403,15 @@ def fetch_offers_uppromote(filters: dict) -> list:
     )
 
     brand_cap = core.net_sources_max_brands_per_run()
+    category_api_ids = core.uppromote_category_api_ids_from_filters(filters)
     filters["_net_fetch_start_page"] = start_page
     filters["_net_fetch_end_page"] = start_page
     STATE.add_log(f"Uppromote: giới hạn tối đa {brand_cap} brand mỗi lần lọc (trước Apify).")
+    if category_api_ids:
+        STATE.add_log(
+            "Uppromote: lọc theo danh mục qua API — "
+            + ", ".join(f"categories[{i}]={cid}" for i, cid in enumerate(category_api_ids))
+        )
 
     raw_offers = []
     page = start_page
@@ -415,7 +421,9 @@ def fetch_offers_uppromote(filters: dict) -> list:
             STATE.add_log("Đã dừng.")
             return []
         STATE.add_log(f"Uppromote trang {page}: đang tải...")
-        body = core.fetch_uppromote_page(base_url, page)
+        body = core.fetch_uppromote_page(
+            base_url, page, category_ids=category_api_ids or None
+        )
         payload = body.get("data") or {}
         page_items = payload.get("data") or []
         if not isinstance(page_items, list):

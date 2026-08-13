@@ -439,7 +439,13 @@ def offer_passes_filters(offer: dict, filters: dict, source: str = "uppromote") 
         review = str(offer.get("application_review") or "").strip().lower()
         if review != app_review:
             return False
-    if not is_goaff and categories:
+    filter_by_category_api = str(filters.get("filter_by_category") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    } or filters.get("filter_by_category") is True
+    if not is_goaff and categories and not filter_by_category_api:
         offer_category = (
             str(offer.get("collabs_product_category_code") or "").strip().lower()
             if is_collabs

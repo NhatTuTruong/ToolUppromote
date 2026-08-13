@@ -51,6 +51,29 @@ body {
 }
 .form-grid.compact { grid-template-columns: repeat(3, 1fr); }
 .filter-field-full { grid-column: 1 / -1; }
+.form-grid label.filter-checkbox-row {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 4px;
+  padding: 0;
+  cursor: pointer;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+}
+.form-grid label.filter-checkbox-row input[type="checkbox"] {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+.form-grid label.filter-checkbox-row span {
+  line-height: 1.35;
+}
 .multi-select {
   position: relative;
   width: 100%;

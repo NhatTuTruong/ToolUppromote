@@ -863,12 +863,87 @@ def format_collabs_holding_period(raw) -> str:
     return f"{n:g} day"
 
 
-def with_page(url: str, page: int) -> str:
+UPPROMOTE_CATEGORY_API_IDS: dict[str, int] = {
+    "Art": 9,
+    "Adult products": 20,
+    "Automobiles & Motorcycles": 13,
+    "Baby & Toddler": 30,
+    "Beauty & Health": 3,
+    "Books": 10,
+    "Bundles": 31,
+    "Business & Industrial": 32,
+    "Business & Professional services": 21,
+    "Cameras & Optics": 33,
+    "Computers & Office": 14,
+    "Education & Training": 22,
+    "Electronics": 15,
+    "Fashion": 1,
+    "Furniture": 23,
+    "Gaming": 18,
+    "Garden & Outdoors": 6,
+    "Gift Cards": 34,
+    "Grocery & Food": 7,
+    "Hardware": 35,
+    "Home & Tools": 5,
+    "Jewelry & Accessories": 2,
+    "Luggage & Bags": 36,
+    "Media": 24,
+    "Mom & Kids": 11,
+    "Pet supplies": 8,
+    "Phone & Telecommunication": 16,
+    "Product Add-Ons": 37,
+    "Religion & Spirituality": 25,
+    "Retail & Consumer goods": 26,
+    "Software & Digital products": 17,
+    "Sports & Entertainment": 4,
+    "Tobacco products": 27,
+    "Toys & Hobbies": 12,
+    "Travel": 28,
+    "Vehicles & Parts": 38,
+    "Wellness & Lifestyle": 29,
+    "Others": 19,
+    "Uncategorized": 39,
+}
+
+
+def _truthy_filter_flag(raw) -> bool:
+    if isinstance(raw, bool):
+        return raw
+    return str(raw or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def uppromote_category_api_ids_from_filters(filters: dict | None) -> list[int]:
+    if not filters or not _truthy_filter_flag(filters.get("filter_by_category")):
+        return []
+    names = filters.get("categories") or filters.get("category") or []
+    if isinstance(names, str):
+        names = [names]
+    ids: list[int] = []
+    seen: set[int] = set()
+    for raw_name in names:
+        name = str(raw_name or "").strip()
+        if not name:
+            continue
+        cid = UPPROMOTE_CATEGORY_API_IDS.get(name)
+        if cid is None or cid in seen:
+            continue
+        seen.add(cid)
+        ids.append(cid)
+    return ids
+
+
+def with_page(url: str, page: int, category_ids: list[int] | None = None) -> str:
     parsed = urlparse(url)
     query = dict(parse_qsl(parsed.query, keep_blank_values=True))
     query["page"] = str(page)
     # Always force per_page from env for consistent paging.
     query["per_page"] = os.getenv("UPPROMOTE_PER_PAGE", str(DEFAULT_OFFERS_PER_PAGE))
+    for key in list(query):
+        if key == "categories" or key.startswith("categories["):
+            del query[key]
+    if category_ids:
+        for idx, cid in enumerate(category_ids):
+            query[f"categories[{idx}]"] = str(int(cid))
     new_query = urlencode(query, doseq=True)
     return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
 
@@ -3869,8 +3944,13 @@ def map_uppromote_offer(offer: dict, detail: dict | None = None) -> dict:
     }
 
 
-def fetch_uppromote_page(base_url: str, page: int, _retry_after_login: bool = False) -> dict:
-    request_url = with_page(base_url, page)
+def fetch_uppromote_page(
+    base_url: str,
+    page: int,
+    category_ids: list[int] | None = None,
+    _retry_after_login: bool = False,
+) -> dict:
+    request_url = with_page(base_url, page, category_ids=category_ids)
     res = requests.get(request_url, headers=build_uppromote_headers(), timeout=60)
     text = res.text
 
@@ -3879,7 +3959,9 @@ def fetch_uppromote_page(base_url: str, page: int, _retry_after_login: bool = Fa
         _uppromote_ui_log("Token hết hạn (401) — đang tự động đăng nhập lại (Edge ẩn)...")
         if _auto_login_uppromote_browser():
             _uppromote_ui_log("Đăng nhập lại thành công — token đã cập nhật, tiếp tục tải offer.")
-            return fetch_uppromote_page(base_url, page, _retry_after_login=True)
+            return fetch_uppromote_page(
+                base_url, page, category_ids=category_ids, _retry_after_login=True
+            )
         raise RuntimeError("Uppromote auto-login thất bại, không lấy được token mới.")
 
     try:

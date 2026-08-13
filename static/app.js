@@ -1011,6 +1011,7 @@ function collectFilters(source) {
     application_review: $("applicationReview").value.trim(),
     min_payout_rate: $("minPayoutRate").value.trim(),
     min_approval_rate: $("minApprovalRate").value.trim(),
+    filter_by_category: Boolean($("filterByCategoryUppromote")?.checked),
     categories: collectCheckedValues("#categoryUppromoteGroup"),
     payment_methods: collectCheckedValues("#paymentMethodUppromoteGroup"),
   };
